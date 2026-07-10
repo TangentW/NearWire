@@ -1,0 +1,10 @@
+COMMAND:
+ ./Scripts/verify-structure.sh
+RUN_ID: 20260710T213802Z-20165
+GATE_ID: structure
+STARTED_AT_UTC: 2026-07-10T21:38:03Z
+
+Repository structure verification passed.
+
+EXIT_STATUS: 0
+FINISHED_AT_UTC: 2026-07-10T21:38:03Z

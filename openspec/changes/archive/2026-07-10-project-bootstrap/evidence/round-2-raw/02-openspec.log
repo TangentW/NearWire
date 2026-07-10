@@ -1,0 +1,11 @@
+COMMAND:
+ env DO_NOT_TRACK=1 openspec --no-color validate --all --strict --no-interactive
+RUN_ID: 20260710T213802Z-20165
+GATE_ID: openspec
+STARTED_AT_UTC: 2026-07-10T21:38:02Z
+
+✓ change/project-bootstrap
+Totals: 1 passed, 0 failed (1 items)
+
+EXIT_STATUS: 0
+FINISHED_AT_UTC: 2026-07-10T21:38:03Z

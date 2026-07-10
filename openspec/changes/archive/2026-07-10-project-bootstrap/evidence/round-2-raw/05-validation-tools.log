@@ -1,0 +1,13 @@
+COMMAND:
+ ./Scripts/Tests/validation-tools.sh
+RUN_ID: 20260710T213802Z-20165
+GATE_ID: validation-tools
+STARTED_AT_UTC: 2026-07-10T21:38:03Z
+
+Evidence capture failure tests passed.
+Simulator state restoration tests passed.
+Distribution contract mutation tests passed.
+Validation tool tests passed.
+
+EXIT_STATUS: 0
+FINISHED_AT_UTC: 2026-07-10T21:38:09Z
