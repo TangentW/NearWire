@@ -129,6 +129,7 @@ public enum EventPriority: String, Codable, Hashable, Sendable {
   case low
   case normal
   case high
+  case critical
 }
 
 public struct EventSequence: Codable, Hashable, Sendable {

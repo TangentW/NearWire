@@ -10,7 +10,7 @@ An `EventDraft` contains only values supplied before a connection assigns sessio
 | --- | --- |
 | `type` | Validated event type. User event types cannot use the `nearwire` namespace. |
 | `content` | Bounded JSON-compatible content. |
-| `priority` | Local queue priority: low, normal, or high. It is not a delivery guarantee. |
+| `priority` | Local queue priority: low, normal, high, or critical. It is not a delivery guarantee. |
 | `ttl` | Positive lifetime in milliseconds; the default is 60,000 milliseconds. |
 | `causality` | Optional correlation and reply-to event identifiers. |
 
