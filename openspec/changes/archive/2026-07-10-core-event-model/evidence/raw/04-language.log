@@ -1,0 +1,10 @@
+COMMAND:
+ ./Scripts/verify-english.sh
+RUN_ID: 20260710T222748Z-85587
+GATE_ID: language
+STARTED_AT_UTC: 2026-07-10T22:27:50Z
+
+CJK character scan passed. Human review remains required for semantic language compliance.
+
+EXIT_STATUS: 0
+FINISHED_AT_UTC: 2026-07-10T22:27:50Z

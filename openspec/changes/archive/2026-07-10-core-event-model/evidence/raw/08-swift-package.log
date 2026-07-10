@@ -1,0 +1,221 @@
+COMMAND:
+ ./Scripts/verify-package.sh
+RUN_ID: 20260710T222748Z-85587
+GATE_ID: swift-package
+STARTED_AT_UTC: 2026-07-10T22:27:56Z
+
+Core package fixture parity passed.
+Building for debugging...
+[0/1] Write swift-version--58304C5D6DBC2206.txt
+Build complete! (0.11s)
+Building for debugging...
+[0/1] Write swift-version--58304C5D6DBC2206.txt
+Build of target: 'NearWireCore' complete! (0.11s)
+Building for debugging...
+[0/1] Write swift-version--58304C5D6DBC2206.txt
+Build of target: 'NearWireTransport' complete! (0.11s)
+Building for debugging...
+[0/1] Write swift-version--58304C5D6DBC2206.txt
+Build of target: 'NearWireFlowControl' complete! (0.11s)
+Building for debugging...
+[0/1] Write swift-version--58304C5D6DBC2206.txt
+Build of target: 'NearWireTestSupport' complete! (0.11s)
+2026-07-11 06:28:01.895 xcodebuild[87209:22739074] [MT] IDERunDestination: Supported platforms for the buildables in the current scheme is empty.
+Writing result bundle at path:
+	/tmp/nearwire-package-harness.AhcQqC/NearWire-iOS.xcresult
+
+2026-07-11 06:28:13.461 xcodebuild[87209:22739074] [MT] IDETestOperationsObserverDebug: 5.330 elapsed -- Testing started completed.
+2026-07-11 06:28:13.461 xcodebuild[87209:22739074] [MT] IDETestOperationsObserverDebug: 0.000 sec, +0.000 sec -- start
+2026-07-11 06:28:13.461 xcodebuild[87209:22739074] [MT] IDETestOperationsObserverDebug: 5.330 sec, +5.330 sec -- end
+Testing started
+{
+  "devicesAndConfigurations" : [
+    {
+      "device" : {
+        "architecture" : "arm64",
+        "deviceId" : "28489DFE-9F3F-4746-98C6-F956F47FEC0C",
+        "deviceName" : "iPhone 17 Pro",
+        "modelName" : "iPhone 17 Pro",
+        "osBuildNumber" : "23E244",
+        "osVersion" : "26.4",
+        "platform" : "iOS Simulator"
+      },
+      "expectedFailures" : 0,
+      "failedTests" : 0,
+      "passedTests" : 37,
+      "skippedTests" : 0,
+      "testPlanConfiguration" : {
+        "configurationId" : "1",
+        "configurationName" : "Test Scheme Action"
+      }
+    }
+  ],
+  "environmentDescription" : "NearWire-Package · Built with macOS 26.5.1",
+  "expectedFailures" : 0,
+  "failedTests" : 0,
+  "finishTime" : 1783722493.476,
+  "passedTests" : 37,
+  "result" : "Passed",
+  "skippedTests" : 0,
+  "startTime" : 1783722481.97,
+  "statistics" : [
+
+  ],
+  "testFailures" : [
+
+  ],
+  "title" : "Test - NearWire-Package",
+  "topInsights" : [
+    {
+      "category" : "Longest Test Runs",
+      "impact" : "91% of duration",
+      "text" : "1 longest test run with outlier durations exceeding 0.24s (three standard deviations)"
+    }
+  ],
+  "totalTestCount" : 37
+}
+Building for debugging...
+[0/13] /tmp/nearwire-package-harness.AhcQqC/CoreHarnessBuild/arm64-apple-macosx/debug/NearWireCoreHarnessPackageTests.derived/runner.swift
+[1/13] Write sources
+[10/13] Write swift-version--58304C5D6DBC2206.txt
+[12/23] Compiling NearWireCore EventType.swift
+[13/23] Compiling NearWireCore JSONValue.swift
+[14/24] Compiling NearWireCore EventModelError.swift
+[15/24] Compiling NearWireCore EventValidationLimits.swift
+[16/24] Compiling NearWireCore EventMetadata.swift
+[17/24] Compiling NearWireCore EventDraft.swift
+[18/24] Compiling NearWireCore EventContentCodec.swift
+[19/24] Emitting module NearWireCore
+[20/24] Compiling NearWireCore EventEnvelope.swift
+[21/24] Compiling NearWireCore PerformanceSnapshot.swift
+[22/24] Compiling NearWireCore NearWireCoreModule.swift
+[23/35] Compiling NearWireTransport NearWireTransportModule.swift
+[24/35] Emitting module NearWireTransport
+[25/35] Emitting module NearWireFlowControl
+[26/35] Compiling NearWireFlowControl NearWireFlowControlModule.swift
+[27/41] Emitting module NearWireTestSupport
+[28/41] Compiling NearWireTestSupport NearWireTestSupportModule.swift
+[29/43] Emitting module NearWireTestSupportTests
+[30/43] Compiling NearWireTestSupportTests ModuleSmokeTests.swift
+[31/43] Emitting module NearWireFlowControlTests
+[32/43] Compiling NearWireFlowControlTests ModuleSmokeTests.swift
+[33/43] Compiling NearWireTransportTests ModuleSmokeTests.swift
+[34/43] Emitting module NearWireTransportTests
+[35/43] Compiling NearWireCoreTests PerformanceSnapshotTests.swift
+[36/43] Compiling NearWireCoreTests ModuleSmokeTests.swift
+[37/43] Compiling NearWireCoreTests EventTestSupport.swift
+[38/43] Compiling NearWireCoreTests JSONValueTests.swift
+[39/43] Compiling NearWireCoreTests EventMetadataTests.swift
+[40/43] Emitting module NearWireCoreTests
+[41/43] Compiling NearWireCoreTests EventEnvelopeTests.swift
+[42/45] Compiling NearWireCoreHarnessPackageTests runner.swift
+[43/45] Emitting module NearWireCoreHarnessPackageTests
+[43/45] Write Objects.LinkFileList
+[44/45] Linking NearWireCoreHarnessPackageTests
+Build complete! (9.74s)
+Test Suite 'All tests' started at 2026-07-11 06:28:24.596.
+Test Suite 'NearWireCoreHarnessPackageTests.xctest' started at 2026-07-11 06:28:24.597.
+Test Suite 'EventEnvelopeTests' started at 2026-07-11 06:28:24.597.
+Test Case '-[NearWireCoreTests.EventEnvelopeTests testAggregateDecodeAppliesOneCustomLimitSet]' started.
+Test Case '-[NearWireCoreTests.EventEnvelopeTests testAggregateDecodeAppliesOneCustomLimitSet]' passed (0.002 seconds).
+Test Case '-[NearWireCoreTests.EventEnvelopeTests testAggregateDecodeBoundsUnknownBytesAndTaggedDepthBeforeMaterialization]' started.
+Test Case '-[NearWireCoreTests.EventEnvelopeTests testAggregateDecodeBoundsUnknownBytesAndTaggedDepthBeforeMaterialization]' passed (0.002 seconds).
+Test Case '-[NearWireCoreTests.EventEnvelopeTests testDraftCodableRoundTripUsesCompactContentAndCustomLimits]' started.
+Test Case '-[NearWireCoreTests.EventEnvelopeTests testDraftCodableRoundTripUsesCompactContentAndCustomLimits]' passed (0.000 seconds).
+Test Case '-[NearWireCoreTests.EventEnvelopeTests testEnvelopeRejectsDirectionAndTimestampInvariants]' started.
+Test Case '-[NearWireCoreTests.EventEnvelopeTests testEnvelopeRejectsDirectionAndTimestampInvariants]' passed (0.000 seconds).
+Test Case '-[NearWireCoreTests.EventEnvelopeTests testEnvelopeRoundTripAndUnknownFieldCompatibility]' started.
+Test Case '-[NearWireCoreTests.EventEnvelopeTests testEnvelopeRoundTripAndUnknownFieldCompatibility]' passed (0.000 seconds).
+Test Case '-[NearWireCoreTests.EventEnvelopeTests testFactoryDeterministicallyEnrichesDraft]' started.
+Test Case '-[NearWireCoreTests.EventEnvelopeTests testFactoryDeterministicallyEnrichesDraft]' passed (0.000 seconds).
+Test Case '-[NearWireCoreTests.EventEnvelopeTests testMissingRequiredFieldFailsWithTypedEnvelopeError]' started.
+Test Case '-[NearWireCoreTests.EventEnvelopeTests testMissingRequiredFieldFailsWithTypedEnvelopeError]' passed (0.001 seconds).
+Test Case '-[NearWireCoreTests.EventEnvelopeTests testNearContentLimitCompactTaggedEnvelopeRoundTrips]' started.
+Test Case '-[NearWireCoreTests.EventEnvelopeTests testNearContentLimitCompactTaggedEnvelopeRoundTrips]' passed (0.447 seconds).
+Test Suite 'EventEnvelopeTests' passed at 2026-07-11 06:28:25.052.
+	 Executed 8 tests, with 0 failures (0 unexpected) in 0.454 (0.454) seconds
+Test Suite 'EventMetadataTests' started at 2026-07-11 06:28:25.052.
+Test Case '-[NearWireCoreTests.EventMetadataTests testCanonicalUUIDIdentifiers]' started.
+Test Case '-[NearWireCoreTests.EventMetadataTests testCanonicalUUIDIdentifiers]' passed (0.000 seconds).
+Test Case '-[NearWireCoreTests.EventMetadataTests testEndpointIdentifiersAndDirectionRoles]' started.
+Test Case '-[NearWireCoreTests.EventMetadataTests testEndpointIdentifiersAndDirectionRoles]' passed (0.000 seconds).
+Test Case '-[NearWireCoreTests.EventMetadataTests testEventTypeNamespacesAndGrammar]' started.
+Test Case '-[NearWireCoreTests.EventMetadataTests testEventTypeNamespacesAndGrammar]' passed (0.000 seconds).
+Test Case '-[NearWireCoreTests.EventMetadataTests testSchemaSequenceAndCausalityRoundTrip]' started.
+Test Case '-[NearWireCoreTests.EventMetadataTests testSchemaSequenceAndCausalityRoundTrip]' passed (0.000 seconds).
+Test Case '-[NearWireCoreTests.EventMetadataTests testTTLDefaultsBoundsAndOverflowSafeExpiration]' started.
+Test Case '-[NearWireCoreTests.EventMetadataTests testTTLDefaultsBoundsAndOverflowSafeExpiration]' passed (0.000 seconds).
+Test Suite 'EventMetadataTests' passed at 2026-07-11 06:28:25.052.
+	 Executed 5 tests, with 0 failures (0 unexpected) in 0.001 (0.001) seconds
+Test Suite 'JSONValueTests' started at 2026-07-11 06:28:25.052.
+Test Case '-[NearWireCoreTests.JSONValueTests testCodableBridgeUsesStableDateAndBase64]' started.
+Test Case '-[NearWireCoreTests.JSONValueTests testCodableBridgeUsesStableDateAndBase64]' passed (0.002 seconds).
+Test Case '-[NearWireCoreTests.JSONValueTests testContentCodecPropagatesCustomLimitsToNestedModels]' started.
+Test Case '-[NearWireCoreTests.JSONValueTests testContentCodecPropagatesCustomLimitsToNestedModels]' passed (0.000 seconds).
+Test Case '-[NearWireCoreTests.JSONValueTests testDecodeFailureDoesNotMutateOriginalContent]' started.
+Test Case '-[NearWireCoreTests.JSONValueTests testDecodeFailureDoesNotMutateOriginalContent]' passed (0.000 seconds).
+Test Case '-[NearWireCoreTests.JSONValueTests testEveryJSONCaseRoundTripsDeterministically]' started.
+Test Case '-[NearWireCoreTests.JSONValueTests testEveryJSONCaseRoundTripsDeterministically]' passed (0.000 seconds).
+Test Case '-[NearWireCoreTests.JSONValueTests testIntegerAndFloatingPointIntentRemainDistinct]' started.
+Test Case '-[NearWireCoreTests.JSONValueTests testIntegerAndFloatingPointIntentRemainDistinct]' passed (0.000 seconds).
+Test Case '-[NearWireCoreTests.JSONValueTests testInvalidNumbersFailWithoutProducingAValue]' started.
+Test Case '-[NearWireCoreTests.JSONValueTests testInvalidNumbersFailWithoutProducingAValue]' passed (0.000 seconds).
+Test Case '-[NearWireCoreTests.JSONValueTests testInvalidValidationConfigurationsFail]' started.
+Test Case '-[NearWireCoreTests.JSONValueTests testInvalidValidationConfigurationsFail]' passed (0.000 seconds).
+Test Case '-[NearWireCoreTests.JSONValueTests testNonJSONCodableValueIsRejected]' started.
+Test Case '-[NearWireCoreTests.JSONValueTests testNonJSONCodableValueIsRejected]' passed (0.000 seconds).
+Test Case '-[NearWireCoreTests.JSONValueTests testStructuralLimitsReportStablePaths]' started.
+Test Case '-[NearWireCoreTests.JSONValueTests testStructuralLimitsReportStablePaths]' passed (0.000 seconds).
+Test Case '-[NearWireCoreTests.JSONValueTests testTaggedCodableRoundTripPreservesNumericCases]' started.
+Test Case '-[NearWireCoreTests.JSONValueTests testTaggedCodableRoundTripPreservesNumericCases]' passed (0.000 seconds).
+Test Suite 'JSONValueTests' passed at 2026-07-11 06:28:25.056.
+	 Executed 10 tests, with 0 failures (0 unexpected) in 0.003 (0.003) seconds
+Test Suite 'NearWireCoreModuleSmokeTests' started at 2026-07-11 06:28:25.056.
+Test Case '-[NearWireCoreTests.NearWireCoreModuleSmokeTests testModuleIsAvailable]' started.
+Test Case '-[NearWireCoreTests.NearWireCoreModuleSmokeTests testModuleIsAvailable]' passed (0.000 seconds).
+Test Suite 'NearWireCoreModuleSmokeTests' passed at 2026-07-11 06:28:25.056.
+	 Executed 1 test, with 0 failures (0 unexpected) in 0.000 (0.000) seconds
+Test Suite 'NearWireFlowControlModuleSmokeTests' started at 2026-07-11 06:28:25.056.
+Test Case '-[NearWireFlowControlTests.NearWireFlowControlModuleSmokeTests testModuleIsAvailable]' started.
+Test Case '-[NearWireFlowControlTests.NearWireFlowControlModuleSmokeTests testModuleIsAvailable]' passed (0.000 seconds).
+Test Suite 'NearWireFlowControlModuleSmokeTests' passed at 2026-07-11 06:28:25.056.
+	 Executed 1 test, with 0 failures (0 unexpected) in 0.000 (0.000) seconds
+Test Suite 'NearWireTestSupportModuleSmokeTests' started at 2026-07-11 06:28:25.056.
+Test Case '-[NearWireTestSupportTests.NearWireTestSupportModuleSmokeTests testModuleIsAvailable]' started.
+Test Case '-[NearWireTestSupportTests.NearWireTestSupportModuleSmokeTests testModuleIsAvailable]' passed (0.000 seconds).
+Test Suite 'NearWireTestSupportModuleSmokeTests' passed at 2026-07-11 06:28:25.056.
+	 Executed 1 test, with 0 failures (0 unexpected) in 0.000 (0.000) seconds
+Test Suite 'NearWireTransportModuleSmokeTests' started at 2026-07-11 06:28:25.056.
+Test Case '-[NearWireTransportTests.NearWireTransportModuleSmokeTests testModuleIsAvailable]' started.
+Test Case '-[NearWireTransportTests.NearWireTransportModuleSmokeTests testModuleIsAvailable]' passed (0.000 seconds).
+Test Suite 'NearWireTransportModuleSmokeTests' passed at 2026-07-11 06:28:25.056.
+	 Executed 1 test, with 0 failures (0 unexpected) in 0.000 (0.000) seconds
+Test Suite 'PerformanceSnapshotTests' started at 2026-07-11 06:28:25.056.
+Test Case '-[NearWireCoreTests.PerformanceSnapshotTests testCompleteSnapshotRoundTripsThroughContentCodec]' started.
+Test Case '-[NearWireCoreTests.PerformanceSnapshotTests testCompleteSnapshotRoundTripsThroughContentCodec]' passed (0.001 seconds).
+Test Case '-[NearWireCoreTests.PerformanceSnapshotTests testEveryRequiredSnapshotHeaderMustBePresent]' started.
+Test Case '-[NearWireCoreTests.PerformanceSnapshotTests testEveryRequiredSnapshotHeaderMustBePresent]' passed (0.000 seconds).
+Test Case '-[NearWireCoreTests.PerformanceSnapshotTests testFutureFieldsAndEnumValuesAreAccepted]' started.
+Test Case '-[NearWireCoreTests.PerformanceSnapshotTests testFutureFieldsAndEnumValuesAreAccepted]' passed (0.000 seconds).
+Test Case '-[NearWireCoreTests.PerformanceSnapshotTests testInvalidSnapshotHeadersAndMetricsReportPaths]' started.
+Test Case '-[NearWireCoreTests.PerformanceSnapshotTests testInvalidSnapshotHeadersAndMetricsReportPaths]' passed (0.000 seconds).
+Test Case '-[NearWireCoreTests.PerformanceSnapshotTests testMetricBoundariesAndRealZeroArePreserved]' started.
+Test Case '-[NearWireCoreTests.PerformanceSnapshotTests testMetricBoundariesAndRealZeroArePreserved]' passed (0.000 seconds).
+Test Case '-[NearWireCoreTests.PerformanceSnapshotTests testMissingAndUnavailableMetricsRemainDistinct]' started.
+Test Case '-[NearWireCoreTests.PerformanceSnapshotTests testMissingAndUnavailableMetricsRemainDistinct]' passed (0.000 seconds).
+Test Case '-[NearWireCoreTests.PerformanceSnapshotTests testSchemaConstructionHasNoObservableSideEffects]' started.
+Test Case '-[NearWireCoreTests.PerformanceSnapshotTests testSchemaConstructionHasNoObservableSideEffects]' passed (0.000 seconds).
+Test Suite 'PerformanceSnapshotTests' passed at 2026-07-11 06:28:25.059.
+	 Executed 7 tests, with 0 failures (0 unexpected) in 0.002 (0.003) seconds
+Test Suite 'NearWireCoreHarnessPackageTests.xctest' passed at 2026-07-11 06:28:25.059.
+	 Executed 34 tests, with 0 failures (0 unexpected) in 0.460 (0.462) seconds
+Test Suite 'All tests' passed at 2026-07-11 06:28:25.059.
+	 Executed 34 tests, with 0 failures (0 unexpected) in 0.460 (0.462) seconds
+◇ Test run started.
+↳ Testing Library Version: 1902
+↳ Target Platform: arm64e-apple-macos14.0
+✔ Test run with 0 tests in 0 suites passed after 0.001 seconds.
+Swift Package verification passed.
+
+EXIT_STATUS: 0
+FINISHED_AT_UTC: 2026-07-10T22:28:25Z
