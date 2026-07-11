@@ -1,0 +1,32 @@
+COMMAND:
+ env DO_NOT_TRACK=1 openspec --no-color validate --all --strict --no-interactive
+RUN_ID: 20260711T144338Z-25288
+GATE_ID: openspec
+STARTED_AT_UTC: 2026-07-11T14:43:38Z
+
+✓ spec/bounded-event-queue
+✓ spec/change-quality-gates
+✓ spec/event-model
+✓ spec/event-rate-control
+✓ spec/performance-snapshot-schema
+✓ spec/repository-structure
+✓ spec/sdk-async-facade
+✓ spec/sdk-bonjour-discovery
+✓ spec/sdk-distribution
+✓ spec/sdk-event-api
+✓ spec/sdk-offline-buffer
+✓ spec/sdk-pairing-code
+✓ spec/sdk-process-connection-lease
+✓ spec/sdk-public-boundary
+✓ change/sdk-session-admission
+✓ spec/secure-byte-channel
+✓ spec/secure-network-parameters
+✓ spec/viewer-tls-identity
+✓ spec/wire-event-transfer
+✓ spec/wire-framing
+✓ spec/wire-message-protocol
+✓ spec/wire-session-negotiation
+Totals: 22 passed, 0 failed (22 items)
+
+EXIT_STATUS: 0
+FINISHED_AT_UTC: 2026-07-11T14:43:39Z

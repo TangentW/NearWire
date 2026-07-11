@@ -265,6 +265,16 @@ enum WireMessageCodec {
     )
   }
 
+  public static func encodeMaximumV1Pong(
+    limits: WireProtocolLimits = .default
+  ) throws -> Data {
+    try WireMessageCodec.encode(
+      WirePong(nonce: UInt64.max),
+      version: .v1,
+      limits: limits
+    )
+  }
+
   private func encodePayload<Payload: WireMessagePayload>(
     _ payload: Payload,
     phase: WireSessionPhase

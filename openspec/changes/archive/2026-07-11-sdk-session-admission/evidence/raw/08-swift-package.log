@@ -1,0 +1,726 @@
+COMMAND:
+ ./Scripts/verify-package.sh
+RUN_ID: 20260711T144338Z-25288
+GATE_ID: swift-package
+STARTED_AT_UTC: 2026-07-11T14:43:50Z
+
+Process lease structural audit passed.
+Process lease multi-image validation passed.
+Process lease validation artifacts remained temporary and outside package products.
+Session admission ownership and residual-scope boundaries passed.
+Core package fixture parity passed.
+Building for debugging...
+[0/1] Write swift-version--58304C5D6DBC2206.txt
+Build complete! (0.15s)
+iOS Swift Package SDK consumer API passed.
+Building for debugging...
+[0/1] Write swift-version--58304C5D6DBC2206.txt
+Build of target: 'NearWireCore' complete! (0.13s)
+Building for debugging...
+[0/1] Write swift-version--58304C5D6DBC2206.txt
+Build of target: 'NearWireTransport' complete! (0.12s)
+Building for debugging...
+[0/1] Write swift-version--58304C5D6DBC2206.txt
+Build of target: 'NearWireFlowControl' complete! (0.12s)
+Building for debugging...
+[0/1] Write swift-version--58304C5D6DBC2206.txt
+Build of target: 'NearWireTestSupport' complete! (0.12s)
+Building for debugging...
+[0/1] Write swift-version--58304C5D6DBC2206.txt
+Build of target: 'NearWire' complete! (0.12s)
+Swift Package SDK consumer API passed.
+SDK implementation-type API boundary passed.
+iOS CocoaPods same-module SDK consumer and API parity passed.
+Wire payload public API sealing passed.
+Mandatory TLS public API boundary passed.
+Raw connection wrapping boundary passed.
+CocoaPods same-module raw connection boundary passed.
+Transport identity lifecycle boundary passed.
+2026-07-11 22:44:10.888 xcodebuild[27611:24468669] [MT] IDERunDestination: Supported platforms for the buildables in the current scheme is empty.
+Writing result bundle at path:
+	/tmp/nearwire-package-harness.aLDHib/NearWire-iOS.xcresult
+
+2026-07-11 22:44:25.647 xcodebuild[27611:24468669] [MT] IDETestOperationsObserverDebug: 6.257 elapsed -- Testing started completed.
+2026-07-11 22:44:25.647 xcodebuild[27611:24468669] [MT] IDETestOperationsObserverDebug: 0.000 sec, +0.000 sec -- start
+2026-07-11 22:44:25.647 xcodebuild[27611:24468669] [MT] IDETestOperationsObserverDebug: 6.257 sec, +6.257 sec -- end
+Testing started
+{
+  "devicesAndConfigurations" : [
+    {
+      "device" : {
+        "architecture" : "arm64",
+        "deviceId" : "28489DFE-9F3F-4746-98C6-F956F47FEC0C",
+        "deviceName" : "iPhone 17 Pro",
+        "modelName" : "iPhone 17 Pro",
+        "osBuildNumber" : "23E244",
+        "osVersion" : "26.4",
+        "platform" : "iOS Simulator"
+      },
+      "expectedFailures" : 0,
+      "failedTests" : 0,
+      "passedTests" : 287,
+      "skippedTests" : 1,
+      "testPlanConfiguration" : {
+        "configurationId" : "1",
+        "configurationName" : "Test Scheme Action"
+      }
+    }
+  ],
+  "environmentDescription" : "NearWire-Package · Built with macOS 26.5.1",
+  "expectedFailures" : 0,
+  "failedTests" : 0,
+  "finishTime" : 1783781065.655,
+  "passedTests" : 287,
+  "result" : "Passed",
+  "skippedTests" : 1,
+  "startTime" : 1783781050.964,
+  "statistics" : [
+
+  ],
+  "testFailures" : [
+
+  ],
+  "title" : "Test - NearWire-Package",
+  "topInsights" : [
+    {
+      "category" : "Longest Test Runs",
+      "impact" : "90% of duration",
+      "text" : "1 longest test run with outlier durations exceeding 0.22s (three standard deviations)"
+    },
+    {
+      "category" : "Longest Test Runs",
+      "impact" : "54% of duration",
+      "text" : "1 longest test run with outlier durations exceeding 0.05s (three standard deviations)"
+    },
+    {
+      "category" : "Longest Test Runs",
+      "impact" : "34% of duration",
+      "text" : "1 longest test run with outlier durations exceeding 0.04s (three standard deviations)"
+    }
+  ],
+  "totalTestCount" : 288
+}
+Building for debugging...
+[0/13] /tmp/nearwire-package-harness.aLDHib/CoreHarnessBuild/arm64-apple-macosx/debug/NearWireCoreHarnessPackageTests.derived/runner.swift
+[1/13] Write sources
+[10/13] Write swift-version--58304C5D6DBC2206.txt
+[12/25] Compiling NearWireCore JSONValue.swift
+[13/26] Compiling NearWireCore EventValidationLimits.swift
+[14/26] Compiling NearWireCore EventModelError.swift
+[15/26] Compiling NearWireCore EventEnvelope.swift
+[16/26] Compiling NearWireCore EventType.swift
+[17/26] Compiling NearWireCore EventDraft.swift
+[18/26] Compiling NearWireCore PairingCode.swift
+[19/26] Compiling NearWireCore EventContentCodec.swift
+[20/26] Emitting module NearWireCore
+[21/26] Compiling NearWireCore PerformanceSnapshot.swift
+[22/26] Compiling NearWireCore BonjourServiceIdentity.swift
+[23/26] Compiling NearWireCore EventMetadata.swift
+[24/26] Compiling NearWireCore NearWireCoreModule.swift
+[25/55] Compiling NearWireFlowControl NearWireFlowControlModule.swift
+[26/55] Compiling NearWireFlowControl FlowControlError.swift
+[27/55] Emitting module NearWireFlowControl
+[28/55] Compiling NearWireTransport WireProtocolError.swift
+[29/56] Compiling NearWireFlowControl EventQueueConfiguration.swift
+[30/56] Compiling NearWireFlowControl EventBatchScheduler.swift
+[31/56] Compiling NearWireFlowControl EventRateControl.swift
+[32/56] Compiling NearWireTransport WireJSON.swift
+[33/56] Compiling NearWireTransport WireNegotiation.swift
+[34/56] Compiling NearWireTransport WirePrimitives.swift
+[35/56] Compiling NearWireTransport WireMessage.swift
+[36/56] Compiling NearWireTransport WireSequence.swift
+[37/56] Compiling NearWireFlowControl BoundedEventQueue.swift
+[38/56] Compiling NearWireTransport NWConnectionDriver.swift
+[39/56] Compiling NearWireTransport NearWireTransportModule.swift
+[40/56] Emitting module NearWireTransport
+[41/56] Compiling NearWireTransport SecureByteChannel.swift
+[42/56] Compiling NearWireTransport SecureNetworkParameters.swift
+[43/62] Compiling NearWireTransport SecureTransportPrimitives.swift
+[44/62] Compiling NearWireTransport WireControlPayloads.swift
+[45/62] Compiling NearWireTransport WireEventPayloads.swift
+[46/62] Compiling NearWireTransport WireFrame.swift
+[47/74] Emitting module NearWireTestSupport
+[48/74] Compiling NearWireTestSupport NearWireTestSupportModule.swift
+[49/76] Compiling NearWireTestSupportTests ModuleSmokeTests.swift
+[50/76] Emitting module NearWireTestSupportTests
+[51/76] Compiling NearWireCoreTests PairingDiscoveryIdentityTests.swift
+[52/76] Compiling NearWireCoreTests PerformanceSnapshotTests.swift
+[53/76] Compiling NearWireTransportTests WireGoldenFixtureTests.swift
+[54/77] Compiling NearWireCoreTests ModuleSmokeTests.swift
+[55/77] Compiling NearWireCoreTests JSONValueTests.swift
+[56/77] Compiling NearWireTransportTests WireNegotiationTests.swift
+[57/77] Compiling NearWireCoreTests EventTestSupport.swift
+[58/77] Compiling NearWireTransportTests WirePreHandshakeCodecTests.swift
+[59/77] Compiling NearWireCoreTests EventMetadataTests.swift
+[60/77] Emitting module NearWireCoreTests
+[61/77] Compiling NearWireCoreTests EventEnvelopeTests.swift
+[62/77] Compiling NearWireTransportTests WireFrameTests.swift
+[63/77] Compiling NearWireTransportTests WireMessageTests.swift
+[64/77] Compiling NearWireFlowControlTests ModuleSmokeTests.swift
+[65/77] Compiling NearWireFlowControlTests EventRateControlTests.swift
+[66/77] Compiling NearWireFlowControlTests FlowControlTestSupport.swift
+[67/77] Compiling NearWireFlowControlTests EventBatchSchedulerTests.swift
+[68/77] Emitting module NearWireFlowControlTests
+[69/77] Compiling NearWireFlowControlTests BoundedEventQueueTests.swift
+[70/77] Compiling NearWireTransportTests WireTestSupport.swift
+[71/77] Compiling NearWireTransportTests WireEventTests.swift
+[72/77] Compiling NearWireTransportTests SecureTransportTests.swift
+[73/77] Emitting module NearWireTransportTests
+[74/77] Compiling NearWireTransportTests ModuleSmokeTests.swift
+[75/77] Compiling NearWireTransportTests SecureByteChannelTests.swift
+[76/79] Emitting module NearWireCoreHarnessPackageTests
+[77/79] Compiling NearWireCoreHarnessPackageTests runner.swift
+[77/79] Write Objects.LinkFileList
+[78/79] Linking NearWireCoreHarnessPackageTests
+Build complete! (11.69s)
+Test Suite 'All tests' started at 2026-07-11 22:44:38.897.
+Test Suite 'NearWireCoreHarnessPackageTests.xctest' started at 2026-07-11 22:44:38.898.
+Test Suite 'BoundedEventQueueTests' started at 2026-07-11 22:44:38.898.
+Test Case '-[NearWireFlowControlTests.BoundedEventQueueTests testAlreadyExpiredIncomingEventIsReportedWithoutBufferingOrOverflow]' started.
+Test Case '-[NearWireFlowControlTests.BoundedEventQueueTests testAlreadyExpiredIncomingEventIsReportedWithoutBufferingOrOverflow]' passed (0.001 seconds).
+Test Case '-[NearWireFlowControlTests.BoundedEventQueueTests testBackwardClockFailureIsAtomic]' started.
+Test Case '-[NearWireFlowControlTests.BoundedEventQueueTests testBackwardClockFailureIsAtomic]' passed (0.000 seconds).
+Test Case '-[NearWireFlowControlTests.BoundedEventQueueTests testByteBoundRestoresCreditsWhenSelectionWouldResetWeightedCycle]' started.
+Test Case '-[NearWireFlowControlTests.BoundedEventQueueTests testByteBoundRestoresCreditsWhenSelectionWouldResetWeightedCycle]' passed (0.000 seconds).
+Test Case '-[NearWireFlowControlTests.BoundedEventQueueTests testByteBoundStopsWithoutRemovingNextFairEvent]' started.
+Test Case '-[NearWireFlowControlTests.BoundedEventQueueTests testByteBoundStopsWithoutRemovingNextFairEvent]' passed (0.000 seconds).
+Test Case '-[NearWireFlowControlTests.BoundedEventQueueTests testByteOverflowCanRequireMultipleEvictions]' started.
+Test Case '-[NearWireFlowControlTests.BoundedEventQueueTests testByteOverflowCanRequireMultipleEvictions]' passed (0.000 seconds).
+Test Case '-[NearWireFlowControlTests.BoundedEventQueueTests testCriticalPriorityCodableRoundTrip]' started.
+Test Case '-[NearWireFlowControlTests.BoundedEventQueueTests testCriticalPriorityCodableRoundTrip]' passed (0.000 seconds).
+Test Case '-[NearWireFlowControlTests.BoundedEventQueueTests testDeadlineOverflowFailsBeforeMutation]' started.
+Test Case '-[NearWireFlowControlTests.BoundedEventQueueTests testDeadlineOverflowFailsBeforeMutation]' passed (0.000 seconds).
+Test Case '-[NearWireFlowControlTests.BoundedEventQueueTests testDefaultAndInvalidConfiguration]' started.
+Test Case '-[NearWireFlowControlTests.BoundedEventQueueTests testDefaultAndInvalidConfiguration]' passed (0.000 seconds).
+Test Case '-[NearWireFlowControlTests.BoundedEventQueueTests testDuplicatePendingIDCannotEnterThroughKeepLatestReplacement]' started.
+Test Case '-[NearWireFlowControlTests.BoundedEventQueueTests testDuplicatePendingIDCannotEnterThroughKeepLatestReplacement]' passed (0.000 seconds).
+Test Case '-[NearWireFlowControlTests.BoundedEventQueueTests testDuplicatePendingIDIsRejectedAtomically]' started.
+Test Case '-[NearWireFlowControlTests.BoundedEventQueueTests testDuplicatePendingIDIsRejectedAtomically]' passed (0.000 seconds).
+Test Case '-[NearWireFlowControlTests.BoundedEventQueueTests testEmptyQueueStillRejectsClockReversal]' started.
+Test Case '-[NearWireFlowControlTests.BoundedEventQueueTests testEmptyQueueStillRejectsClockReversal]' passed (0.000 seconds).
+Test Case '-[NearWireFlowControlTests.BoundedEventQueueTests testExpirationAndReplacementTTLUseQueueClock]' started.
+Test Case '-[NearWireFlowControlTests.BoundedEventQueueTests testExpirationAndReplacementTTLUseQueueClock]' passed (0.000 seconds).
+Test Case '-[NearWireFlowControlTests.BoundedEventQueueTests testExpiredKeepLatestAdmissionDoesNotReplaceLiveStateOrEvictUrgentWork]' started.
+Test Case '-[NearWireFlowControlTests.BoundedEventQueueTests testExpiredKeepLatestAdmissionDoesNotReplaceLiveStateOrEvictUrgentWork]' passed (0.000 seconds).
+Test Case '-[NearWireFlowControlTests.BoundedEventQueueTests testGrowingReplacementCoalescesBeforeOverflow]' started.
+Test Case '-[NearWireFlowControlTests.BoundedEventQueueTests testGrowingReplacementCoalescesBeforeOverflow]' passed (0.000 seconds).
+Test Case '-[NearWireFlowControlTests.BoundedEventQueueTests testHardBoundFillAndSingleEventDrainRemainFIFO]' started.
+Test Case '-[NearWireFlowControlTests.BoundedEventQueueTests testHardBoundFillAndSingleEventDrainRemainFIFO]' passed (0.127 seconds).
+Test Case '-[NearWireFlowControlTests.BoundedEventQueueTests testIncomingLowPriorityCanBeDroppedToProtectCriticalWork]' started.
+Test Case '-[NearWireFlowControlTests.BoundedEventQueueTests testIncomingLowPriorityCanBeDroppedToProtectCriticalWork]' passed (0.000 seconds).
+Test Case '-[NearWireFlowControlTests.BoundedEventQueueTests testKeepLatestPromotionAndDemotionPreserveOrdinalWithinNewLane]' started.
+Test Case '-[NearWireFlowControlTests.BoundedEventQueueTests testKeepLatestPromotionAndDemotionPreserveOrdinalWithinNewLane]' passed (0.000 seconds).
+Test Case '-[NearWireFlowControlTests.BoundedEventQueueTests testKeepLatestReplacesMetadataAndRetainsLogicalOrdinal]' started.
+Test Case '-[NearWireFlowControlTests.BoundedEventQueueTests testKeepLatestReplacesMetadataAndRetainsLogicalOrdinal]' passed (0.000 seconds).
+Test Case '-[NearWireFlowControlTests.BoundedEventQueueTests testNormalEventsRemainDistinctAndCountOverflowEvictsOldestLowPriority]' started.
+Test Case '-[NearWireFlowControlTests.BoundedEventQueueTests testNormalEventsRemainDistinctAndCountOverflowEvictsOldestLowPriority]' passed (0.000 seconds).
+Test Case '-[NearWireFlowControlTests.BoundedEventQueueTests testOfferPreflightCanRemoveOversizedLocalWorkWithoutChargingBatchBytes]' started.
+Test Case '-[NearWireFlowControlTests.BoundedEventQueueTests testOfferPreflightCanRemoveOversizedLocalWorkWithoutChargingBatchBytes]' passed (0.000 seconds).
+Test Case '-[NearWireFlowControlTests.BoundedEventQueueTests testOfferRemovesAcceptedPrefixWithoutReorderingRejectedSuffix]' started.
+Test Case '-[NearWireFlowControlTests.BoundedEventQueueTests testOfferRemovesAcceptedPrefixWithoutReorderingRejectedSuffix]' passed (0.000 seconds).
+Test Case '-[NearWireFlowControlTests.BoundedEventQueueTests testOfferStopDoesNotConsumeWeightedSchedulerCredit]' started.
+Test Case '-[NearWireFlowControlTests.BoundedEventQueueTests testOfferStopDoesNotConsumeWeightedSchedulerCredit]' passed (0.000 seconds).
+Test Case '-[NearWireFlowControlTests.BoundedEventQueueTests testOfferStopPreservesFIFOAndCandidateIdentity]' started.
+Test Case '-[NearWireFlowControlTests.BoundedEventQueueTests testOfferStopPreservesFIFOAndCandidateIdentity]' passed (0.000 seconds).
+Test Case '-[NearWireFlowControlTests.BoundedEventQueueTests testOfferStopRestoresCreditsWhenSelectionWouldResetWeightedCycle]' started.
+Test Case '-[NearWireFlowControlTests.BoundedEventQueueTests testOfferStopRestoresCreditsWhenSelectionWouldResetWeightedCycle]' passed (0.000 seconds).
+Test Case '-[NearWireFlowControlTests.BoundedEventQueueTests testOfferValidationFailsBeforeCallingDecision]' started.
+Test Case '-[NearWireFlowControlTests.BoundedEventQueueTests testOfferValidationFailsBeforeCallingDecision]' passed (0.000 seconds).
+Test Case '-[NearWireFlowControlTests.BoundedEventQueueTests testRepeatedKeepLatestReplacementCompactsStaleHeapNodes]' started.
+Test Case '-[NearWireFlowControlTests.BoundedEventQueueTests testRepeatedKeepLatestReplacementCompactsStaleHeapNodes]' passed (0.001 seconds).
+Test Case '-[NearWireFlowControlTests.BoundedEventQueueTests testSnapshotAndClearAreExact]' started.
+Test Case '-[NearWireFlowControlTests.BoundedEventQueueTests testSnapshotAndClearAreExact]' passed (0.000 seconds).
+Test Case '-[NearWireFlowControlTests.BoundedEventQueueTests testWeightedCycleAndFIFOWithinPriority]' started.
+Test Case '-[NearWireFlowControlTests.BoundedEventQueueTests testWeightedCycleAndFIFOWithinPriority]' passed (0.000 seconds).
+Test Case '-[NearWireFlowControlTests.BoundedEventQueueTests testWeightedFairnessPersistsAcrossSingleEventDequeueCalls]' started.
+Test Case '-[NearWireFlowControlTests.BoundedEventQueueTests testWeightedFairnessPersistsAcrossSingleEventDequeueCalls]' passed (0.000 seconds).
+Test Suite 'BoundedEventQueueTests' passed at 2026-07-11 22:44:39.032.
+	 Executed 29 tests, with 0 failures (0 unexpected) in 0.133 (0.134) seconds
+Test Suite 'EventBatchSchedulerTests' started at 2026-07-11 22:44:39.032.
+Test Case '-[NearWireFlowControlTests.EventBatchSchedulerTests testByteBoundConsumesOnlySelectedTokenAndPreservesNextEvent]' started.
+Test Case '-[NearWireFlowControlTests.EventBatchSchedulerTests testByteBoundConsumesOnlySelectedTokenAndPreservesNextEvent]' passed (0.000 seconds).
+Test Case '-[NearWireFlowControlTests.EventBatchSchedulerTests testDueAttemptReportsExpiredIDsEvenWhenPaused]' started.
+Test Case '-[NearWireFlowControlTests.EventBatchSchedulerTests testDueAttemptReportsExpiredIDsEvenWhenPaused]' passed (0.000 seconds).
+Test Case '-[NearWireFlowControlTests.EventBatchSchedulerTests testEarlyAndExactlyDueFlush]' started.
+Test Case '-[NearWireFlowControlTests.EventBatchSchedulerTests testEarlyAndExactlyDueFlush]' passed (0.000 seconds).
+Test Case '-[NearWireFlowControlTests.EventBatchSchedulerTests testPausedAndEmptyDueAttemptsAdvanceWithoutCatchUp]' started.
+Test Case '-[NearWireFlowControlTests.EventBatchSchedulerTests testPausedAndEmptyDueAttemptsAdvanceWithoutCatchUp]' passed (0.000 seconds).
+Test Case '-[NearWireFlowControlTests.EventBatchSchedulerTests testRepeatedPausedFlushesAtHardBoundUseExpirationIndex]' started.
+Test Case '-[NearWireFlowControlTests.EventBatchSchedulerTests testRepeatedPausedFlushesAtHardBoundUseExpirationIndex]' passed (0.036 seconds).
+Test Case '-[NearWireFlowControlTests.EventBatchSchedulerTests testRepeatedSingleEventScheduledDrainsAtLargeDepth]' started.
+Test Case '-[NearWireFlowControlTests.EventBatchSchedulerTests testRepeatedSingleEventScheduledDrainsAtLargeDepth]' passed (0.024 seconds).
+Test Case '-[NearWireFlowControlTests.EventBatchSchedulerTests testRuntimeQueueCompatibilityAndBackwardClockFailAtomically]' started.
+Test Case '-[NearWireFlowControlTests.EventBatchSchedulerTests testRuntimeQueueCompatibilityAndBackwardClockFailAtomically]' passed (0.000 seconds).
+Test Case '-[NearWireFlowControlTests.EventBatchSchedulerTests testTokenAndBatchConfigurationBounds]' started.
+Test Case '-[NearWireFlowControlTests.EventBatchSchedulerTests testTokenAndBatchConfigurationBounds]' passed (0.000 seconds).
+Test Case '-[NearWireFlowControlTests.EventBatchSchedulerTests testTokenBackedDueAttemptReportsExpirationAlongsideLiveBatch]' started.
+Test Case '-[NearWireFlowControlTests.EventBatchSchedulerTests testTokenBackedDueAttemptReportsExpirationAlongsideLiveBatch]' passed (0.000 seconds).
+Test Suite 'EventBatchSchedulerTests' passed at 2026-07-11 22:44:39.094.
+	 Executed 9 tests, with 0 failures (0 unexpected) in 0.061 (0.062) seconds
+Test Suite 'EventEnvelopeTests' started at 2026-07-11 22:44:39.094.
+Test Case '-[NearWireCoreTests.EventEnvelopeTests testAggregateDecodeAppliesOneCustomLimitSet]' started.
+Test Case '-[NearWireCoreTests.EventEnvelopeTests testAggregateDecodeAppliesOneCustomLimitSet]' passed (0.001 seconds).
+Test Case '-[NearWireCoreTests.EventEnvelopeTests testAggregateDecodeBoundsUnknownBytesAndTaggedDepthBeforeMaterialization]' started.
+Test Case '-[NearWireCoreTests.EventEnvelopeTests testAggregateDecodeBoundsUnknownBytesAndTaggedDepthBeforeMaterialization]' passed (0.002 seconds).
+Test Case '-[NearWireCoreTests.EventEnvelopeTests testDraftCodableRoundTripUsesCompactContentAndCustomLimits]' started.
+Test Case '-[NearWireCoreTests.EventEnvelopeTests testDraftCodableRoundTripUsesCompactContentAndCustomLimits]' passed (0.000 seconds).
+Test Case '-[NearWireCoreTests.EventEnvelopeTests testEnvelopeRejectsDirectionAndTimestampInvariants]' started.
+Test Case '-[NearWireCoreTests.EventEnvelopeTests testEnvelopeRejectsDirectionAndTimestampInvariants]' passed (0.000 seconds).
+Test Case '-[NearWireCoreTests.EventEnvelopeTests testEnvelopeRoundTripAndUnknownFieldCompatibility]' started.
+Test Case '-[NearWireCoreTests.EventEnvelopeTests testEnvelopeRoundTripAndUnknownFieldCompatibility]' passed (0.000 seconds).
+Test Case '-[NearWireCoreTests.EventEnvelopeTests testFactoryDeterministicallyEnrichesDraft]' started.
+Test Case '-[NearWireCoreTests.EventEnvelopeTests testFactoryDeterministicallyEnrichesDraft]' passed (0.000 seconds).
+Test Case '-[NearWireCoreTests.EventEnvelopeTests testMissingRequiredFieldFailsWithTypedEnvelopeError]' started.
+Test Case '-[NearWireCoreTests.EventEnvelopeTests testMissingRequiredFieldFailsWithTypedEnvelopeError]' passed (0.001 seconds).
+Test Case '-[NearWireCoreTests.EventEnvelopeTests testNearContentLimitCompactTaggedEnvelopeRoundTrips]' started.
+Test Case '-[NearWireCoreTests.EventEnvelopeTests testNearContentLimitCompactTaggedEnvelopeRoundTrips]' passed (0.447 seconds).
+Test Suite 'EventEnvelopeTests' passed at 2026-07-11 22:44:39.546.
+	 Executed 8 tests, with 0 failures (0 unexpected) in 0.452 (0.452) seconds
+Test Suite 'EventMetadataTests' started at 2026-07-11 22:44:39.546.
+Test Case '-[NearWireCoreTests.EventMetadataTests testCanonicalUUIDIdentifiers]' started.
+Test Case '-[NearWireCoreTests.EventMetadataTests testCanonicalUUIDIdentifiers]' passed (0.000 seconds).
+Test Case '-[NearWireCoreTests.EventMetadataTests testEndpointIdentifiersAndDirectionRoles]' started.
+Test Case '-[NearWireCoreTests.EventMetadataTests testEndpointIdentifiersAndDirectionRoles]' passed (0.000 seconds).
+Test Case '-[NearWireCoreTests.EventMetadataTests testEventTypeNamespacesAndGrammar]' started.
+Test Case '-[NearWireCoreTests.EventMetadataTests testEventTypeNamespacesAndGrammar]' passed (0.000 seconds).
+Test Case '-[NearWireCoreTests.EventMetadataTests testSchemaSequenceAndCausalityRoundTrip]' started.
+Test Case '-[NearWireCoreTests.EventMetadataTests testSchemaSequenceAndCausalityRoundTrip]' passed (0.000 seconds).
+Test Case '-[NearWireCoreTests.EventMetadataTests testTTLDefaultsBoundsAndOverflowSafeExpiration]' started.
+Test Case '-[NearWireCoreTests.EventMetadataTests testTTLDefaultsBoundsAndOverflowSafeExpiration]' passed (0.000 seconds).
+Test Suite 'EventMetadataTests' passed at 2026-07-11 22:44:39.547.
+	 Executed 5 tests, with 0 failures (0 unexpected) in 0.001 (0.001) seconds
+Test Suite 'EventRateControlTests' started at 2026-07-11 22:44:39.547.
+Test Case '-[NearWireFlowControlTests.EventRateControlTests testBackwardClockIsAtomic]' started.
+Test Case '-[NearWireFlowControlTests.EventRateControlTests testBackwardClockIsAtomic]' passed (0.000 seconds).
+Test Case '-[NearWireFlowControlTests.EventRateControlTests testBurstReconfigurationClampsWithoutManufacturingTokens]' started.
+Test Case '-[NearWireFlowControlTests.EventRateControlTests testBurstReconfigurationClampsWithoutManufacturingTokens]' passed (0.000 seconds).
+Test Case '-[NearWireFlowControlTests.EventRateControlTests testConsumptionCannotExceedWholeTokens]' started.
+Test Case '-[NearWireFlowControlTests.EventRateControlTests testConsumptionCannotExceedWholeTokens]' passed (0.000 seconds).
+Test Case '-[NearWireFlowControlTests.EventRateControlTests testInvalidBurstReconfigurationIsAtomic]' started.
+Test Case '-[NearWireFlowControlTests.EventRateControlTests testInvalidBurstReconfigurationIsAtomic]' passed (0.000 seconds).
+Test Case '-[NearWireFlowControlTests.EventRateControlTests testLargeElapsedTimeClampsToCapacity]' started.
+Test Case '-[NearWireFlowControlTests.EventRateControlTests testLargeElapsedTimeClampsToCapacity]' passed (0.000 seconds).
+Test Case '-[NearWireFlowControlTests.EventRateControlTests testMinimumPositiveRateHasRepresentableNextTokenDelay]' started.
+Test Case '-[NearWireFlowControlTests.EventRateControlTests testMinimumPositiveRateHasRepresentableNextTokenDelay]' passed (0.000 seconds).
+Test Case '-[NearWireFlowControlTests.EventRateControlTests testPauseResumeAndRateDecreaseDoNotCreateTokens]' started.
+Test Case '-[NearWireFlowControlTests.EventRateControlTests testPauseResumeAndRateDecreaseDoNotCreateTokens]' passed (0.000 seconds).
+Test Case '-[NearWireFlowControlTests.EventRateControlTests testRateValidationAndConservativeNegotiation]' started.
+Test Case '-[NearWireFlowControlTests.EventRateControlTests testRateValidationAndConservativeNegotiation]' passed (0.000 seconds).
+Test Case '-[NearWireFlowControlTests.EventRateControlTests testResumeAtSubOneRateDoesNotManufactureToken]' started.
+Test Case '-[NearWireFlowControlTests.EventRateControlTests testResumeAtSubOneRateDoesNotManufactureToken]' passed (0.000 seconds).
+Test Case '-[NearWireFlowControlTests.EventRateControlTests testSubOneRateCanAccumulateAndProduceWholeTokens]' started.
+Test Case '-[NearWireFlowControlTests.EventRateControlTests testSubOneRateCanAccumulateAndProduceWholeTokens]' passed (0.000 seconds).
+Test Case '-[NearWireFlowControlTests.EventRateControlTests testTokenBucketInitialBurstFractionalRefillAndDelay]' started.
+Test Case '-[NearWireFlowControlTests.EventRateControlTests testTokenBucketInitialBurstFractionalRefillAndDelay]' passed (0.000 seconds).
+Test Suite 'EventRateControlTests' passed at 2026-07-11 22:44:39.548.
+	 Executed 11 tests, with 0 failures (0 unexpected) in 0.001 (0.001) seconds
+Test Suite 'JSONValueTests' started at 2026-07-11 22:44:39.548.
+Test Case '-[NearWireCoreTests.JSONValueTests testCodableBridgeUsesStableDateAndBase64]' started.
+Test Case '-[NearWireCoreTests.JSONValueTests testCodableBridgeUsesStableDateAndBase64]' passed (0.002 seconds).
+Test Case '-[NearWireCoreTests.JSONValueTests testContentCodecPropagatesCustomLimitsToNestedModels]' started.
+Test Case '-[NearWireCoreTests.JSONValueTests testContentCodecPropagatesCustomLimitsToNestedModels]' passed (0.000 seconds).
+Test Case '-[NearWireCoreTests.JSONValueTests testDecodeFailureDoesNotMutateOriginalContent]' started.
+Test Case '-[NearWireCoreTests.JSONValueTests testDecodeFailureDoesNotMutateOriginalContent]' passed (0.000 seconds).
+Test Case '-[NearWireCoreTests.JSONValueTests testEveryJSONCaseRoundTripsDeterministically]' started.
+Test Case '-[NearWireCoreTests.JSONValueTests testEveryJSONCaseRoundTripsDeterministically]' passed (0.000 seconds).
+Test Case '-[NearWireCoreTests.JSONValueTests testIntegerAndFloatingPointIntentRemainDistinct]' started.
+Test Case '-[NearWireCoreTests.JSONValueTests testIntegerAndFloatingPointIntentRemainDistinct]' passed (0.000 seconds).
+Test Case '-[NearWireCoreTests.JSONValueTests testInvalidNumbersFailWithoutProducingAValue]' started.
+Test Case '-[NearWireCoreTests.JSONValueTests testInvalidNumbersFailWithoutProducingAValue]' passed (0.000 seconds).
+Test Case '-[NearWireCoreTests.JSONValueTests testInvalidValidationConfigurationsFail]' started.
+Test Case '-[NearWireCoreTests.JSONValueTests testInvalidValidationConfigurationsFail]' passed (0.000 seconds).
+Test Case '-[NearWireCoreTests.JSONValueTests testNonJSONCodableValueIsRejected]' started.
+Test Case '-[NearWireCoreTests.JSONValueTests testNonJSONCodableValueIsRejected]' passed (0.000 seconds).
+Test Case '-[NearWireCoreTests.JSONValueTests testStructuralLimitsReportStablePaths]' started.
+Test Case '-[NearWireCoreTests.JSONValueTests testStructuralLimitsReportStablePaths]' passed (0.000 seconds).
+Test Case '-[NearWireCoreTests.JSONValueTests testTaggedCodableRoundTripPreservesNumericCases]' started.
+Test Case '-[NearWireCoreTests.JSONValueTests testTaggedCodableRoundTripPreservesNumericCases]' passed (0.000 seconds).
+Test Suite 'JSONValueTests' passed at 2026-07-11 22:44:39.551.
+	 Executed 10 tests, with 0 failures (0 unexpected) in 0.003 (0.003) seconds
+Test Suite 'NearWireCoreModuleSmokeTests' started at 2026-07-11 22:44:39.551.
+Test Case '-[NearWireCoreTests.NearWireCoreModuleSmokeTests testModuleIsAvailable]' started.
+Test Case '-[NearWireCoreTests.NearWireCoreModuleSmokeTests testModuleIsAvailable]' passed (0.000 seconds).
+Test Suite 'NearWireCoreModuleSmokeTests' passed at 2026-07-11 22:44:39.551.
+	 Executed 1 test, with 0 failures (0 unexpected) in 0.000 (0.000) seconds
+Test Suite 'NearWireFlowControlModuleSmokeTests' started at 2026-07-11 22:44:39.551.
+Test Case '-[NearWireFlowControlTests.NearWireFlowControlModuleSmokeTests testModuleIsAvailable]' started.
+Test Case '-[NearWireFlowControlTests.NearWireFlowControlModuleSmokeTests testModuleIsAvailable]' passed (0.000 seconds).
+Test Suite 'NearWireFlowControlModuleSmokeTests' passed at 2026-07-11 22:44:39.551.
+	 Executed 1 test, with 0 failures (0 unexpected) in 0.000 (0.000) seconds
+Test Suite 'NearWireTestSupportModuleSmokeTests' started at 2026-07-11 22:44:39.551.
+Test Case '-[NearWireTestSupportTests.NearWireTestSupportModuleSmokeTests testModuleIsAvailable]' started.
+Test Case '-[NearWireTestSupportTests.NearWireTestSupportModuleSmokeTests testModuleIsAvailable]' passed (0.000 seconds).
+Test Suite 'NearWireTestSupportModuleSmokeTests' passed at 2026-07-11 22:44:39.552.
+	 Executed 1 test, with 0 failures (0 unexpected) in 0.000 (0.000) seconds
+Test Suite 'NearWireTransportModuleSmokeTests' started at 2026-07-11 22:44:39.552.
+Test Case '-[NearWireTransportTests.NearWireTransportModuleSmokeTests testModuleIsAvailable]' started.
+Test Case '-[NearWireTransportTests.NearWireTransportModuleSmokeTests testModuleIsAvailable]' passed (0.000 seconds).
+Test Suite 'NearWireTransportModuleSmokeTests' passed at 2026-07-11 22:44:39.552.
+	 Executed 1 test, with 0 failures (0 unexpected) in 0.000 (0.000) seconds
+Test Suite 'PairingDiscoveryIdentityTests' started at 2026-07-11 22:44:39.552.
+Test Case '-[NearWireCoreTests.PairingDiscoveryIdentityTests testDiscriminatorGoldenVectorsAndParsing]' started.
+Test Case '-[NearWireCoreTests.PairingDiscoveryIdentityTests testDiscriminatorGoldenVectorsAndParsing]' passed (0.008 seconds).
+Test Case '-[NearWireCoreTests.PairingDiscoveryIdentityTests testEveryAlphabetByteAndCaseAreAccepted]' started.
+Test Case '-[NearWireCoreTests.PairingDiscoveryIdentityTests testEveryAlphabetByteAndCaseAreAccepted]' passed (0.000 seconds).
+Test Case '-[NearWireCoreTests.PairingDiscoveryIdentityTests testIdentityIgnoresInterfaceObservationsByConstruction]' started.
+Test Case '-[NearWireCoreTests.PairingDiscoveryIdentityTests testIdentityIgnoresInterfaceObservationsByConstruction]' passed (0.000 seconds).
+Test Case '-[NearWireCoreTests.PairingDiscoveryIdentityTests testPairingCodeNormalizesOnlyDocumentedASCIISeparators]' started.
+Test Case '-[NearWireCoreTests.PairingDiscoveryIdentityTests testPairingCodeNormalizesOnlyDocumentedASCIISeparators]' passed (0.000 seconds).
+Test Case '-[NearWireCoreTests.PairingDiscoveryIdentityTests testRawInputWorkBound]' started.
+Test Case '-[NearWireCoreTests.PairingDiscoveryIdentityTests testRawInputWorkBound]' passed (0.000 seconds).
+Test Case '-[NearWireCoreTests.PairingDiscoveryIdentityTests testSensitiveDescriptionsAreRedacted]' started.
+Test Case '-[NearWireCoreTests.PairingDiscoveryIdentityTests testSensitiveDescriptionsAreRedacted]' passed (0.000 seconds).
+Test Case '-[NearWireCoreTests.PairingDiscoveryIdentityTests testServiceIdentityCanonicalizesTypeAndDomainButNotInstance]' started.
+Test Case '-[NearWireCoreTests.PairingDiscoveryIdentityTests testServiceIdentityCanonicalizesTypeAndDomainButNotInstance]' passed (0.000 seconds).
+Test Suite 'PairingDiscoveryIdentityTests' passed at 2026-07-11 22:44:39.561.
+	 Executed 7 tests, with 0 failures (0 unexpected) in 0.009 (0.009) seconds
+Test Suite 'PerformanceSnapshotTests' started at 2026-07-11 22:44:39.561.
+Test Case '-[NearWireCoreTests.PerformanceSnapshotTests testCompleteSnapshotRoundTripsThroughContentCodec]' started.
+Test Case '-[NearWireCoreTests.PerformanceSnapshotTests testCompleteSnapshotRoundTripsThroughContentCodec]' passed (0.001 seconds).
+Test Case '-[NearWireCoreTests.PerformanceSnapshotTests testEveryRequiredSnapshotHeaderMustBePresent]' started.
+Test Case '-[NearWireCoreTests.PerformanceSnapshotTests testEveryRequiredSnapshotHeaderMustBePresent]' passed (0.000 seconds).
+Test Case '-[NearWireCoreTests.PerformanceSnapshotTests testFutureFieldsAndEnumValuesAreAccepted]' started.
+Test Case '-[NearWireCoreTests.PerformanceSnapshotTests testFutureFieldsAndEnumValuesAreAccepted]' passed (0.000 seconds).
+Test Case '-[NearWireCoreTests.PerformanceSnapshotTests testInvalidSnapshotHeadersAndMetricsReportPaths]' started.
+Test Case '-[NearWireCoreTests.PerformanceSnapshotTests testInvalidSnapshotHeadersAndMetricsReportPaths]' passed (0.000 seconds).
+Test Case '-[NearWireCoreTests.PerformanceSnapshotTests testMetricBoundariesAndRealZeroArePreserved]' started.
+Test Case '-[NearWireCoreTests.PerformanceSnapshotTests testMetricBoundariesAndRealZeroArePreserved]' passed (0.000 seconds).
+Test Case '-[NearWireCoreTests.PerformanceSnapshotTests testMissingAndUnavailableMetricsRemainDistinct]' started.
+Test Case '-[NearWireCoreTests.PerformanceSnapshotTests testMissingAndUnavailableMetricsRemainDistinct]' passed (0.000 seconds).
+Test Case '-[NearWireCoreTests.PerformanceSnapshotTests testSchemaConstructionHasNoObservableSideEffects]' started.
+Test Case '-[NearWireCoreTests.PerformanceSnapshotTests testSchemaConstructionHasNoObservableSideEffects]' passed (0.000 seconds).
+Test Suite 'PerformanceSnapshotTests' passed at 2026-07-11 22:44:39.564.
+	 Executed 7 tests, with 0 failures (0 unexpected) in 0.002 (0.003) seconds
+Test Suite 'SecureByteChannelTests' started at 2026-07-11 22:44:39.564.
+Test Case '-[NearWireTransportTests.SecureByteChannelTests testCancellationIsIdempotentAndLateCallbacksAreIgnored]' started.
+Test Case '-[NearWireTransportTests.SecureByteChannelTests testCancellationIsIdempotentAndLateCallbacksAreIgnored]' passed (0.000 seconds).
+Test Case '-[NearWireTransportTests.SecureByteChannelTests testConcurrentSendAdmissionRemainsBoundedAndSerial]' started.
+Test Case '-[NearWireTransportTests.SecureByteChannelTests testConcurrentSendAdmissionRemainsBoundedAndSerial]' passed (0.000 seconds).
+Test Case '-[NearWireTransportTests.SecureByteChannelTests testDriverCancellationProducesOneTerminalOutcome]' started.
+Test Case '-[NearWireTransportTests.SecureByteChannelTests testDriverCancellationProducesOneTerminalOutcome]' passed (0.000 seconds).
+Test Case '-[NearWireTransportTests.SecureByteChannelTests testDriverFailureIsTerminalAndLaterStateIsIgnored]' started.
+Test Case '-[NearWireTransportTests.SecureByteChannelTests testDriverFailureIsTerminalAndLaterStateIsIgnored]' passed (0.000 seconds).
+Test Case '-[NearWireTransportTests.SecureByteChannelTests testDuplicateOldReceiveCallbackCannotStartConcurrentReceive]' started.
+Test Case '-[NearWireTransportTests.SecureByteChannelTests testDuplicateOldReceiveCallbackCannotStartConcurrentReceive]' passed (0.000 seconds).
+Test Case '-[NearWireTransportTests.SecureByteChannelTests testEmptyNonterminalReceiveFailsWithoutRequestingAgain]' started.
+Test Case '-[NearWireTransportTests.SecureByteChannelTests testEmptyNonterminalReceiveFailsWithoutRequestingAgain]' passed (0.000 seconds).
+Test Case '-[NearWireTransportTests.SecureByteChannelTests testEOFDeliversFinalBytesThenTerminates]' started.
+Test Case '-[NearWireTransportTests.SecureByteChannelTests testEOFDeliversFinalBytesThenTerminates]' passed (0.000 seconds).
+Test Case '-[NearWireTransportTests.SecureByteChannelTests testExactDefaultAndHardWireFramesAreAdmittedAsSingleSends]' started.
+Test Case '-[NearWireTransportTests.SecureByteChannelTests testExactDefaultAndHardWireFramesAreAdmittedAsSingleSends]' passed (0.002 seconds).
+Test Case '-[NearWireTransportTests.SecureByteChannelTests testLateSendCallbacksAfterCancellationAreIgnored]' started.
+Test Case '-[NearWireTransportTests.SecureByteChannelTests testLateSendCallbacksAfterCancellationAreIgnored]' passed (0.000 seconds).
+Test Case '-[NearWireTransportTests.SecureByteChannelTests testNonisolatedMailboxAdmissionIsSynchronouslyBoundedUnderConcurrency]' started.
+Test Case '-[NearWireTransportTests.SecureByteChannelTests testNonisolatedMailboxAdmissionIsSynchronouslyBoundedUnderConcurrency]' passed (0.000 seconds).
+Test Case '-[NearWireTransportTests.SecureByteChannelTests testOversizedReceiveFailsOnceAndDoesNotReceiveAgain]' started.
+Test Case '-[NearWireTransportTests.SecureByteChannelTests testOversizedReceiveFailsOnceAndDoesNotReceiveAgain]' passed (0.000 seconds).
+Test Case '-[NearWireTransportTests.SecureByteChannelTests testReadyStartsOneReceiveAndDeliversSequentialChunks]' started.
+Test Case '-[NearWireTransportTests.SecureByteChannelTests testReadyStartsOneReceiveAndDeliversSequentialChunks]' passed (0.000 seconds).
+Test Case '-[NearWireTransportTests.SecureByteChannelTests testReceiveFailureTerminatesWithoutRetry]' started.
+Test Case '-[NearWireTransportTests.SecureByteChannelTests testReceiveFailureTerminatesWithoutRetry]' passed (0.000 seconds).
+Test Case '-[NearWireTransportTests.SecureByteChannelTests testRepeatedPreparingAndReadyNotificationsDoNotDuplicateWork]' started.
+Test Case '-[NearWireTransportTests.SecureByteChannelTests testRepeatedPreparingAndReadyNotificationsDoNotDuplicateWork]' passed (0.000 seconds).
+Test Case '-[NearWireTransportTests.SecureByteChannelTests testSendAdmissionRejectsInvalidOperationsWithoutDriverWork]' started.
+Test Case '-[NearWireTransportTests.SecureByteChannelTests testSendAdmissionRejectsInvalidOperationsWithoutDriverWork]' passed (0.000 seconds).
+Test Case '-[NearWireTransportTests.SecureByteChannelTests testSendByteAccountingRejectsOverflowAndBoundsAtomically]' started.
+Test Case '-[NearWireTransportTests.SecureByteChannelTests testSendByteAccountingRejectsOverflowAndBoundsAtomically]' passed (0.000 seconds).
+Test Case '-[NearWireTransportTests.SecureByteChannelTests testSendFailureClearsQueueWithoutRetry]' started.
+Test Case '-[NearWireTransportTests.SecureByteChannelTests testSendFailureClearsQueueWithoutRetry]' passed (0.000 seconds).
+Test Case '-[NearWireTransportTests.SecureByteChannelTests testSendsAreFIFOAndBackpressureIsAtomic]' started.
+Test Case '-[NearWireTransportTests.SecureByteChannelTests testSendsAreFIFOAndBackpressureIsAtomic]' passed (0.000 seconds).
+Test Case '-[NearWireTransportTests.SecureByteChannelTests testStartIsSingleShotAndCancelBeforeReadyIsTerminal]' started.
+Test Case '-[NearWireTransportTests.SecureByteChannelTests testStartIsSingleShotAndCancelBeforeReadyIsTerminal]' passed (0.000 seconds).
+Test Case '-[NearWireTransportTests.SecureByteChannelTests testSuccessfulSendReleasesCompletedPayloadBeforeQueueCompaction]' started.
+Test Case '-[NearWireTransportTests.SecureByteChannelTests testSuccessfulSendReleasesCompletedPayloadBeforeQueueCompaction]' passed (0.000 seconds).
+Test Case '-[NearWireTransportTests.SecureByteChannelTests testSynchronousDriverCallbacksRemainSerialized]' started.
+Test Case '-[NearWireTransportTests.SecureByteChannelTests testSynchronousDriverCallbacksRemainSerialized]' passed (0.000 seconds).
+Test Case '-[NearWireTransportTests.SecureByteChannelTests testSynchronousStateCallbacksPreserveDriverOrder]' started.
+Test Case '-[NearWireTransportTests.SecureByteChannelTests testSynchronousStateCallbacksPreserveDriverOrder]' passed (0.000 seconds).
+Test Case '-[NearWireTransportTests.SecureByteChannelTests testTerminalTransitionClosesConcurrentMailboxAdmissionAndClearsBytes]' started.
+Test Case '-[NearWireTransportTests.SecureByteChannelTests testTerminalTransitionClosesConcurrentMailboxAdmissionAndClearsBytes]' passed (0.000 seconds).
+Test Suite 'SecureByteChannelTests' passed at 2026-07-11 22:44:39.571.
+	 Executed 23 tests, with 0 failures (0 unexpected) in 0.007 (0.007) seconds
+Test Suite 'SecureTransportTests' started at 2026-07-11 22:44:39.571.
+Test Case '-[NearWireTransportTests.SecureTransportTests testConnectionLocalTrustAndFingerprint]' started.
+Test Case '-[NearWireTransportTests.SecureTransportTests testConnectionLocalTrustAndFingerprint]' passed (0.002 seconds).
+Test Case '-[NearWireTransportTests.SecureTransportTests testDefaultLimitsAndFixedTLSPlan]' started.
+Test Case '-[NearWireTransportTests.SecureTransportTests testDefaultLimitsAndFixedTLSPlan]' passed (0.000 seconds).
+Test Case '-[NearWireTransportTests.SecureTransportTests testExactDefaultAndHardBoundFramesFitSingleSendLimits]' started.
+Test Case '-[NearWireTransportTests.SecureTransportTests testExactDefaultAndHardBoundFramesFitSingleSendLimits]' passed (0.000 seconds).
+Test Case '-[NearWireTransportTests.SecureTransportTests testInvalidLimitsFailWithoutPartialConfiguration]' started.
+Test Case '-[NearWireTransportTests.SecureTransportTests testInvalidLimitsFailWithoutPartialConfiguration]' passed (0.000 seconds).
+Test Case '-[NearWireTransportTests.SecureTransportTests testProductionAppAndViewerCompleteTLS13ALPNHandshake]' started.
+Test Case '-[NearWireTransportTests.SecureTransportTests testProductionAppAndViewerCompleteTLS13ALPNHandshake]' passed (0.009 seconds).
+Test Case '-[NearWireTransportTests.SecureTransportTests testRoleParametersContainTLSOverTCPAndPeerToPeerRouting]' started.
+Test Case '-[NearWireTransportTests.SecureTransportTests testRoleParametersContainTLSOverTCPAndPeerToPeerRouting]' passed (0.002 seconds).
+Test Case '-[NearWireTransportTests.SecureTransportTests testTransportValuesAreSendable]' started.
+Test Case '-[NearWireTransportTests.SecureTransportTests testTransportValuesAreSendable]' passed (0.000 seconds).
+Test Case '-[NearWireTransportTests.SecureTransportTests testTrustSecuritySeamFailsClosedAndCompletesExactlyOnce]' started.
+Test Case '-[NearWireTransportTests.SecureTransportTests testTrustSecuritySeamFailsClosedAndCompletesExactlyOnce]' passed (0.000 seconds).
+Test Case '-[NearWireTransportTests.SecureTransportTests testViewerAdmissionClaimIsAtomicWithClose]' started.
+Test Case '-[NearWireTransportTests.SecureTransportTests testViewerAdmissionClaimIsAtomicWithClose]' passed (0.061 seconds).
+Test Case '-[NearWireTransportTests.SecureTransportTests testViewerIdentityAdaptsValidIdentityAndFailsClosed]' started.
+Test Case '-[NearWireTransportTests.SecureTransportTests testViewerIdentityAdaptsValidIdentityAndFailsClosed]' passed (0.002 seconds).
+Test Case '-[NearWireTransportTests.SecureTransportTests testViewerListenerSerializesCallbacksOnConcurrentTarget]' started.
+Test Case '-[NearWireTransportTests.SecureTransportTests testViewerListenerSerializesCallbacksOnConcurrentTarget]' passed (0.003 seconds).
+Test Case '-[NearWireTransportTests.SecureTransportTests testViewerListenerStartAndCancellationAreSingleShot]' started.
+Test Case '-[NearWireTransportTests.SecureTransportTests testViewerListenerStartAndCancellationAreSingleShot]' passed (0.002 seconds).
+Test Case '-[NearWireTransportTests.SecureTransportTests testViewerRejectsMismatchedALPNBeforeChannelReady]' started.
+Test Case '-[NearWireTransportTests.SecureTransportTests testViewerRejectsMismatchedALPNBeforeChannelReady]' passed (0.004 seconds).
+Test Case '-[NearWireTransportTests.SecureTransportTests testViewerRejectsTLS12Downgrade]' started.
+Test Case '-[NearWireTransportTests.SecureTransportTests testViewerRejectsTLS12Downgrade]' passed (0.003 seconds).
+Test Suite 'SecureTransportTests' passed at 2026-07-11 22:44:39.661.
+	 Executed 14 tests, with 0 failures (0 unexpected) in 0.090 (0.090) seconds
+Test Suite 'WireEventTests' started at 2026-07-11 22:44:39.661.
+Test Case '-[NearWireTransportTests.WireEventTests testBatchRequiresOneEpochDirectionAndContiguousSequence]' started.
+Test Case '-[NearWireTransportTests.WireEventTests testBatchRequiresOneEpochDirectionAndContiguousSequence]' passed (0.007 seconds).
+Test Case '-[NearWireTransportTests.WireEventTests testBatchSequenceOverflowIsRejectedBeforeEncoding]' started.
+Test Case '-[NearWireTransportTests.WireEventTests testBatchSequenceOverflowIsRejectedBeforeEncoding]' passed (0.002 seconds).
+Test Case '-[NearWireTransportTests.WireEventTests testDecodedBatchCountIsRejectedBeforeElementConstruction]' started.
+Test Case '-[NearWireTransportTests.WireEventTests testDecodedBatchCountIsRejectedBeforeElementConstruction]' passed (0.000 seconds).
+Test Case '-[NearWireTransportTests.WireEventTests testDecodeUsesActiveEventModelLimitsAndNormalizesModelErrors]' started.
+Test Case '-[NearWireTransportTests.WireEventTests testDecodeUsesActiveEventModelLimitsAndNormalizesModelErrors]' passed (0.001 seconds).
+Test Case '-[NearWireTransportTests.WireEventTests testDropSummaryIsDiagnosticPlainData]' started.
+Test Case '-[NearWireTransportTests.WireEventTests testDropSummaryIsDiagnosticPlainData]' passed (0.000 seconds).
+Test Case '-[NearWireTransportTests.WireEventTests testEventAndBatchLimitsAreEnforced]' started.
+Test Case '-[NearWireTransportTests.WireEventTests testEventAndBatchLimitsAreEnforced]' passed (0.001 seconds).
+Test Case '-[NearWireTransportTests.WireEventTests testMalformedEventDateAndAggregateBatchFrameLimitAreRejected]' started.
+Test Case '-[NearWireTransportTests.WireEventTests testMalformedEventDateAndAggregateBatchFrameLimitAreRejected]' passed (0.001 seconds).
+Test Case '-[NearWireTransportTests.WireEventTests testOriginDeadlineOverflowAndCanonicalDateRules]' started.
+Test Case '-[NearWireTransportTests.WireEventTests testOriginDeadlineOverflowAndCanonicalDateRules]' passed (0.002 seconds).
+Test Case '-[NearWireTransportTests.WireEventTests testPlainJSONEventPreservesEveryContentCaseWithoutInternalTags]' started.
+Test Case '-[NearWireTransportTests.WireEventTests testPlainJSONEventPreservesEveryContentCaseWithoutInternalTags]' passed (0.001 seconds).
+Test Case '-[NearWireTransportTests.WireEventTests testSenderTTLAndReceiverLocalDeadline]' started.
+Test Case '-[NearWireTransportTests.WireEventTests testSenderTTLAndReceiverLocalDeadline]' passed (0.001 seconds).
+Test Case '-[NearWireTransportTests.WireEventTests testV1BatchExactlyAtEventFrameBoundarySucceeds]' started.
+Test Case '-[NearWireTransportTests.WireEventTests testV1BatchExactlyAtEventFrameBoundarySucceeds]' passed (0.002 seconds).
+Test Suite 'WireEventTests' passed at 2026-07-11 22:44:39.679.
+	 Executed 11 tests, with 0 failures (0 unexpected) in 0.017 (0.018) seconds
+Test Suite 'WireFrameTests' started at 2026-07-11 22:44:39.679.
+Test Case '-[NearWireTransportTests.WireFrameTests testByteAtATimeFragmentationAndCoalescedFrames]' started.
+Test Case '-[NearWireTransportTests.WireFrameTests testByteAtATimeFragmentationAndCoalescedFrames]' passed (0.000 seconds).
+Test Case '-[NearWireTransportTests.WireFrameTests testCallbackFailureIsTerminalAndDoesNotExposePrivateError]' started.
+Test Case '-[NearWireTransportTests.WireFrameTests testCallbackFailureIsTerminalAndDoesNotExposePrivateError]' passed (0.000 seconds).
+Test Case '-[NearWireTransportTests.WireFrameTests testEmptyConsumeIsANoOpAndManyFramesStayBounded]' started.
+Test Case '-[NearWireTransportTests.WireFrameTests testEmptyConsumeIsANoOpAndManyFramesStayBounded]' passed (0.002 seconds).
+Test Case '-[NearWireTransportTests.WireFrameTests testExactBigEndianFrameAndRoundTrip]' started.
+Test Case '-[NearWireTransportTests.WireFrameTests testExactBigEndianFrameAndRoundTrip]' passed (0.000 seconds).
+Test Case '-[NearWireTransportTests.WireFrameTests testFinishRejectsTruncatedPrefixAndPayload]' started.
+Test Case '-[NearWireTransportTests.WireFrameTests testFinishRejectsTruncatedPrefixAndPayload]' passed (0.000 seconds).
+Test Case '-[NearWireTransportTests.WireFrameTests testInvalidLengthUnknownLaneAndTerminalReuse]' started.
+Test Case '-[NearWireTransportTests.WireFrameTests testInvalidLengthUnknownLaneAndTerminalReuse]' passed (0.000 seconds).
+Test Case '-[NearWireTransportTests.WireFrameTests testLaneBoundPrecedesPreflightAndPrivateFailureIsNormalized]' started.
+Test Case '-[NearWireTransportTests.WireFrameTests testLaneBoundPrecedesPreflightAndPrivateFailureIsNormalized]' passed (0.000 seconds).
+Test Case '-[NearWireTransportTests.WireFrameTests testLanePreflightFailureIsTerminalAndRetainsNoPayload]' started.
+Test Case '-[NearWireTransportTests.WireFrameTests testLanePreflightFailureIsTerminalAndRetainsNoPayload]' passed (0.000 seconds).
+Test Case '-[NearWireTransportTests.WireFrameTests testLanePreflightRunsOncePerFrameBeforePayloadCopy]' started.
+Test Case '-[NearWireTransportTests.WireFrameTests testLanePreflightRunsOncePerFrameBeforePayloadCopy]' passed (0.000 seconds).
+Test Case '-[NearWireTransportTests.WireFrameTests testLaneSpecificLimitsAreAppliedAfterLaneByte]' started.
+Test Case '-[NearWireTransportTests.WireFrameTests testLaneSpecificLimitsAreAppliedAfterLaneByte]' passed (0.000 seconds).
+Test Suite 'WireFrameTests' passed at 2026-07-11 22:44:39.683.
+	 Executed 10 tests, with 0 failures (0 unexpected) in 0.003 (0.003) seconds
+Test Suite 'WireGoldenFixtureTests' started at 2026-07-11 22:44:39.683.
+Test Case '-[NearWireTransportTests.WireGoldenFixtureTests testCanonicalFixtureBytesAndCheckedInFiles]' started.
+Test Case '-[NearWireTransportTests.WireGoldenFixtureTests testCanonicalFixtureBytesAndCheckedInFiles]' passed (0.006 seconds).
+Test Case '-[NearWireTransportTests.WireGoldenFixtureTests testCanonicalFixturesDecode]' started.
+Test Case '-[NearWireTransportTests.WireGoldenFixtureTests testCanonicalFixturesDecode]' passed (0.005 seconds).
+Test Suite 'WireGoldenFixtureTests' passed at 2026-07-11 22:44:39.694.
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.011 (0.011) seconds
+Test Suite 'WireMessageTests' started at 2026-07-11 22:44:39.694.
+Test Case '-[NearWireTransportTests.WireMessageTests testControlPayloadsRoundTripAndTextBounds]' started.
+Test Case '-[NearWireTransportTests.WireMessageTests testControlPayloadsRoundTripAndTextBounds]' passed (0.001 seconds).
+Test Case '-[NearWireTransportTests.WireMessageTests testDirectPublicPayloadDecodeNormalizesCoreModelErrors]' started.
+Test Case '-[NearWireTransportTests.WireMessageTests testDirectPublicPayloadDecodeNormalizesCoreModelErrors]' passed (0.000 seconds).
+Test Case '-[NearWireTransportTests.WireMessageTests testExpectedVersionGuardPrecedesV1EnvelopeSemantics]' started.
+Test Case '-[NearWireTransportTests.WireMessageTests testExpectedVersionGuardPrecedesV1EnvelopeSemantics]' passed (0.000 seconds).
+Test Case '-[NearWireTransportTests.WireMessageTests testHelloMessageIsDeterministicAndTypedRoundTrips]' started.
+Test Case '-[NearWireTransportTests.WireMessageTests testHelloMessageIsDeterministicAndTypedRoundTrips]' passed (0.000 seconds).
+Test Case '-[NearWireTransportTests.WireMessageTests testInvalidJSONAndTaggedUInt64AreRejected]' started.
+Test Case '-[NearWireTransportTests.WireMessageTests testInvalidJSONAndTaggedUInt64AreRejected]' passed (0.000 seconds).
+Test Case '-[NearWireTransportTests.WireMessageTests testNoncanonicalAndDuplicateJSONAreRejected]' started.
+Test Case '-[NearWireTransportTests.WireMessageTests testNoncanonicalAndDuplicateJSONAreRejected]' passed (0.000 seconds).
+Test Case '-[NearWireTransportTests.WireMessageTests testPrimitiveConfigurationBoundariesAndSendability]' started.
+Test Case '-[NearWireTransportTests.WireMessageTests testPrimitiveConfigurationBoundariesAndSendability]' passed (0.000 seconds).
+Test Case '-[NearWireTransportTests.WireMessageTests testProtocolVersionCodableUsesValidatedScalarRepresentation]' started.
+Test Case '-[NearWireTransportTests.WireMessageTests testProtocolVersionCodableUsesValidatedScalarRepresentation]' passed (0.000 seconds).
+Test Case '-[NearWireTransportTests.WireMessageTests testSessionCodecBindsVersionCapabilitiesAndTerminalDecodeErrors]' started.
+Test Case '-[NearWireTransportTests.WireMessageTests testSessionCodecBindsVersionCapabilitiesAndTerminalDecodeErrors]' passed (0.000 seconds).
+Test Case '-[NearWireTransportTests.WireMessageTests testSessionCodecRejectsUnsupportedVersionAndLocalLimitWidening]' started.
+Test Case '-[NearWireTransportTests.WireMessageTests testSessionCodecRejectsUnsupportedVersionAndLocalLimitWidening]' passed (0.000 seconds).
+Test Case '-[NearWireTransportTests.WireMessageTests testTokenValidationUsesDomainSpecificErrors]' started.
+Test Case '-[NearWireTransportTests.WireMessageTests testTokenValidationUsesDomainSpecificErrors]' passed (0.000 seconds).
+Test Case '-[NearWireTransportTests.WireMessageTests testUnknownEnvelopeFieldIsIgnoredButRequiredFieldsRemainRequired]' started.
+Test Case '-[NearWireTransportTests.WireMessageTests testUnknownEnvelopeFieldIsIgnoredButRequiredFieldsRemainRequired]' passed (0.000 seconds).
+Test Case '-[NearWireTransportTests.WireMessageTests testWrongLaneAndPhaseAdmissionAreRejected]' started.
+Test Case '-[NearWireTransportTests.WireMessageTests testWrongLaneAndPhaseAdmissionAreRejected]' passed (0.000 seconds).
+Test Suite 'WireMessageTests' passed at 2026-07-11 22:44:39.697.
+	 Executed 13 tests, with 0 failures (0 unexpected) in 0.003 (0.003) seconds
+Test Suite 'WireNegotiationTests' started at 2026-07-11 22:44:39.697.
+Test Case '-[NearWireTransportTests.WireNegotiationTests testAcknowledgementCannotEscalateNegotiatedValues]' started.
+Test Case '-[NearWireTransportTests.WireNegotiationTests testAcknowledgementCannotEscalateNegotiatedValues]' passed (0.000 seconds).
+Test Case '-[NearWireTransportTests.WireNegotiationTests testHighestVersionConservativeLimitAndCapabilityIntersection]' started.
+Test Case '-[NearWireTransportTests.WireNegotiationTests testHighestVersionConservativeLimitAndCapabilityIntersection]' passed (0.000 seconds).
+Test Case '-[NearWireTransportTests.WireNegotiationTests testIncompatibleVersionRoleCodecAndPolicyFail]' started.
+Test Case '-[NearWireTransportTests.WireNegotiationTests testIncompatibleVersionRoleCodecAndPolicyFail]' passed (0.000 seconds).
+Test Case '-[NearWireTransportTests.WireNegotiationTests testProductVersionsAreDiagnosticAndUnknownCapabilitiesIntersectExactly]' started.
+Test Case '-[NearWireTransportTests.WireNegotiationTests testProductVersionsAreDiagnosticAndUnknownCapabilitiesIntersectExactly]' passed (0.000 seconds).
+Test Case '-[NearWireTransportTests.WireNegotiationTests testSequenceCounterValidatorGapDuplicateDirectionAndEpoch]' started.
+Test Case '-[NearWireTransportTests.WireNegotiationTests testSequenceCounterValidatorGapDuplicateDirectionAndEpoch]' passed (0.000 seconds).
+Test Case '-[NearWireTransportTests.WireNegotiationTests testSequenceMaximumCanBeAllocatedAndValidatedOnce]' started.
+Test Case '-[NearWireTransportTests.WireNegotiationTests testSequenceMaximumCanBeAllocatedAndValidatedOnce]' passed (0.000 seconds).
+Test Suite 'WireNegotiationTests' passed at 2026-07-11 22:44:39.699.
+	 Executed 6 tests, with 0 failures (0 unexpected) in 0.001 (0.002) seconds
+Test Suite 'WirePreHandshakeCodecTests' started at 2026-07-11 22:44:39.699.
+Test Case '-[NearWireTransportTests.WirePreHandshakeCodecTests testAllowedTypesValidateTheirPayloadBeforeReturningAValue]' started.
+Test Case '-[NearWireTransportTests.WirePreHandshakeCodecTests testAllowedTypesValidateTheirPayloadBeforeReturningAValue]' passed (0.001 seconds).
+Test Case '-[NearWireTransportTests.WirePreHandshakeCodecTests testClosedMessagesHaveDeterministicV1RoundTrips]' started.
+Test Case '-[NearWireTransportTests.WirePreHandshakeCodecTests testClosedMessagesHaveDeterministicV1RoundTrips]' passed (0.001 seconds).
+Test Case '-[NearWireTransportTests.WirePreHandshakeCodecTests testCodecAndTypedResultAreSendableAndCodecRetainsOnlyLimits]' started.
+Test Case '-[NearWireTransportTests.WirePreHandshakeCodecTests testCodecAndTypedResultAreSendableAndCodecRetainsOnlyLimits]' passed (0.000 seconds).
+Test Case '-[NearWireTransportTests.WirePreHandshakeCodecTests testControlVersionPrecedesTypeLaneAndBodyInterpretation]' started.
+Test Case '-[NearWireTransportTests.WirePreHandshakeCodecTests testControlVersionPrecedesTypeLaneAndBodyInterpretation]' passed (0.000 seconds).
+Test Case '-[NearWireTransportTests.WirePreHandshakeCodecTests testEventLanePreflightWinsBeforeJSONAndVersionParsing]' started.
+Test Case '-[NearWireTransportTests.WirePreHandshakeCodecTests testEventLanePreflightWinsBeforeJSONAndVersionParsing]' passed (0.000 seconds).
+Test Case '-[NearWireTransportTests.WirePreHandshakeCodecTests testEveryKnownDisallowedTypeHasExactAdmissionCode]' started.
+Test Case '-[NearWireTransportTests.WirePreHandshakeCodecTests testEveryKnownDisallowedTypeHasExactAdmissionCode]' passed (0.000 seconds).
+Test Case '-[NearWireTransportTests.WirePreHandshakeCodecTests testMalformedNoncanonicalDuplicateAndOversizedPayloadsAreTerminal]' started.
+Test Case '-[NearWireTransportTests.WirePreHandshakeCodecTests testMalformedNoncanonicalDuplicateAndOversizedPayloadsAreTerminal]' passed (0.000 seconds).
+Test Case '-[NearWireTransportTests.WirePreHandshakeCodecTests testTighterCollectionLimitAndNegotiationHandoff]' started.
+Test Case '-[NearWireTransportTests.WirePreHandshakeCodecTests testTighterCollectionLimitAndNegotiationHandoff]' passed (0.000 seconds).
+Test Case '-[NearWireTransportTests.WirePreHandshakeCodecTests testWiderBootstrapIntervalsNegotiateHighestVersionBeforeCodecRegistration]' started.
+Test Case '-[NearWireTransportTests.WirePreHandshakeCodecTests testWiderBootstrapIntervalsNegotiateHighestVersionBeforeCodecRegistration]' passed (0.001 seconds).
+Test Suite 'WirePreHandshakeCodecTests' passed at 2026-07-11 22:44:39.703.
+	 Executed 9 tests, with 0 failures (0 unexpected) in 0.003 (0.004) seconds
+Test Suite 'NearWireCoreHarnessPackageTests.xctest' passed at 2026-07-11 22:44:39.703.
+	 Executed 178 tests, with 0 failures (0 unexpected) in 0.797 (0.805) seconds
+Test Suite 'All tests' passed at 2026-07-11 22:44:39.703.
+	 Executed 178 tests, with 0 failures (0 unexpected) in 0.797 (0.805) seconds
+◇ Test run started.
+↳ Testing Library Version: 1902
+↳ Target Platform: arm64e-apple-macos14.0
+✔ Test run with 0 tests in 0 suites passed after 0.001 seconds.
+Building for debugging...
+[0/19] /tmp/nearwire-package-harness.aLDHib/RealTLSAdmissionBuild/arm64-apple-macosx/debug/NearWirePackageTests.derived/runner.swift
+[0/19] Write sources
+[16/19] Write swift-version--58304C5D6DBC2206.txt
+[18/31] Compiling NearWireCore JSONValue.swift
+[19/32] Compiling NearWireCore EventType.swift
+[20/32] Compiling NearWireCore EventValidationLimits.swift
+[21/32] Compiling NearWireCore EventModelError.swift
+[22/32] Compiling NearWireCore EventEnvelope.swift
+[23/32] Compiling NearWireCore EventDraft.swift
+[24/32] Compiling NearWireCore PairingCode.swift
+[25/32] Compiling NearWireCore EventContentCodec.swift
+[26/32] Compiling NearWireCore PerformanceSnapshot.swift
+[27/32] Compiling NearWireCore BonjourServiceIdentity.swift
+[28/32] Emitting module NearWireCore
+[29/32] Compiling NearWireCore EventMetadata.swift
+[30/32] Compiling NearWireCore NearWireCoreModule.swift
+[31/61] Compiling NearWireTransport WireProtocolError.swift
+[32/62] Compiling NearWireTransport WireNegotiation.swift
+[33/62] Compiling NearWireFlowControl NearWireFlowControlModule.swift
+[34/62] Compiling NearWireFlowControl EventBatchScheduler.swift
+[35/62] Compiling NearWireFlowControl FlowControlError.swift
+[36/62] Compiling NearWireFlowControl EventRateControl.swift
+[37/62] Compiling NearWireFlowControl EventQueueConfiguration.swift
+[38/62] Compiling NearWireTransport WireJSON.swift
+[39/62] Compiling NearWireTransport WirePrimitives.swift
+[40/62] Compiling NearWireTransport WireSequence.swift
+[41/62] Compiling NearWireTransport NWConnectionDriver.swift
+[42/62] Compiling NearWireTransport NearWireTransportModule.swift
+[43/62] Emitting module NearWireTransport
+[44/62] Compiling NearWireTransport WireMessage.swift
+[45/62] Compiling NearWireTransport SecureByteChannel.swift
+[46/62] Compiling NearWireTransport SecureNetworkParameters.swift
+[47/62] Compiling NearWireFlowControl BoundedEventQueue.swift
+[48/62] Emitting module NearWireFlowControl
+[49/68] Compiling NearWireTransport SecureTransportPrimitives.swift
+[50/68] Compiling NearWireTransport WireControlPayloads.swift
+[51/68] Compiling NearWireTransport WireEventPayloads.swift
+[52/68] Compiling NearWireTransport WireFrame.swift
+[53/94] Emitting module NearWireTestSupport
+[54/94] Compiling NearWireTestSupport NearWireTestSupportModule.swift
+[55/96] Compiling NearWire ViewerDiscoveryCoordinator.swift
+[56/96] Compiling NearWire ViewerDiscoveryEventIngress.swift
+[57/97] Compiling NearWire SDKSessionAdmission.swift
+[58/97] Compiling NearWire SDKSessionChannelIngress.swift
+[59/97] Compiling NearWire ProcessConnectionLease.swift
+[60/97] Compiling NearWire AsyncStreamHubs.swift
+[61/97] Compiling NearWire BonjourBrowserDriver.swift
+[62/97] Compiling NearWire NearWireConversions.swift
+[63/97] Compiling NearWire NearWireError.swift
+[64/97] Compiling NearWire NearWirePublicModels.swift
+[65/97] Emitting module NearWire
+[66/97] Compiling NearWire ViewerDiscoveryModels.swift
+[67/97] Compiling NearWire NearWire.swift
+[68/97] Compiling NearWire SDKSessionAdmissionModels.swift
+[69/97] Compiling NearWire SDKSessionTransportCore.swift
+[70/110] Compiling NearWireUI NearWireUIModule.swift
+[71/110] Emitting module NearWireUI
+[72/110] Emitting module NearWirePerformance
+[73/110] Compiling NearWirePerformance NearWirePerformanceModule.swift
+[74/114] Emitting module NearWireTestSupportTests
+[75/114] Compiling NearWireTestSupportTests ModuleSmokeTests.swift
+[76/114] Emitting module NearWirePerformanceTests
+[77/114] Compiling NearWirePerformanceTests ModuleSmokeTests.swift
+[78/114] Compiling NearWireUITests ModuleSmokeTests.swift
+[79/114] Emitting module NearWireUITests
+[80/114] Compiling NearWireTransportTests WireGoldenFixtureTests.swift
+[81/114] Compiling NearWireTransportTests WireNegotiationTests.swift
+[82/115] Compiling NearWireTransportTests WireMessageTests.swift
+[83/115] Compiling NearWireTransportTests WireFrameTests.swift
+[84/115] Compiling NearWireCoreTests EventMetadataTests.swift
+[85/115] Compiling NearWireCoreTests EventEnvelopeTests.swift
+[86/115] Compiling NearWireCoreTests PairingDiscoveryIdentityTests.swift
+[87/115] Compiling NearWireCoreTests PerformanceSnapshotTests.swift
+[88/115] Compiling NearWireCoreTests EventTestSupport.swift
+[89/115] Compiling NearWireCoreTests JSONValueTests.swift
+[90/115] Emitting module NearWireCoreTests
+[91/115] Compiling NearWireCoreTests ModuleSmokeTests.swift
+[92/115] Compiling NearWireTransportTests WirePreHandshakeCodecTests.swift
+[93/115] Compiling NearWireTransportTests WireEventTests.swift
+[94/115] Compiling NearWireTransportTests SecureTransportTests.swift
+[95/115] Compiling NearWireTransportTests WireTestSupport.swift
+[96/115] Emitting module NearWireFlowControlTests
+[97/115] Compiling NearWireFlowControlTests EventRateControlTests.swift
+[98/115] Compiling NearWireFlowControlTests BoundedEventQueueTests.swift
+[99/115] Compiling NearWireFlowControlTests EventBatchSchedulerTests.swift
+[100/115] Compiling NearWireFlowControlTests ModuleSmokeTests.swift
+[101/115] Compiling NearWireFlowControlTests FlowControlTestSupport.swift
+[102/115] Emitting module NearWireTransportTests
+[103/115] Compiling NearWireTransportTests SecureByteChannelTests.swift
+[104/115] Compiling NearWireTransportTests ModuleSmokeTests.swift
+[105/115] Compiling NearWireTests ViewerDiscoveryTests.swift
+[106/115] Compiling NearWireTests ProcessConnectionLeaseTests.swift
+[107/115] Emitting module NearWireTests
+[108/115] Compiling NearWireTests NearWireEventAPITests.swift
+[109/115] Compiling NearWireTests NearWireConfigurationTests.swift
+[110/115] Compiling NearWireTests NearWireStreamLifecycleTests.swift
+[111/115] Compiling NearWireTests NearWireTestSupport.swift
+[112/115] Compiling NearWireTests NearWireBufferTests.swift
+[113/115] Compiling NearWireTests SDKSessionAdmissionTests.swift
+[114/117] Compiling NearWirePackageTests runner.swift
+[115/117] Emitting module NearWirePackageTests
+[115/117] Write Objects.LinkFileList
+[116/117] Linking NearWirePackageTests
+Build complete! (13.34s)
+Test Suite 'Selected tests' started at 2026-07-11 22:44:54.450.
+Test Suite 'NearWirePackageTests.xctest' started at 2026-07-11 22:44:54.451.
+Test Suite 'SDKSessionAdmissionTests' started at 2026-07-11 22:44:54.451.
+Test Case '-[NearWireTests.SDKSessionAdmissionTests testRealTLSProductionChannelCompletesAdmissionSequence]' started.
+Test Case '-[NearWireTests.SDKSessionAdmissionTests testRealTLSProductionChannelCompletesAdmissionSequence]' passed (0.014 seconds).
+Test Suite 'SDKSessionAdmissionTests' passed at 2026-07-11 22:44:54.465.
+	 Executed 1 test, with 0 failures (0 unexpected) in 0.014 (0.014) seconds
+Test Suite 'NearWirePackageTests.xctest' passed at 2026-07-11 22:44:54.465.
+	 Executed 1 test, with 0 failures (0 unexpected) in 0.014 (0.014) seconds
+Test Suite 'Selected tests' passed at 2026-07-11 22:44:54.465.
+	 Executed 1 test, with 0 failures (0 unexpected) in 0.014 (0.015) seconds
+◇ Test run started.
+↳ Testing Library Version: 1902
+↳ Target Platform: arm64e-apple-macos14.0
+✔ Test run with 0 tests in 0 suites passed after 0.001 seconds.
+Real TLS session admission integration passed.
+Swift Package verification passed.
+
+EXIT_STATUS: 0
+FINISHED_AT_UTC: 2026-07-11T14:44:55Z

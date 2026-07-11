@@ -65,6 +65,7 @@ if [[ -z "$xcode_major" || "$xcode_major" -lt 16 ]]; then
 fi
 
 "$ROOT/Scripts/verify-process-lease.sh"
+ruby "$ROOT/Scripts/check-session-admission-structure.rb" "$ROOT"
 
 strict_concurrency_options=(
   -Xswiftc -strict-concurrency=complete
@@ -166,7 +167,7 @@ if xcrun swiftc \
   echo "Swift Package consumer unexpectedly accessed an implementation-only SDK type." >&2
   exit 1
 fi
-if ! grep -Fq "cannot find 'JSONValue' in scope" "$forbidden_sdk_spm"; then
+if ! grep -Fq "cannot find type 'SDKSessionAdmission' in scope" "$forbidden_sdk_spm"; then
   echo "Swift Package implementation-type boundary failed for an unexpected reason." >&2
   cat "$forbidden_sdk_spm" >&2
   exit 1
@@ -353,7 +354,7 @@ if xcrun swiftc \
   echo "CocoaPods consumer unexpectedly accessed an implementation-only SDK type." >&2
   exit 1
 fi
-if ! grep -Fq "cannot find 'JSONValue' in scope" "$forbidden_sdk_pod"; then
+if ! grep -Fq "cannot find type 'SDKSessionAdmission' in scope" "$forbidden_sdk_pod"; then
   echo "CocoaPods implementation-type boundary failed for an unexpected reason." >&2
   cat "$forbidden_sdk_pod" >&2
   exit 1
@@ -567,5 +568,24 @@ swift test \
   --disable-sandbox \
   --scratch-path "$package_harness/CoreHarnessBuild" \
   "${strict_concurrency_options[@]}"
+
+real_tls_output="$(swift test \
+  --package-path "$package_harness" \
+  "${swift_cache_options[@]}" \
+  --disable-sandbox \
+  --scratch-path "$package_harness/RealTLSAdmissionBuild" \
+  --filter SDKSessionAdmissionTests.testRealTLSProductionChannelCompletesAdmissionSequence \
+  "${strict_concurrency_options[@]}" 2>&1)"
+printf '%s\n' "$real_tls_output"
+if grep -Fq "Test skipped" <<< "$real_tls_output"; then
+  echo "Real TLS session admission requires an unrestricted macOS validation environment." >&2
+  exit 1
+fi
+if ! grep -Fq "Executed 1 test, with 0 failures" <<< "$real_tls_output"; then
+  echo "Real TLS session admission result was not proven by exactly one passing test." >&2
+  exit 1
+fi
+
+echo "Real TLS session admission integration passed."
 
 echo "Swift Package verification passed."

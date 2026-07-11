@@ -73,6 +73,7 @@ import Foundation
 
   public mutating func consume(
     _ bytes: Data,
+    preflightLane: (WireLane) throws -> Void = { _ in },
     onFrame: (WireFrame) throws -> Void
   ) throws {
     if let terminalError {
@@ -124,6 +125,7 @@ import Foundation
               message: "Frame exceeds its lane-specific payload limit."
             )
           }
+          try preflightLane(decodedLane)
           lane = decodedLane
           payload.reserveCapacity(payloadLength)
         }

@@ -115,6 +115,89 @@ final class WireFrameTests: XCTestCase {
     XCTAssertTrue(decoder.isFailed)
   }
 
+  func testLanePreflightRunsOncePerFrameBeforePayloadCopy() throws {
+    let control = try WireFrameEncoder.encode(lane: .control, payload: Data("{}".utf8))
+    let event = try WireFrameEncoder.encode(lane: .event, payload: Data("[]".utf8))
+    var decoder = WireFrameDecoder()
+    var lanes: [WireLane] = []
+    var frames: [WireFrame] = []
+
+    try decoder.consume(
+      control.prefix(5),
+      preflightLane: { lanes.append($0) },
+      onFrame: { frames.append($0) }
+    )
+    XCTAssertEqual(lanes, [.control])
+    XCTAssertTrue(frames.isEmpty)
+
+    try decoder.consume(
+      control.dropFirst(5) + event,
+      preflightLane: { lanes.append($0) },
+      onFrame: { frames.append($0) }
+    )
+    XCTAssertEqual(lanes, [.control, .event])
+    XCTAssertEqual(frames.map(\.lane), [.control, .event])
+  }
+
+  func testLanePreflightFailureIsTerminalAndRetainsNoPayload() throws {
+    let encoded = try WireFrameEncoder.encode(
+      lane: .event,
+      payload: Data(repeating: 0x7B, count: 1_024)
+    )
+    var decoder = WireFrameDecoder()
+
+    XCTAssertThrowsError(
+      try decoder.consume(
+        encoded,
+        preflightLane: { lane in
+          XCTAssertEqual(lane, .event)
+          throw WireProtocolError(
+            code: .phaseViolation,
+            path: "phase",
+            message: "Event lane is not active."
+          )
+        },
+        onFrame: { _ in XCTFail("Rejected frame must not be delivered.") }
+      )
+    ) { error in
+      let wireError = error as? WireProtocolError
+      XCTAssertEqual(wireError?.code, .phaseViolation)
+      XCTAssertEqual(wireError?.disposition, .connectionTerminal)
+    }
+    XCTAssertEqual(retainedPayloadByteCount(decoder), 0)
+    assertWireError(.decoderFailed) {
+      try decoder.consume(encoded) { _ in }
+    }
+  }
+
+  func testLaneBoundPrecedesPreflightAndPrivateFailureIsNormalized() throws {
+    let limits = try WireFrameLimits(
+      maximumControlPayloadBytes: 2,
+      maximumEventPayloadBytes: 2
+    )
+    var oversized = WireFrameDecoder(limits: limits)
+    var preflightCount = 0
+    assertWireError(.frameTooLarge) {
+      try oversized.consume(
+        Data([0, 0, 0, 4, WireLane.control.rawValue]),
+        preflightLane: { _ in preflightCount += 1 },
+        onFrame: { _ in }
+      )
+    }
+    XCTAssertEqual(preflightCount, 0)
+
+    struct PrivateFailure: Error {}
+    let encoded = try WireFrameEncoder.encode(lane: .control, payload: Data("{}".utf8))
+    var privateFailure = WireFrameDecoder()
+    assertWireError(.decoderFailed) {
+      try privateFailure.consume(
+        encoded,
+        preflightLane: { _ in throw PrivateFailure() },
+        onFrame: { _ in }
+      )
+    }
+  }
+
   func testFinishRejectsTruncatedPrefixAndPayload() throws {
     var prefix = WireFrameDecoder()
     try prefix.consume(Data([0, 0, 0])) { _ in }
@@ -129,5 +212,12 @@ final class WireFrameTests: XCTestCase {
       WireFrameEncoder.encode(lane: .control, payload: Data("{}".utf8))
     ) { _ in }
     XCTAssertNoThrow(try complete.finish())
+  }
+
+  private func retainedPayloadByteCount(_ decoder: WireFrameDecoder) -> Int {
+    for child in Mirror(reflecting: decoder).children where child.label == "payload" {
+      return (child.value as? Data)?.count ?? -1
+    }
+    return -1
   }
 }

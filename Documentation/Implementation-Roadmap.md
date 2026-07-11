@@ -42,7 +42,7 @@ Add the fixed V1 bootstrap codec that exchanges only hello, safe error, and disc
 
 ### 10. `sdk-session-admission`
 
-Compose pairing discovery, peer-to-peer-enabled TLS connection, hello and admission handshake, Viewer identity, active route ownership, and negotiated capabilities behind internal session admission.
+Compose pairing discovery, peer-to-peer-enabled TLS connection, hello and admission handshake, discovery-to-hello Viewer identity consistency, admitted route ownership, and negotiated capabilities behind internal session admission. Event transfer remains inactive.
 
 ### 11. `sdk-active-event-pump`
 

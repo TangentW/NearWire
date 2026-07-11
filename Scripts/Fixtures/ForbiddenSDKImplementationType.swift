@@ -1,3 +1,3 @@
 import NearWire
 
-let forbiddenSDKImplementationValue = JSONValue.null
+let forbiddenSDKImplementationValue: SDKSessionAdmission? = nil
