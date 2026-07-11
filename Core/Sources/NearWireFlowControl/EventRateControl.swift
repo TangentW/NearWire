@@ -120,7 +120,7 @@ import Foundation
     self = planned
   }
 
-  mutating func consumePrevalidated(_ count: Int) {
+  @_spi(NearWireInternal) public mutating func consumePrevalidated(_ count: Int) {
     precondition(count >= 0 && Double(count) <= availableTokens.rounded(.down))
     availableTokens -= Double(count)
   }

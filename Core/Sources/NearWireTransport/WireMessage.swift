@@ -275,6 +275,33 @@ enum WireMessageCodec {
     )
   }
 
+  public func maximumEncodedSingleEventFrameBytes() throws -> Int {
+    let placeholderBody = JSONValue.null
+    let placeholderBodyBytes = try placeholderBody.deterministicData().count
+    let placeholderMessageBytes = try WireMessage(
+      version: selectedVersion,
+      type: .event,
+      body: placeholderBody
+    ).deterministicPayloadData().count
+    let wrapperBytes = placeholderMessageBytes - placeholderBodyBytes
+    let (payloadBytes, payloadOverflow) = limits.maximumEventBytes.addingReportingOverflow(
+      wrapperBytes
+    )
+    let (frameBytes, frameOverflow) = payloadBytes.addingReportingOverflow(
+      WireFrameLimits.encodedFrameOverheadBytes
+    )
+    guard !payloadOverflow, !frameOverflow,
+      payloadBytes <= limits.frame.maximumEventPayloadBytes
+    else {
+      throw WireProtocolError(
+        code: .invalidConfiguration,
+        path: "maximumEventBytes",
+        message: "Maximum Event record cannot fit its fully encoded Event frame."
+      )
+    }
+    return frameBytes
+  }
+
   private func encodePayload<Payload: WireMessagePayload>(
     _ payload: Payload,
     phase: WireSessionPhase

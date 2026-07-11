@@ -87,11 +87,112 @@ final class SDKLockedCapture<Value: Sendable>: @unchecked Sendable {
   }
 }
 
+final class SDKSynchronousBarrier: @unchecked Sendable {
+  private let lock = NSLock()
+  private let releaseSemaphore = DispatchSemaphore(value: 0)
+  private var didReach = false
+  private var waiters: [CheckedContinuation<Void, Never>] = []
+
+  func block() {
+    lock.lock()
+    didReach = true
+    let continuations = waiters
+    waiters.removeAll(keepingCapacity: false)
+    lock.unlock()
+    for continuation in continuations { continuation.resume() }
+    releaseSemaphore.wait()
+  }
+
+  func waitUntilReached() async {
+    await withCheckedContinuation { continuation in
+      lock.lock()
+      if didReach {
+        lock.unlock()
+        continuation.resume()
+      } else {
+        waiters.append(continuation)
+        lock.unlock()
+      }
+    }
+  }
+
+  func release() {
+    releaseSemaphore.signal()
+  }
+}
+
+final class SDKTargetSynchronousBarrier: @unchecked Sendable {
+  private let lock = NSLock()
+  private let targetEntry: Int
+  private let releaseSemaphore = DispatchSemaphore(value: 0)
+  private var entryCount = 0
+  private var didReachTarget = false
+  private var waiters: [CheckedContinuation<Void, Never>] = []
+
+  init(targetEntry: Int) {
+    precondition(targetEntry > 0)
+    self.targetEntry = targetEntry
+  }
+
+  func blockAtTarget() {
+    let shouldBlock: Bool = lock.withLock {
+      entryCount += 1
+      guard entryCount == targetEntry else { return false }
+      didReachTarget = true
+      let current = waiters
+      waiters.removeAll(keepingCapacity: false)
+      for continuation in current { continuation.resume() }
+      return true
+    }
+    if shouldBlock { releaseSemaphore.wait() }
+  }
+
+  func waitUntilReached() async {
+    await withCheckedContinuation { continuation in
+      let resumeImmediately: Bool = lock.withLock {
+        if didReachTarget { return true }
+        waiters.append(continuation)
+        return false
+      }
+      if resumeImmediately { continuation.resume() }
+    }
+  }
+
+  func release() {
+    releaseSemaphore.signal()
+  }
+}
+
 let sdkTestSessionRoute = SDKSessionRoute(
   sessionEpoch: UUID(uuidString: "20000000-0000-0000-0000-000000000001")!,
   viewerID: "viewer-one",
   appID: "app-one"
 )
+
+func makeSDKTestSessionCodec(maximumEventBytes: Int = 256 * 1_024) throws -> WireSessionCodec {
+  let app = try WireHello(
+    productVersion: WireProductVersion("1.0.0"),
+    role: .app,
+    installationID: EndpointID(rawValue: sdkTestSessionRoute.appID),
+    maximumEventBytes: maximumEventBytes
+  )
+  let viewer = try WireHello(
+    productVersion: WireProductVersion("1.0.0"),
+    role: .viewer,
+    installationID: EndpointID(rawValue: sdkTestSessionRoute.viewerID),
+    maximumEventBytes: maximumEventBytes
+  )
+  return try WireSessionCodec(negotiation: WireNegotiator.negotiate(local: app, remote: viewer))
+}
+
+func makeSDKTestSequenceCounter(
+  route: SDKSessionRoute = sdkTestSessionRoute
+) throws -> WireSequenceCounter {
+  WireSequenceCounter(
+    sessionEpoch: try SessionEpoch(rawValue: route.sessionEpoch.uuidString.lowercased()),
+    direction: .appToViewer
+  )
+}
 
 func makeIncomingEnvelope(
   id: String = "10000000-0000-0000-0000-000000000001",

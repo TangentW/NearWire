@@ -13,6 +13,9 @@ enum SDKSessionAdmissionState: String, Equatable, Sendable {
   case exchangingHello
   case awaitingApproval
   case admitted
+  case bindingActiveOwner
+  case negotiatingPolicy
+  case active
   case failed
   case cancelled
 }
@@ -42,6 +45,17 @@ struct SDKSessionAdmissionError: Error, Equatable, Sendable {
     case alreadyAttached
     case pullAlreadyPending
     case pullCancelled
+    case policyConsumerClaimed
+    case terminationWaitAlreadyStarted
+    case terminationWaitCancelled
+    case policyNegotiationTimedOut
+    case activeIngressOverflow
+    case activeWorkLimitExceeded
+    case routeMismatch
+    case sequenceViolation
+    case outboundEncodingFailed
+    case ownerUnavailable
+    case clockFailed
   }
 
   let code: Code
@@ -94,6 +108,28 @@ struct SDKSessionAdmissionError: Error, Equatable, Sendable {
       return "A policy-message pull is already pending."
     case .pullCancelled:
       return "The policy-message pull was cancelled."
+    case .policyConsumerClaimed:
+      return "Policy-message ownership has already been claimed."
+    case .terminationWaitAlreadyStarted:
+      return "Termination observation has already started."
+    case .terminationWaitCancelled:
+      return "Termination observation was cancelled."
+    case .policyNegotiationTimedOut:
+      return "Active flow-policy negotiation timed out."
+    case .activeIngressOverflow:
+      return "Active Event ingress exceeded its bound."
+    case .activeWorkLimitExceeded:
+      return "Active Event work exceeded its bound."
+    case .routeMismatch:
+      return "An active Event did not match the admitted route."
+    case .sequenceViolation:
+      return "An active Event sequence was invalid."
+    case .outboundEncodingFailed:
+      return "An outbound Event could not be encoded."
+    case .ownerUnavailable:
+      return "The bound NearWire owner is unavailable."
+    case .clockFailed:
+      return "The active session clock failed."
     }
   }
 
@@ -250,6 +286,90 @@ final class SDKSessionAttemptToken: @unchecked Sendable {}
 final class SDKSessionDeadlineToken: @unchecked Sendable {}
 final class SDKSessionPullToken: @unchecked Sendable {}
 
+struct SDKActiveEventPumpLimits: Equatable, Sendable {
+  static let hardMaximumPolicyTimeoutSeconds = 120
+  static let hardMaximumIncomingEvents = 10_000
+  static let hardMaximumIncomingBytes = 64 * 1_024 * 1_024
+  static let hardMaximumFramesPerReceive = 1_024
+  static let hardMaximumOutboundServiceUnits = 256
+  static let hardMaximumOutboundBytes = 64 * 1_024 * 1_024
+  static let hardMaximumIncomingPublications = 256
+  static let hardMaximumDeferredPolicyTransactions = 128
+
+  static let `default` = SDKActiveEventPumpLimits(
+    uncheckedInitialPolicyTimeoutSeconds: 10,
+    maximumIncomingEvents: 1_024,
+    maximumIncomingEncodedBytes: 8 * 1_024 * 1_024,
+    maximumCompletedFramesPerReceive: 256,
+    maximumOutboundServiceUnitsPerTurn: 64,
+    maximumOutboundAccountedBytesPerTurn: 2 * 1_024 * 1_024,
+    maximumIncomingPublicationsPerTurn: 32,
+    maximumDeferredPolicyTransactions: 32
+  )
+
+  let initialPolicyTimeoutSeconds: Int
+  let maximumIncomingEvents: Int
+  let maximumIncomingEncodedBytes: Int
+  let maximumCompletedFramesPerReceive: Int
+  let maximumOutboundServiceUnitsPerTurn: Int
+  let maximumOutboundAccountedBytesPerTurn: Int
+  let maximumIncomingPublicationsPerTurn: Int
+  let maximumDeferredPolicyTransactions: Int
+
+  init(
+    initialPolicyTimeoutSeconds: Int = 10,
+    maximumIncomingEvents: Int = 1_024,
+    maximumIncomingEncodedBytes: Int = 8 * 1_024 * 1_024,
+    maximumCompletedFramesPerReceive: Int = 256,
+    maximumOutboundServiceUnitsPerTurn: Int = 64,
+    maximumOutboundAccountedBytesPerTurn: Int = 2 * 1_024 * 1_024,
+    maximumIncomingPublicationsPerTurn: Int = 32,
+    maximumDeferredPolicyTransactions: Int = 32
+  ) throws {
+    guard (1...Self.hardMaximumPolicyTimeoutSeconds).contains(initialPolicyTimeoutSeconds),
+      (1...Self.hardMaximumIncomingEvents).contains(maximumIncomingEvents),
+      (1...Self.hardMaximumIncomingBytes).contains(maximumIncomingEncodedBytes),
+      (1...Self.hardMaximumFramesPerReceive).contains(maximumCompletedFramesPerReceive),
+      (1...Self.hardMaximumOutboundServiceUnits).contains(maximumOutboundServiceUnitsPerTurn),
+      (1...Self.hardMaximumOutboundBytes).contains(maximumOutboundAccountedBytesPerTurn),
+      (1...Self.hardMaximumIncomingPublications).contains(maximumIncomingPublicationsPerTurn),
+      (1...Self.hardMaximumDeferredPolicyTransactions).contains(maximumDeferredPolicyTransactions)
+    else {
+      throw SDKSessionAdmissionError(.invalidLocalConfiguration)
+    }
+    self.init(
+      uncheckedInitialPolicyTimeoutSeconds: initialPolicyTimeoutSeconds,
+      maximumIncomingEvents: maximumIncomingEvents,
+      maximumIncomingEncodedBytes: maximumIncomingEncodedBytes,
+      maximumCompletedFramesPerReceive: maximumCompletedFramesPerReceive,
+      maximumOutboundServiceUnitsPerTurn: maximumOutboundServiceUnitsPerTurn,
+      maximumOutboundAccountedBytesPerTurn: maximumOutboundAccountedBytesPerTurn,
+      maximumIncomingPublicationsPerTurn: maximumIncomingPublicationsPerTurn,
+      maximumDeferredPolicyTransactions: maximumDeferredPolicyTransactions
+    )
+  }
+
+  private init(
+    uncheckedInitialPolicyTimeoutSeconds initialPolicyTimeoutSeconds: Int,
+    maximumIncomingEvents: Int,
+    maximumIncomingEncodedBytes: Int,
+    maximumCompletedFramesPerReceive: Int,
+    maximumOutboundServiceUnitsPerTurn: Int,
+    maximumOutboundAccountedBytesPerTurn: Int,
+    maximumIncomingPublicationsPerTurn: Int,
+    maximumDeferredPolicyTransactions: Int
+  ) {
+    self.initialPolicyTimeoutSeconds = initialPolicyTimeoutSeconds
+    self.maximumIncomingEvents = maximumIncomingEvents
+    self.maximumIncomingEncodedBytes = maximumIncomingEncodedBytes
+    self.maximumCompletedFramesPerReceive = maximumCompletedFramesPerReceive
+    self.maximumOutboundServiceUnitsPerTurn = maximumOutboundServiceUnitsPerTurn
+    self.maximumOutboundAccountedBytesPerTurn = maximumOutboundAccountedBytesPerTurn
+    self.maximumIncomingPublicationsPerTurn = maximumIncomingPublicationsPerTurn
+    self.maximumDeferredPolicyTransactions = maximumDeferredPolicyTransactions
+  }
+}
+
 protocol SDKSessionDiscoveryOperation: Sendable {
   func run() async throws -> DiscoveredViewer
   func cancel() async
@@ -396,5 +516,13 @@ final class SDKSessionPullCancellationGate: @unchecked Sendable {
     lock.lock()
     state = .closed
     lock.unlock()
+  }
+
+  func closeRegisteredClaim() -> Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    guard case .registered = state else { return false }
+    state = .closed
+    return true
   }
 }

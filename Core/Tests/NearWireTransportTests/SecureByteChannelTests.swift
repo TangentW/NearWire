@@ -427,6 +427,192 @@ final class SecureByteChannelTests: XCTestCase {
     }
   }
 
+  func testReservedAdmissionPreservesExactControlCountAndBytes() async throws {
+    let driver = FakeSecureConnectionDriver()
+    let limits = try SecureTransportLimits(
+      maximumPendingSendCount: 3,
+      maximumPendingSendBytes: 8,
+      maximumSingleSendBytes: 4
+    )
+    let channel = SecureByteChannel(driver: driver, limits: limits) { _ in }
+    try await channel.start()
+
+    try channel.admitSend(
+      Data(repeating: 1, count: 4),
+      reservingPendingSendCount: 2,
+      reservingPendingSendBytes: 4
+    )
+    await assertTransportError(.backpressure) {
+      try channel.admitSend(
+        Data([2]),
+        reservingPendingSendCount: 2,
+        reservingPendingSendBytes: 4
+      )
+    }
+
+    try channel.admitSend(Data([3, 3]))
+    try channel.admitSend(Data([4, 4]))
+    let snapshot = channel.sendCapacitySnapshot
+    XCTAssertTrue(snapshot.isAccepting)
+    XCTAssertEqual(snapshot.availablePendingSendCount, 0)
+    XCTAssertEqual(snapshot.availablePendingSendBytes, 0)
+    await channel.cancel()
+  }
+
+  func testReservedAdmissionRejectsInvalidReservationWithoutMutation() async throws {
+    let driver = FakeSecureConnectionDriver()
+    let limits = try SecureTransportLimits(
+      maximumPendingSendCount: 2,
+      maximumPendingSendBytes: 4,
+      maximumSingleSendBytes: 2
+    )
+    let channel = SecureByteChannel(driver: driver, limits: limits) { _ in }
+    try await channel.start()
+    let before = channel.sendCapacitySnapshot
+
+    await assertTransportError(.invalidConfiguration) {
+      try channel.admitSend(
+        Data([1]),
+        reservingPendingSendCount: -1,
+        reservingPendingSendBytes: 0
+      )
+    }
+    await assertTransportError(.invalidConfiguration) {
+      try channel.admitSend(
+        Data([1]),
+        reservingPendingSendCount: 0,
+        reservingPendingSendBytes: 5
+      )
+    }
+
+    XCTAssertEqual(channel.sendCapacitySnapshot, before)
+    XCTAssertFalse(
+      channel.canAdmitSend(
+        byteCount: 1,
+        reservingPendingSendCount: Int.max,
+        reservingPendingSendBytes: 0
+      )
+    )
+    await channel.cancel()
+  }
+
+  func testCapacityPredicateIsAdvisoryAndRetainsNothing() async throws {
+    let driver = FakeSecureConnectionDriver()
+    let limits = try SecureTransportLimits(
+      maximumPendingSendCount: 3,
+      maximumPendingSendBytes: 3,
+      maximumSingleSendBytes: 1
+    )
+    let channel = SecureByteChannel(driver: driver, limits: limits) { _ in }
+    try await channel.start()
+    let before = channel.sendCapacitySnapshot
+
+    XCTAssertTrue(
+      channel.canAdmitSend(
+        byteCount: 1,
+        reservingPendingSendCount: 1,
+        reservingPendingSendBytes: 1
+      )
+    )
+    XCTAssertEqual(channel.sendCapacitySnapshot, before)
+
+    try channel.admitSend(Data([1]))
+    try channel.admitSend(Data([2]))
+    XCTAssertFalse(
+      channel.canAdmitSend(
+        byteCount: 1,
+        reservingPendingSendCount: 1,
+        reservingPendingSendBytes: 1
+      )
+    )
+    await assertTransportError(.backpressure) {
+      try channel.admitSend(
+        Data([3]),
+        reservingPendingSendCount: 1,
+        reservingPendingSendBytes: 1
+      )
+    }
+    XCTAssertEqual(channel.sendCapacitySnapshot.availablePendingSendCount, 1)
+    XCTAssertEqual(channel.sendCapacitySnapshot.availablePendingSendBytes, 1)
+    await channel.cancel()
+  }
+
+  func testCapacityProgressAdvancesOnCompletionAndTerminalClose() async throws {
+    let driver = FakeSecureConnectionDriver()
+    let ready = expectation(description: "ready")
+    let completed = expectation(description: "completed")
+    let channel = SecureByteChannel(driver: driver) { event in
+      if case .stateChanged(.ready) = event { ready.fulfill() }
+      if case .sendCompleted = event { completed.fulfill() }
+    }
+    try await channel.start()
+    try channel.admitSend(Data([1, 2, 3]))
+    let retained = channel.sendCapacitySnapshot
+    XCTAssertEqual(retained.progressGeneration, 0)
+
+    driver.emitState(.ready)
+    await fulfillment(of: [ready], timeout: 1)
+    await waitUntil { driver.sentData.count == 1 }
+    driver.completeNextSend(failed: false)
+    await fulfillment(of: [completed], timeout: 1)
+
+    let completedSnapshot = channel.sendCapacitySnapshot
+    XCTAssertGreaterThan(completedSnapshot.progressGeneration, retained.progressGeneration)
+    XCTAssertEqual(
+      completedSnapshot.availablePendingSendBytes,
+      SecureTransportLimits.default.maximumPendingSendBytes
+    )
+
+    await channel.cancel()
+    let terminalSnapshot = channel.sendCapacitySnapshot
+    XCTAssertFalse(terminalSnapshot.isAccepting)
+    XCTAssertGreaterThan(
+      terminalSnapshot.progressGeneration,
+      completedSnapshot.progressGeneration
+    )
+  }
+
+  func testConcurrentReservedAdmissionsStopBeforeReservation() async throws {
+    let driver = FakeSecureConnectionDriver()
+    let limits = try SecureTransportLimits(
+      maximumPendingSendCount: 8,
+      maximumPendingSendBytes: 8,
+      maximumSingleSendBytes: 1
+    )
+    let channel = SecureByteChannel(driver: driver, limits: limits) { _ in }
+    try await channel.start()
+
+    let accepted = await withTaskGroup(of: Bool.self, returning: Int.self) { group in
+      for byte in UInt8(0)..<UInt8(32) {
+        group.addTask {
+          do {
+            try channel.admitSend(
+              Data([byte]),
+              reservingPendingSendCount: 2,
+              reservingPendingSendBytes: 2
+            )
+            return true
+          } catch {
+            return false
+          }
+        }
+      }
+      var count = 0
+      for await didAccept in group where didAccept {
+        count += 1
+      }
+      return count
+    }
+
+    XCTAssertEqual(accepted, 6)
+    XCTAssertEqual(channel.sendCapacitySnapshot.availablePendingSendCount, 2)
+    XCTAssertEqual(channel.sendCapacitySnapshot.availablePendingSendBytes, 2)
+    await channel.cancel()
+    let terminalSnapshot = channel.sendCapacitySnapshot
+    XCTAssertEqual(terminalSnapshot.availablePendingSendCount, 8)
+    XCTAssertEqual(terminalSnapshot.availablePendingSendBytes, 8)
+  }
+
   func testSynchronousDriverCallbacksRemainSerialized() async throws {
     let driver = ImmediateSecureConnectionDriver()
     let received = expectation(description: "received")

@@ -50,6 +50,46 @@ final class WireFrameTests: XCTestCase {
     XCTAssertTrue(decoder.isAtFrameBoundary)
   }
 
+  func testBoundedConsumeDetectsOnlyACompletedFrameBeyondTheLimit() throws {
+    let first = try WireFrameEncoder.encode(lane: .control, payload: Data("{\"n\":1}".utf8))
+    let second = try WireFrameEncoder.encode(lane: .event, payload: Data("{\"n\":2}".utf8))
+    let third = try WireFrameEncoder.encode(lane: .control, payload: Data("{\"n\":3}".utf8))
+    var decoder = WireFrameDecoder()
+    var frames: [WireFrame] = []
+
+    let exceeded = try decoder.consumeBounded(
+      first + second + third,
+      maximumCompletedFrames: 2
+    ) { frames.append($0) }
+    XCTAssertEqual(frames.map(\.lane), [.control, .event])
+    XCTAssertTrue(exceeded)
+    XCTAssertTrue(decoder.isAtFrameBoundary)
+    XCTAssertFalse(decoder.isFailed)
+
+    for split in 1..<third.count {
+      var fragmentedDecoder = WireFrameDecoder()
+      var fragmentedFrames: [WireFrame] = []
+      let prefix = Data(third.prefix(split))
+      let suffix = Data(third.dropFirst(split))
+      XCTAssertFalse(
+        try fragmentedDecoder.consumeBounded(
+          first + second + prefix,
+          maximumCompletedFrames: 2
+        ) { fragmentedFrames.append($0) }
+      )
+      XCTAssertEqual(fragmentedFrames.map(\.lane), [.control, .event])
+      XCTAssertFalse(fragmentedDecoder.isAtFrameBoundary)
+      XCTAssertFalse(
+        try fragmentedDecoder.consumeBounded(
+          suffix,
+          maximumCompletedFrames: 2
+        ) { fragmentedFrames.append($0) }
+      )
+      XCTAssertEqual(fragmentedFrames.map(\.lane), [.control, .event, .control])
+      XCTAssertTrue(fragmentedDecoder.isAtFrameBoundary)
+    }
+  }
+
   func testInvalidLengthUnknownLaneAndTerminalReuse() throws {
     var short = WireFrameDecoder()
     XCTAssertThrowsError(try short.consume(Data([0, 0, 0, 1])) { _ in }) { error in

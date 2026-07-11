@@ -578,14 +578,14 @@ real_tls_output="$(swift test \
   "${strict_concurrency_options[@]}" 2>&1)"
 printf '%s\n' "$real_tls_output"
 if grep -Fq "Test skipped" <<< "$real_tls_output"; then
-  echo "Real TLS session admission requires an unrestricted macOS validation environment." >&2
+  echo "Real TLS active-session integration requires an unrestricted macOS validation environment." >&2
   exit 1
 fi
 if ! grep -Fq "Executed 1 test, with 0 failures" <<< "$real_tls_output"; then
-  echo "Real TLS session admission result was not proven by exactly one passing test." >&2
+  echo "Real TLS active-session result was not proven by exactly one passing test." >&2
   exit 1
 fi
 
-echo "Real TLS session admission integration passed."
+echo "Real TLS active-session integration passed."
 
 echo "Swift Package verification passed."

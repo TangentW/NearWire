@@ -8,6 +8,25 @@ import Network
   case terminated(SecureTransportError)
 }
 
+@_spi(NearWireInternal) public struct SecureByteChannelCapacitySnapshot: Equatable, Sendable {
+  public let isAccepting: Bool
+  public let availablePendingSendCount: Int
+  public let availablePendingSendBytes: Int
+  public let progressGeneration: UInt64
+
+  public init(
+    isAccepting: Bool,
+    availablePendingSendCount: Int,
+    availablePendingSendBytes: Int,
+    progressGeneration: UInt64
+  ) {
+    self.isAccepting = isAccepting
+    self.availablePendingSendCount = availablePendingSendCount
+    self.availablePendingSendBytes = availablePendingSendBytes
+    self.progressGeneration = progressGeneration
+  }
+}
+
 enum SecureDriverState: Sendable {
   case preparing
   case ready
@@ -29,7 +48,7 @@ protocol SecureConnectionDriving: AnyObject, Sendable {
   public typealias EventHandler = @Sendable (SecureByteChannelEvent) -> Void
 
   public private(set) var state: SecureTransportState = .setup
-  public let limits: SecureTransportLimits
+  public nonisolated let limits: SecureTransportLimits
 
   var retainedSendPayloadBytes: Int {
     sendMailbox.retainedPayloadBytes
@@ -102,10 +121,41 @@ protocol SecureConnectionDriving: AnyObject, Sendable {
   ///
   /// Success means the channel owns the bytes. It does not mean the peer received them.
   public nonisolated func admitSend(_ data: Data) throws {
-    try sendMailbox.admit(data)
+    try admitSend(data, reservingPendingSendCount: 0, reservingPendingSendBytes: 0)
+  }
+
+  /// Synchronously admits bytes while leaving bounded mailbox capacity for later Control sends.
+  ///
+  /// Reservations affect this admission only and do not create storage or change FIFO order.
+  public nonisolated func admitSend(
+    _ data: Data,
+    reservingPendingSendCount: Int,
+    reservingPendingSendBytes: Int
+  ) throws {
+    try sendMailbox.admit(
+      data,
+      reservingPendingSendCount: reservingPendingSendCount,
+      reservingPendingSendBytes: reservingPendingSendBytes
+    )
     callbackIngress.submit { [weak self] in
       await self?.beginNextSendIfPossible()
     }
+  }
+
+  public nonisolated var sendCapacitySnapshot: SecureByteChannelCapacitySnapshot {
+    sendMailbox.capacitySnapshot
+  }
+
+  public nonisolated func canAdmitSend(
+    byteCount: Int,
+    reservingPendingSendCount: Int,
+    reservingPendingSendBytes: Int
+  ) -> Bool {
+    sendMailbox.canAdmit(
+      byteCount: byteCount,
+      reservingPendingSendCount: reservingPendingSendCount,
+      reservingPendingSendBytes: reservingPendingSendBytes
+    )
   }
 
   public func cancel() {
@@ -313,6 +363,7 @@ private final class SecureSendMailbox: @unchecked Sendable {
   private var inFlight: Item?
   private var retainedBytes = 0
   private var nextToken: UInt64 = 0
+  private var progressGeneration: UInt64 = 0
 
   init(limits: SecureTransportLimits) {
     self.limits = limits
@@ -330,13 +381,26 @@ private final class SecureSendMailbox: @unchecked Sendable {
     return inFlight?.token
   }
 
+  var capacitySnapshot: SecureByteChannelCapacitySnapshot {
+    lock.lock()
+    defer { lock.unlock() }
+    return capacitySnapshotLocked()
+  }
+
   func setAccepting(_ value: Bool) {
     lock.lock()
+    if accepting, !value {
+      advanceProgressGeneration()
+    }
     accepting = value
     lock.unlock()
   }
 
-  func admit(_ data: Data) throws {
+  func admit(
+    _ data: Data,
+    reservingPendingSendCount: Int = 0,
+    reservingPendingSendBytes: Int = 0
+  ) throws {
     lock.lock()
     defer { lock.unlock() }
     guard accepting else {
@@ -353,8 +417,23 @@ private final class SecureSendMailbox: @unchecked Sendable {
         message: "Send bytes are empty or exceed the single-send limit."
       )
     }
-    let pendingCount = pending.count - head + (inFlight == nil ? 0 : 1)
-    guard pendingCount < limits.maximumPendingSendCount else {
+    try validateReservations(
+      pendingSendCount: reservingPendingSendCount,
+      pendingSendBytes: reservingPendingSendBytes
+    )
+    let pendingCount = retainedSendCountLocked()
+    let (candidateCount, candidateCountOverflow) = pendingCount.addingReportingOverflow(1)
+    let (reservedCount, reservedCountOverflow) = candidateCount.addingReportingOverflow(
+      reservingPendingSendCount
+    )
+    guard !candidateCountOverflow, !reservedCountOverflow else {
+      throw SecureTransportError(
+        code: .arithmeticOverflow,
+        path: "pendingSends",
+        message: "Pending send count arithmetic overflowed."
+      )
+    }
+    guard reservedCount <= limits.maximumPendingSendCount else {
       throw SecureTransportError(
         code: .backpressure,
         path: "pendingSends",
@@ -364,6 +443,11 @@ private final class SecureSendMailbox: @unchecked Sendable {
     let newByteCount = try SecureSendAdmission.addedByteCount(
       current: retainedBytes,
       adding: data.count,
+      maximum: limits.maximumPendingSendBytes
+    )
+    _ = try SecureSendAdmission.addedByteCount(
+      current: newByteCount,
+      adding: reservingPendingSendBytes,
       maximum: limits.maximumPendingSendBytes
     )
     guard nextToken != UInt64.max else {
@@ -376,6 +460,41 @@ private final class SecureSendMailbox: @unchecked Sendable {
     pending.append(Item(token: nextToken, data: data))
     nextToken += 1
     retainedBytes = newByteCount
+  }
+
+  func canAdmit(
+    byteCount: Int,
+    reservingPendingSendCount: Int,
+    reservingPendingSendBytes: Int
+  ) -> Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    guard accepting, byteCount > 0, byteCount <= limits.maximumSingleSendBytes,
+      reservingPendingSendCount >= 0,
+      reservingPendingSendCount <= limits.maximumPendingSendCount,
+      reservingPendingSendBytes >= 0,
+      reservingPendingSendBytes <= limits.maximumPendingSendBytes
+    else {
+      return false
+    }
+
+    let (candidateCount, candidateCountOverflow) = retainedSendCountLocked()
+      .addingReportingOverflow(1)
+    let (reservedCount, reservedCountOverflow) = candidateCount.addingReportingOverflow(
+      reservingPendingSendCount
+    )
+    guard !candidateCountOverflow, !reservedCountOverflow,
+      reservedCount <= limits.maximumPendingSendCount
+    else {
+      return false
+    }
+
+    let (candidateBytes, candidateBytesOverflow) = retainedBytes.addingReportingOverflow(byteCount)
+    let (reservedBytes, reservedBytesOverflow) = candidateBytes.addingReportingOverflow(
+      reservingPendingSendBytes
+    )
+    return !candidateBytesOverflow && !reservedBytesOverflow
+      && reservedBytes <= limits.maximumPendingSendBytes
   }
 
   func takeNextIfAvailable() -> Item? {
@@ -397,6 +516,7 @@ private final class SecureSendMailbox: @unchecked Sendable {
     }
     inFlight = nil
     retainedBytes -= byteCount
+    advanceProgressGeneration()
     clearConsumedStorageIfIdle()
     return true
   }
@@ -420,6 +540,45 @@ private final class SecureSendMailbox: @unchecked Sendable {
     guard head == pending.count else { return }
     pending.removeAll(keepingCapacity: false)
     head = 0
+  }
+
+  private func retainedSendCountLocked() -> Int {
+    pending.count - head + (inFlight == nil ? 0 : 1)
+  }
+
+  private func capacitySnapshotLocked() -> SecureByteChannelCapacitySnapshot {
+    SecureByteChannelCapacitySnapshot(
+      isAccepting: accepting,
+      availablePendingSendCount: limits.maximumPendingSendCount - retainedSendCountLocked(),
+      availablePendingSendBytes: limits.maximumPendingSendBytes - retainedBytes,
+      progressGeneration: progressGeneration
+    )
+  }
+
+  private func validateReservations(
+    pendingSendCount: Int,
+    pendingSendBytes: Int
+  ) throws {
+    guard pendingSendCount >= 0, pendingSendCount <= limits.maximumPendingSendCount else {
+      throw SecureTransportError(
+        code: .invalidConfiguration,
+        path: "reservingPendingSendCount",
+        message: "Pending send count reservation is outside mailbox bounds."
+      )
+    }
+    guard pendingSendBytes >= 0, pendingSendBytes <= limits.maximumPendingSendBytes else {
+      throw SecureTransportError(
+        code: .invalidConfiguration,
+        path: "reservingPendingSendBytes",
+        message: "Pending send byte reservation is outside mailbox bounds."
+      )
+    }
+  }
+
+  private func advanceProgressGeneration() {
+    if progressGeneration < UInt64.max {
+      progressGeneration += 1
+    }
   }
 }
 

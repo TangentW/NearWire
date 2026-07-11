@@ -5,6 +5,28 @@ import XCTest
 @_spi(NearWireInternal) @testable import NearWireTransport
 
 final class WireEventTests: XCTestCase {
+  func testMaximumSingleEventFrameIncludesMessageAndFrameWrappers() throws {
+    let maximumEventBytes = 1_024
+    let app = try makeHello(role: .app, maximumEventBytes: maximumEventBytes)
+    let viewer = try makeHello(role: .viewer, maximumEventBytes: maximumEventBytes)
+    let codec = try WireSessionCodec(
+      negotiation: WireNegotiator.negotiate(local: app, remote: viewer)
+    )
+    let record = try WireEventRecord(
+      envelope: makeWireTestEvent(),
+      nowOnOriginClockNanoseconds: 1_250_000_000
+    )
+    let recordBytes = try record.deterministicEncodedByteCount()
+    let actualFrameBytes = try codec.encode(WireEventPayload(record: record), phase: .active).count
+    let wrapperBytes = actualFrameBytes - recordBytes
+
+    XCTAssertGreaterThan(wrapperBytes, WireFrameLimits.encodedFrameOverheadBytes)
+    XCTAssertEqual(
+      try codec.maximumEncodedSingleEventFrameBytes(),
+      maximumEventBytes + wrapperBytes
+    )
+  }
+
   func testPlainJSONEventPreservesEveryContentCaseWithoutInternalTags() throws {
     let content = JSONValue.object([
       "array": .array([.null, .bool(true), .integer(Int64.min), .number(1.0)]),

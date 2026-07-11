@@ -49,7 +49,10 @@ struct SDKRuntimeDependencies: Sendable {
   let identifierGenerator: @Sendable () -> UUID
 
   static let live = SDKRuntimeDependencies(
-    wallClock: { Date() },
+    wallClock: {
+      let now = Date().timeIntervalSince1970
+      return Date(timeIntervalSince1970: (now * 1_000).rounded() / 1_000)
+    },
     monotonicClock: { DispatchTime.now().uptimeNanoseconds },
     identifierGenerator: { UUID() }
   )
@@ -77,7 +80,7 @@ public actor NearWire {
 
   private nonisolated let stateHub: StateStreamHub
   private nonisolated let eventHub: EventStreamHub
-  private let dependencies: SDKRuntimeDependencies
+  private nonisolated let dependencies: SDKRuntimeDependencies
   private let instanceIdentifier: UUID
   private var state: NearWireState = .idle
   private var queue: BoundedEventQueue<SDKQueuedEvent>
@@ -86,6 +89,7 @@ public actor NearWire {
   private var transportAcceptedCount: UInt64 = 0
   private var transportAdmissionRejectedCount: UInt64 = 0
   private var routingDroppedCount: UInt64 = 0
+  private var outboundWakeRegistration: SDKOutboundWakeRegistration?
 
   public init(configuration: NearWireConfiguration = .default) {
     self.configuration = configuration
@@ -201,6 +205,7 @@ public actor NearWire {
       throw bufferFailure()
     }
     removeLiveEventIDs(snapshot.expiredEventIDs)
+    if !snapshot.expiredEventIDs.isEmpty { signalOutboundWork() }
     let statistics = snapshot.statistics
     return NearWireBufferDiagnostics(
       eventCount: snapshot.eventCount,
@@ -225,6 +230,7 @@ public actor NearWire {
   public func clearBufferedEvents() -> NearWireClearResult {
     let result = queue.clear(reason: .ownerRequested)
     removeLiveEventIDs(result.removedEventIDs)
+    if !result.removedEventIDs.isEmpty { signalOutboundWork() }
     return NearWireClearResult(removedEventIDs: result.removedEventIDs.map(\.sdkUUID))
   }
 
@@ -234,6 +240,7 @@ public actor NearWire {
     _ = queue.clear(reason: .ownerRequested)
     liveEventIDs.removeAll(keepingCapacity: false)
     state = .shutdown
+    signalOutboundWork()
     stateHub.finish(with: .shutdown)
     eventHub.finish()
   }
@@ -344,6 +351,7 @@ public actor NearWire {
       liveEventIDs.insert(coreID)
     }
     submittedCount = sdkSaturatedSum(submittedCount, 1)
+    signalOutboundWork()
     return NearWireSendResult(
       eventID: identifier,
       enqueuedAt: wallNow,
@@ -424,9 +432,369 @@ public actor NearWire {
       message: "The in-memory event buffer could not complete the operation."
     )
   }
+
+  private func signalOutboundWork() {
+    outboundWakeRegistration?.callback()
+  }
 }
 
 extension NearWire {
+  nonisolated func activeClockNanoseconds() -> UInt64 {
+    dependencies.monotonicClock()
+  }
+
+  func registerOutboundWorkWake(
+    token: SDKOutboundWakeToken,
+    callback: @escaping @Sendable () -> Void,
+    maximumServiceUnits: Int,
+    gate: SDKActiveOperationGate,
+    operationHooks: SDKActiveLiveOperationHooks = .none
+  ) throws -> SDKOutboundWakeRegistrationResult {
+    guard state != .shutdown else {
+      return SDKOutboundWakeRegistrationResult(installed: false, schedule: .ownerUnavailable)
+    }
+    guard outboundWakeRegistration == nil else {
+      throw SDKOutboundWakeRegistrationError.alreadyRegistered
+    }
+    var schedule = SDKOutboundScheduleResult.terminalFirst
+    let installed = gate.withOpenClaim {
+      outboundWakeRegistration = SDKOutboundWakeRegistration(token: token, callback: callback)
+      do {
+        schedule = .available(
+          try queue.previewActiveSchedule(
+            nowOnQueueClockNanoseconds: dependencies.monotonicClock(),
+            maximumServiceUnits: maximumServiceUnits
+          )
+        )
+      } catch {
+        schedule = .clockFailed
+      }
+    }
+    guard installed else {
+      return SDKOutboundWakeRegistrationResult(installed: false, schedule: .terminalFirst)
+    }
+    return SDKOutboundWakeRegistrationResult(installed: true, schedule: schedule)
+  }
+
+  func removeOutboundWorkWake(token: SDKOutboundWakeToken) {
+    guard outboundWakeRegistration?.token === token else { return }
+    outboundWakeRegistration = nil
+  }
+
+  func outboundSchedule(
+    maximumServiceUnits: Int,
+    gate: SDKActiveOperationGate,
+    operationHooks: SDKActiveLiveOperationHooks = .none
+  ) -> SDKOutboundScheduleResult {
+    guard state != .shutdown else { return .ownerUnavailable }
+    do {
+      let observation = try queue.observeActiveSchedule(
+        nowOnQueueClockNanoseconds: dependencies.monotonicClock(),
+        maximumServiceUnits: maximumServiceUnits,
+        authorizeExpiration: { event, commit in
+          operationHooks.beforeExpirationClaim()
+          return gate.withOpenClaim {
+            commit()
+            liveEventIDs.remove(event.id)
+          }
+        }
+      )
+      guard !observation.stoppedByAuthorization else { return .terminalFirst }
+      if !observation.expiredEventIDs.isEmpty { signalOutboundWork() }
+      return .available(observation)
+    } catch {
+      return .clockFailed
+    }
+  }
+
+  func drainActiveWire(
+    for route: SDKSessionRoute,
+    codec: WireSessionCodec,
+    sequenceCounter: WireSequenceCounter,
+    maximumServiceUnits: Int,
+    maximumAcceptedEventCount: Int,
+    maximumAccountedBytes: Int,
+    channel: SecureByteChannel,
+    reservingPendingSendCount: Int,
+    reservingPendingSendBytes: Int,
+    gate: SDKActiveOperationGate,
+    operationHooks: SDKActiveLiveOperationHooks = .none
+  ) -> SDKActiveWireDrainResult {
+    guard state != .shutdown else {
+      return emptyActiveWireDrain(
+        ownerAvailable: false,
+        stoppedByTerminal: false,
+        failure: nil,
+        sequenceCounter: sequenceCounter
+      )
+    }
+
+    let now = dependencies.monotonicClock()
+    var plannedCounter = sequenceCounter
+    var acceptedEventIDs: [EventID] = []
+    var rejectedEventIDs: [EventID] = []
+    var notAttemptedEventIDs: [EventID] = []
+    var routingDroppedEventIDs: [EventID] = []
+    var acceptedEncodedByteCount = 0
+    var transportBlock: SDKActiveWireTransportBlock?
+    var failure: SDKActiveWireDrainFailure?
+    var stoppedByTerminal = false
+
+    let sessionEpoch: SessionEpoch
+    let source: EventEndpoint
+    let target: EventEndpoint
+    do {
+      sessionEpoch = try SessionEpoch(rawValue: route.sessionEpoch.nearWireCanonicalString)
+      source = EventEndpoint(role: .app, id: try EndpointID(rawValue: route.appID))
+      target = EventEndpoint(role: .viewer, id: try EndpointID(rawValue: route.viewerID))
+    } catch {
+      return emptyActiveWireDrain(
+        ownerAvailable: true,
+        stoppedByTerminal: false,
+        failure: .encodingFailed,
+        sequenceCounter: sequenceCounter
+      )
+    }
+    guard sequenceCounter.sessionEpoch == sessionEpoch,
+      sequenceCounter.direction == .appToViewer
+    else {
+      return emptyActiveWireDrain(
+        ownerAvailable: true,
+        stoppedByTerminal: false,
+        failure: .sequenceFailed,
+        sequenceCounter: sequenceCounter
+      )
+    }
+
+    do {
+      let queueResult = try queue.offerActive(
+        maximumServiceUnits: maximumServiceUnits,
+        maximumAcceptedEventCount: maximumAcceptedEventCount,
+        maximumBytes: maximumAccountedBytes,
+        nowOnQueueClockNanoseconds: now,
+        authorizeExpiration: { event, commit in
+          operationHooks.beforeExpirationClaim()
+          return gate.withOpenClaim {
+            commit()
+            liveEventIDs.remove(event.id)
+          }
+        },
+        preflight: { event, commitRemoval in
+          if let affinity = event.value.replyAffinity,
+            affinity
+              != SDKReplyAffinity(
+                sessionEpoch: route.sessionEpoch,
+                viewerID: route.viewerID,
+                appID: route.appID
+              )
+          {
+            operationHooks.beforeRouteDropClaim()
+            let committed = gate.withOpenClaim {
+              commitRemoval()
+              liveEventIDs.remove(event.id)
+              routingDroppedCount = sdkSaturatedSum(routingDroppedCount, 1)
+            }
+            if committed {
+              routingDroppedEventIDs.append(event.id)
+              return .removeWithoutAccounting
+            }
+            stoppedByTerminal = true
+            return .stop
+          }
+          return .eligible
+        },
+        decision: { event, commitRemoval in
+          var candidateCounter = plannedCounter
+          let sequence: EventSequence
+          do {
+            sequence = try candidateCounter.allocate()
+          } catch {
+            failure = .sequenceFailed
+            notAttemptedEventIDs.append(event.id)
+            return .stop
+          }
+
+          let encoded: Data
+          do {
+            let envelope = try EventEnvelope(
+              id: event.id,
+              type: event.value.draft.type,
+              content: event.value.draft.content,
+              createdAt: event.value.createdAt,
+              monotonicTimestampNanoseconds: event.enqueuedAtNanoseconds,
+              source: source,
+              target: target,
+              direction: .appToViewer,
+              sessionEpoch: sessionEpoch,
+              sequence: sequence,
+              priority: event.priority,
+              ttl: event.ttl,
+              causality: event.value.draft.causality,
+              limits: codec.limits.eventValidationLimits
+            )
+            let record = try WireEventRecord(
+              envelope: envelope,
+              nowOnOriginClockNanoseconds: now
+            )
+            encoded = try codec.encode(WireEventPayload(record: record), phase: .active)
+          } catch let wireError as WireProtocolError {
+            switch wireError.code {
+            case .invalidClock, .eventExpired, .arithmeticOverflow:
+              failure = .clockFailed
+            default:
+              failure = .encodingFailed
+            }
+            notAttemptedEventIDs.append(event.id)
+            return .stop
+          } catch {
+            failure = .encodingFailed
+            notAttemptedEventIDs.append(event.id)
+            return .stop
+          }
+
+          let (encodedTotal, encodedOverflow) = acceptedEncodedByteCount.addingReportingOverflow(
+            encoded.count
+          )
+          guard !encodedOverflow else {
+            failure = .encodingFailed
+            notAttemptedEventIDs.append(event.id)
+            return .stop
+          }
+
+          enum AdmissionOutcome {
+            case accepted
+            case backpressure
+            case failed
+            case terminalFirst
+          }
+          var admissionOutcome = AdmissionOutcome.terminalFirst
+          operationHooks.beforeCandidateClaim()
+          let claimed = gate.withOpenClaim {
+            do {
+              operationHooks.beforeEventMailboxAdmission()
+              try channel.admitSend(
+                encoded,
+                reservingPendingSendCount: reservingPendingSendCount,
+                reservingPendingSendBytes: reservingPendingSendBytes
+              )
+              commitRemoval()
+              liveEventIDs.remove(event.id)
+              transportAcceptedCount = sdkSaturatedSum(transportAcceptedCount, 1)
+              plannedCounter = candidateCounter
+              acceptedEncodedByteCount = encodedTotal
+              admissionOutcome = .accepted
+            } catch let transportError as SecureTransportError
+              where transportError.code == .backpressure
+            {
+              transportAdmissionRejectedCount = sdkSaturatedSum(
+                transportAdmissionRejectedCount,
+                1
+              )
+              admissionOutcome = .backpressure
+            } catch {
+              admissionOutcome = .failed
+            }
+          }
+          operationHooks.afterCandidateClaim()
+          guard claimed else {
+            stoppedByTerminal = true
+            return .stop
+          }
+          switch admissionOutcome {
+          case .accepted:
+            acceptedEventIDs.append(event.id)
+            return .remove
+          case .backpressure:
+            rejectedEventIDs.append(event.id)
+            operationHooks.beforeEventMailboxProgressSnapshot()
+            let snapshot = channel.sendCapacitySnapshot
+            transportBlock = SDKActiveWireTransportBlock(
+              candidateID: event.id,
+              encodedByteCount: encoded.count,
+              reservedPendingSendCount: reservingPendingSendCount,
+              reservedPendingSendBytes: reservingPendingSendBytes,
+              progressGeneration: snapshot.progressGeneration
+            )
+            return .stop
+          case .failed:
+            failure = .transportFailed
+            notAttemptedEventIDs.append(event.id)
+            return .stop
+          case .terminalFirst:
+            stoppedByTerminal = true
+            return .stop
+          }
+        }
+      )
+
+      if !queueResult.expiredEventIDs.isEmpty || !acceptedEventIDs.isEmpty
+        || !routingDroppedEventIDs.isEmpty
+      {
+        signalOutboundWork()
+      }
+      return SDKActiveWireDrainResult(
+        ownerAvailable: true,
+        stoppedByTerminal: stoppedByTerminal,
+        failure: failure,
+        acceptedEventIDs: acceptedEventIDs,
+        rejectedEventIDs: rejectedEventIDs,
+        notAttemptedEventIDs: notAttemptedEventIDs,
+        routingDroppedEventIDs: routingDroppedEventIDs,
+        expiredEventIDs: queueResult.expiredEventIDs,
+        plannedSequenceCounter: plannedCounter,
+        acceptedEncodedByteCount: acceptedEncodedByteCount,
+        acceptedAccountedByteCount: queueResult.acceptedAccountedByteCount,
+        serviceUnits: queueResult.serviceUnits,
+        dueWorkRemains: queueResult.dueWorkRemains,
+        eligibleWorkRemains: queueResult.eligibleWorkRemains,
+        nextExpirationDeadlineNanoseconds: queueResult.nextExpirationDeadlineNanoseconds,
+        nextFairCandidateID: queueResult.nextFairCandidateID,
+        transportBlock: transportBlock
+      )
+    } catch let flowError as FlowControlError {
+      return emptyActiveWireDrain(
+        ownerAvailable: true,
+        stoppedByTerminal: false,
+        failure: flowError.code == .invalidClock ? .clockFailed : .invalidLimits,
+        sequenceCounter: sequenceCounter
+      )
+    } catch {
+      return emptyActiveWireDrain(
+        ownerAvailable: true,
+        stoppedByTerminal: false,
+        failure: .invalidLimits,
+        sequenceCounter: sequenceCounter
+      )
+    }
+  }
+
+  private func emptyActiveWireDrain(
+    ownerAvailable: Bool,
+    stoppedByTerminal: Bool,
+    failure: SDKActiveWireDrainFailure?,
+    sequenceCounter: WireSequenceCounter
+  ) -> SDKActiveWireDrainResult {
+    SDKActiveWireDrainResult(
+      ownerAvailable: ownerAvailable,
+      stoppedByTerminal: stoppedByTerminal,
+      failure: failure,
+      acceptedEventIDs: [],
+      rejectedEventIDs: [],
+      notAttemptedEventIDs: [],
+      routingDroppedEventIDs: [],
+      expiredEventIDs: [],
+      plannedSequenceCounter: sequenceCounter,
+      acceptedEncodedByteCount: 0,
+      acceptedAccountedByteCount: 0,
+      serviceUnits: 0,
+      dueWorkRemains: false,
+      eligibleWorkRemains: false,
+      nextExpirationDeadlineNanoseconds: nil,
+      nextFairCandidateID: nil,
+      transportBlock: nil
+    )
+  }
+
   func updateSessionState(_ newState: NearWireState) {
     guard state != .shutdown, newState != .shutdown, newState != state else { return }
     state = newState
@@ -466,6 +834,26 @@ extension NearWire {
     )
     eventHub.publish(event)
     return true
+  }
+
+  func publishIncomingActive(
+    _ received: WireReceivedEvent,
+    gate: SDKActiveOperationGate
+  ) -> SDKActiveIncomingPublicationResult {
+    guard state != .shutdown else { return .ownerUnavailable }
+    do {
+      if try received.isExpired(nowOnReceiverClockNanoseconds: dependencies.monotonicClock()) {
+        return .expired
+      }
+    } catch {
+      return .clockFailed
+    }
+    var didPublish = false
+    let claimed = gate.withOpenClaim {
+      didPublish = publishIncoming(received.envelope)
+    }
+    guard claimed else { return .terminalFirst }
+    return didPublish ? .published : .ownerUnavailable
   }
 
   func drainOutbound(
@@ -529,6 +917,10 @@ extension NearWire {
       }
     )
     removeLiveEventIDs(result.expiredEventIDs)
+
+    if !result.expiredEventIDs.isEmpty || !accepted.isEmpty || !routingDropped.isEmpty {
+      signalOutboundWork()
+    }
 
     return SDKOutboundDrainResult(
       acceptedEventIDs: accepted,

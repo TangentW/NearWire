@@ -5,6 +5,10 @@ require "pathname"
 root = Pathname.new(ARGV.fetch(0, ".")).expand_path
 session_root = root.join("SDK/Sources/NearWire/Session")
 files = %w[
+  SDKActiveEventPump.swift
+  SDKActiveOperationGate.swift
+  SDKIncomingEventQueue.swift
+  SDKOutboundQueueIntegration.swift
   SDKSessionAdmission.swift
   SDKSessionAdmissionModels.swift
   SDKSessionChannelIngress.swift
@@ -25,6 +29,12 @@ required = {
   "discovery-to-hello discriminator binding" => "ViewerDiscoveryDiscriminator",
   "bounded callback ingress" => "SDKSessionChannelIngress",
   "permanent transport owner" => "SDKSessionTransportCore",
+  "one-shot active pump" => "SDKActiveEventPump",
+  "shared active operation gate" => "SDKActiveOperationGate",
+  "bounded incoming Event queue" => "SDKIncomingEventQueue",
+  "tokenized outbound wake" => "SDKOutboundWakeToken",
+  "active single-Event decoding" => "WireEventPayload",
+  "active batch decoding" => "WireEventBatchPayload",
 }
 
 required.each do |description, token|
@@ -34,9 +44,6 @@ end
 forbidden = {
   "process lease claim" => "ProcessConnectionLeaseRegistry",
   "supported state mutation" => "NearWireState",
-  "event envelope transfer" => "EventEnvelope",
-  "event payload transfer" => "WireEventPayload",
-  "event batch transfer" => "WireEventBatchPayload",
   "SDK queue drain" => "BoundedEventQueue",
   "raw connection construction" => "NWConnection(",
 }
@@ -53,4 +60,4 @@ files.each do |file|
   end
 end
 
-puts "Session admission ownership and residual-scope boundaries passed."
+puts "Session admission and active-pump ownership boundaries passed."

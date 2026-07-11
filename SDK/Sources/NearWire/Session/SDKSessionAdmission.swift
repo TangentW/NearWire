@@ -85,7 +85,7 @@ actor SDKSessionAdmission {
       if let core, let attemptToken {
         await core.cancelAttempt(attemptToken)
       }
-    case .admitted, .failed, .cancelled:
+    case .admitted, .bindingActiveOwner, .negotiatingPolicy, .active, .failed, .cancelled:
       break
     }
   }

@@ -5,6 +5,17 @@ import Foundation
 #endif
 
 final class SDKSessionChannelIngress: @unchecked Sendable {
+  enum Mode: Equatable, Sendable {
+    case running
+    case nonterminalPaused
+    case stopped
+  }
+
+  enum TakeResult: Sendable {
+    case batch([Item])
+    case parked
+    case empty
+  }
   enum Item: Sendable {
     case channel(SecureByteChannelEvent)
     case overflow
@@ -38,7 +49,7 @@ final class SDKSessionChannelIngress: @unchecked Sendable {
   private var drain: (@Sendable () -> Void)?
   private var drainScheduled = false
   private var terminalLatched = false
-  private var stopped = false
+  private var mode: Mode = .running
 
   init(maximumEvents: Int, maximumReceiveBytes: Int) {
     self.maximumEvents = maximumEvents
@@ -48,9 +59,9 @@ final class SDKSessionChannelIngress: @unchecked Sendable {
   func installDrain(_ drain: @escaping @Sendable () -> Void) {
     var shouldSchedule = false
     lock.lock()
-    if !stopped, self.drain == nil {
+    if mode != .stopped, self.drain == nil {
       self.drain = drain
-      if !pending.isEmpty, !drainScheduled {
+      if shouldDrainPending, !drainScheduled {
         drainScheduled = true
         shouldSchedule = true
       }
@@ -62,7 +73,7 @@ final class SDKSessionChannelIngress: @unchecked Sendable {
   func submit(_ item: Item) {
     var callback: (@Sendable () -> Void)?
     lock.lock()
-    guard !stopped, !terminalLatched else {
+    guard mode != .stopped, !terminalLatched else {
       lock.unlock()
       return
     }
@@ -91,7 +102,7 @@ final class SDKSessionChannelIngress: @unchecked Sendable {
       }
     }
 
-    if !drainScheduled, let drain {
+    if !drainScheduled, shouldDrainPending, let drain {
       drainScheduled = true
       callback = drain
     }
@@ -99,27 +110,31 @@ final class SDKSessionChannelIngress: @unchecked Sendable {
     callback?()
   }
 
-  func takeBatch(maximumItems: Int) -> [Item]? {
+  func takeBatch(maximumItems: Int) -> TakeResult {
     lock.lock()
     defer { lock.unlock() }
-    guard !stopped else {
+    guard mode != .stopped else {
       drainScheduled = false
-      return nil
+      return .empty
     }
     guard !pending.isEmpty else {
       drainScheduled = false
-      return nil
+      return .empty
+    }
+    if mode == .nonterminalPaused, !terminalLatched {
+      drainScheduled = false
+      return .parked
     }
     let count = min(maximumItems, pending.count)
     let result = Array(pending.prefix(count))
     pending.removeFirst(count)
-    return result
+    return .batch(result)
   }
 
   func completeBatch(_ batch: [Item]) {
     lock.lock()
     defer { lock.unlock() }
-    guard !stopped else { return }
+    guard mode != .stopped else { return }
     for item in batch where !item.isTerminal {
       retainedEventCount -= 1
       retainedReceiveBytes -= item.receiveByteCount
@@ -130,7 +145,7 @@ final class SDKSessionChannelIngress: @unchecked Sendable {
     var callback: (@Sendable () -> Void)?
     lock.lock()
     drainScheduled = false
-    if !stopped, !pending.isEmpty, let drain {
+    if mode != .stopped, shouldDrainPending, let drain {
       drainScheduled = true
       callback = drain
     }
@@ -147,13 +162,39 @@ final class SDKSessionChannelIngress: @unchecked Sendable {
 
   func stop() {
     lock.lock()
-    stopped = true
+    mode = .stopped
     drain = nil
     pending.removeAll(keepingCapacity: false)
     retainedEventCount = 0
     retainedReceiveBytes = 0
     drainScheduled = false
     lock.unlock()
+  }
+
+  func pauseNonterminalDrain() {
+    lock.lock()
+    if mode == .running { mode = .nonterminalPaused }
+    lock.unlock()
+  }
+
+  func resumeNonterminalDrain() {
+    var callback: (@Sendable () -> Void)?
+    lock.lock()
+    if mode == .nonterminalPaused {
+      mode = .running
+      if !pending.isEmpty, !drainScheduled, let drain {
+        drainScheduled = true
+        callback = drain
+      }
+    }
+    lock.unlock()
+    callback?()
+  }
+
+  var currentMode: Mode {
+    lock.lock()
+    defer { lock.unlock() }
+    return mode
   }
 
   var retainedCounts: RetainedCounts {
@@ -167,5 +208,9 @@ final class SDKSessionChannelIngress: @unchecked Sendable {
       retainedEventCount -= 1
       retainedReceiveBytes -= item.receiveByteCount
     }
+  }
+
+  private var shouldDrainPending: Bool {
+    !pending.isEmpty && (mode == .running || terminalLatched)
   }
 }

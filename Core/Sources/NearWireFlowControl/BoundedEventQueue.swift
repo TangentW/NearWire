@@ -66,6 +66,29 @@ extension EventDequeueResult: Equatable where Value: Equatable {}
 
 extension EventOfferResult: Equatable where Value: Equatable {}
 
+@_spi(NearWireInternal) public struct EventQueueSchedulingObservation: Equatable, Sendable {
+  public let expiredEventIDs: [EventID]
+  public let dueWorkRemains: Bool
+  public let nextExpirationDeadlineNanoseconds: UInt64?
+  public let nextFairCandidateID: EventID?
+  public let stoppedByAuthorization: Bool
+}
+
+@_spi(NearWireInternal) public struct EventActiveOfferResult<Value: Sendable>: Sendable {
+  public let removedEvents: [PendingEvent<Value>]
+  public let expiredEventIDs: [EventID]
+  public let acceptedAccountedByteCount: Int
+  public let acceptedEventCount: Int
+  public let serviceUnits: Int
+  public let dueWorkRemains: Bool
+  public let eligibleWorkRemains: Bool
+  public let nextExpirationDeadlineNanoseconds: UInt64?
+  public let nextFairCandidateID: EventID?
+  public let stoppedOnCandidate: Bool
+}
+
+extension EventActiveOfferResult: Equatable where Value: Equatable {}
+
 @_spi(NearWireInternal) public enum EventQueueClearReason: Sendable {
   case ownerRequested
   case sessionEnded
@@ -486,6 +509,248 @@ private struct DeadlineHeapNode: Comparable, Sendable {
     return expiredIDs
   }
 
+  /// Services a bounded number of due expirations and observes future scheduling state.
+  ///
+  /// The caller must invoke each supplied commit exactly once only while its synchronous
+  /// authorization is held, and return whether that commit occurred.
+  public mutating func observeActiveSchedule(
+    nowOnQueueClockNanoseconds now: UInt64,
+    maximumServiceUnits: Int,
+    authorizeExpiration: (
+      _ event: PendingEvent<Value>,
+      _ commit: () -> Void
+    ) -> Bool
+  ) throws -> EventQueueSchedulingObservation {
+    guard maximumServiceUnits > 0 else {
+      throw FlowControlError(
+        code: .invalidBatchConfiguration,
+        path: "maximumServiceUnits",
+        message: "Active queue service quantum must be positive."
+      )
+    }
+    try validateObservation(now)
+    recordObservation(now)
+
+    var expiredEventIDs: [EventID] = []
+    var stoppedByAuthorization = false
+    while expiredEventIDs.count < maximumServiceUnits,
+      let node = validDeadlineNode(),
+      node.deadlineNanoseconds <= now,
+      let stored = eventsByOrdinal[node.ordinal]
+    {
+      var didCommit = false
+      let authorized = authorizeExpiration(stored.event) {
+        precondition(!didCommit, "Active expiration commit may run only once.")
+        _ = deadlineHeap.popMinimum()
+        _ = removeStoredEvent(ordinal: node.ordinal)
+        statistics.expired.saturatingIncrement()
+        didCommit = true
+      }
+      precondition(
+        authorized == didCommit,
+        "Active expiration authorization must report its exact commit outcome."
+      )
+      guard authorized else {
+        stoppedByAuthorization = true
+        break
+      }
+      expiredEventIDs.append(node.eventID)
+    }
+
+    let nextDeadline = validDeadlineNode()?.deadlineNanoseconds
+    let dueWorkRemains = nextDeadline.map { $0 <= now } ?? false
+    let nextFairCandidateID: EventID?
+    if stoppedByAuthorization || dueWorkRemains {
+      nextFairCandidateID = nil
+    } else {
+      var planned = self
+      nextFairCandidateID = planned.nextFairCandidate()?.event.id
+    }
+    compactHeapsIfNeeded()
+    return EventQueueSchedulingObservation(
+      expiredEventIDs: expiredEventIDs,
+      dueWorkRemains: dueWorkRemains,
+      nextExpirationDeadlineNanoseconds: dueWorkRemains ? nil : nextDeadline,
+      nextFairCandidateID: nextFairCandidateID,
+      stoppedByAuthorization: stoppedByAuthorization
+    )
+  }
+
+  /// Returns the initial active scheduling state without mutating queue contents or statistics.
+  ///
+  /// Due work is level-triggered. The caller services it later through `observeActiveSchedule`,
+  /// where every expiration receives its own authorization decision.
+  public func previewActiveSchedule(
+    nowOnQueueClockNanoseconds now: UInt64,
+    maximumServiceUnits: Int
+  ) throws -> EventQueueSchedulingObservation {
+    var planned = self
+    let observation = try planned.observeActiveSchedule(
+      nowOnQueueClockNanoseconds: now,
+      maximumServiceUnits: maximumServiceUnits,
+      authorizeExpiration: { _, _ in false }
+    )
+    guard observation.stoppedByAuthorization else { return observation }
+    return EventQueueSchedulingObservation(
+      expiredEventIDs: [],
+      dueWorkRemains: true,
+      nextExpirationDeadlineNanoseconds: nil,
+      nextFairCandidateID: nil,
+      stoppedByAuthorization: false
+    )
+  }
+
+  /// Offers active-session work while allowing the caller to linearize each queue mutation with
+  /// related state outside this value.
+  public mutating func offerActive(
+    maximumServiceUnits: Int,
+    maximumAcceptedEventCount: Int,
+    maximumBytes: Int,
+    nowOnQueueClockNanoseconds now: UInt64,
+    authorizeExpiration: (
+      _ event: PendingEvent<Value>,
+      _ commit: () -> Void
+    ) -> Bool,
+    preflight: (
+      _ event: PendingEvent<Value>,
+      _ commitRemoval: () -> Void
+    ) -> EventOfferPreflightDecision,
+    decision: (
+      _ event: PendingEvent<Value>,
+      _ commitRemoval: () -> Void
+    ) -> EventOfferDecision
+  ) throws -> EventActiveOfferResult<Value> {
+    guard maximumServiceUnits > 0, maximumAcceptedEventCount >= 0, maximumBytes > 0 else {
+      throw FlowControlError(
+        code: .invalidBatchConfiguration,
+        path: "activeOffer",
+        message: "Active offer service, acceptance, and byte bounds are invalid."
+      )
+    }
+    try validateObservation(now)
+    recordObservation(now)
+
+    var serviceUnits = 0
+    var expiredEventIDs: [EventID] = []
+    var removedEvents: [PendingEvent<Value>] = []
+    var acceptedEventCount = 0
+    var acceptedBytes = 0
+    var stoppedOnCandidate = false
+
+    while serviceUnits < maximumServiceUnits,
+      let node = validDeadlineNode(),
+      node.deadlineNanoseconds <= now,
+      let stored = eventsByOrdinal[node.ordinal]
+    {
+      var didCommit = false
+      let authorized = authorizeExpiration(stored.event) {
+        precondition(!didCommit, "Active expiration commit may run only once.")
+        _ = deadlineHeap.popMinimum()
+        _ = removeStoredEvent(ordinal: node.ordinal)
+        statistics.expired.saturatingIncrement()
+        didCommit = true
+      }
+      precondition(
+        authorized == didCommit,
+        "Active expiration authorization must report its exact commit outcome."
+      )
+      serviceUnits += 1
+      guard authorized else {
+        stoppedOnCandidate = true
+        break
+      }
+      expiredEventIDs.append(node.eventID)
+    }
+
+    while !stoppedOnCandidate, serviceUnits < maximumServiceUnits {
+      let creditsBeforeSelection = credits
+      guard let candidate = nextFairCandidate() else { break }
+      var didCommit = false
+      let preflightResult = preflight(candidate.event) {
+        precondition(!didCommit, "Active preflight removal may run only once.")
+        popPriorityNode(candidate.event.priority)
+        credits.consume(candidate.event.priority)
+        _ = removeStoredEvent(ordinal: candidate.ordinal)
+        statistics.dequeued.saturatingIncrement()
+        didCommit = true
+      }
+      switch preflightResult {
+      case .removeWithoutAccounting:
+        precondition(didCommit, "Active preflight removal must commit before returning.")
+        removedEvents.append(candidate.event)
+        serviceUnits += 1
+        continue
+      case .stop:
+        precondition(!didCommit, "Stopped active preflight must not mutate the queue.")
+        credits = creditsBeforeSelection
+        serviceUnits += 1
+        stoppedOnCandidate = true
+        break
+      case .eligible:
+        precondition(!didCommit, "Eligible active preflight must not mutate the queue.")
+      }
+      if stoppedOnCandidate { break }
+      guard acceptedEventCount < maximumAcceptedEventCount else {
+        credits = creditsBeforeSelection
+        stoppedOnCandidate = true
+        break
+      }
+
+      let (candidateTotal, byteOverflow) = acceptedBytes.addingReportingOverflow(
+        candidate.event.accountedByteCount
+      )
+      guard !byteOverflow, candidateTotal <= maximumBytes else {
+        credits = creditsBeforeSelection
+        stoppedOnCandidate = true
+        break
+      }
+
+      let decisionResult = decision(candidate.event) {
+        precondition(!didCommit, "Active candidate removal may run only once.")
+        popPriorityNode(candidate.event.priority)
+        credits.consume(candidate.event.priority)
+        _ = removeStoredEvent(ordinal: candidate.ordinal)
+        statistics.dequeued.saturatingIncrement()
+        didCommit = true
+      }
+      serviceUnits += 1
+      switch decisionResult {
+      case .remove:
+        precondition(didCommit, "Accepted active candidate must commit before returning.")
+        removedEvents.append(candidate.event)
+        acceptedEventCount += 1
+        acceptedBytes = candidateTotal
+      case .stop:
+        precondition(!didCommit, "Stopped active decision must not mutate the queue.")
+        credits = creditsBeforeSelection
+        stoppedOnCandidate = true
+      }
+    }
+
+    let nextDeadline = validDeadlineNode()?.deadlineNanoseconds
+    let dueWorkRemains = nextDeadline.map { $0 <= now } ?? false
+    let nextFairCandidateID: EventID?
+    if dueWorkRemains {
+      nextFairCandidateID = nil
+    } else {
+      var planned = self
+      nextFairCandidateID = planned.nextFairCandidate()?.event.id
+    }
+    compactHeapsIfNeeded()
+    return EventActiveOfferResult(
+      removedEvents: removedEvents,
+      expiredEventIDs: expiredEventIDs,
+      acceptedAccountedByteCount: acceptedBytes,
+      acceptedEventCount: acceptedEventCount,
+      serviceUnits: serviceUnits,
+      dueWorkRemains: dueWorkRemains,
+      eligibleWorkRemains: nextFairCandidateID != nil,
+      nextExpirationDeadlineNanoseconds: dueWorkRemains ? nil : nextDeadline,
+      nextFairCandidateID: nextFairCandidateID,
+      stoppedOnCandidate: stoppedOnCandidate
+    )
+  }
+
   public mutating func clear(reason: EventQueueClearReason) -> EventQueueClearResult {
     let ids = eventsByOrdinal.values.sorted { $0.ordinal < $1.ordinal }.map(\.event.id)
     let removedCount = UInt64(ids.count)
@@ -593,6 +858,19 @@ private struct DeadlineHeapNode: Comparable, Sendable {
       statistics.expired.saturatingIncrement()
     }
     return expiredIDs
+  }
+
+  private mutating func validDeadlineNode() -> DeadlineHeapNode? {
+    while let node = deadlineHeap.minimum {
+      if let stored = eventsByOrdinal[node.ordinal],
+        stored.event.id == node.eventID,
+        stored.deadlineNanoseconds == node.deadlineNanoseconds
+      {
+        return node
+      }
+      _ = deadlineHeap.popMinimum()
+    }
+    return nil
   }
 
   private mutating func oldestOverflowCandidate() -> StoredEvent? {

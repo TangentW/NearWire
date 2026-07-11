@@ -93,6 +93,10 @@ import Foundation
     )
   }
 
+  public func deterministicEncodedByteCount() throws -> Int {
+    try jsonValue().deterministicData().count
+  }
+
   func jsonValue() throws -> JSONValue {
     guard let createdAt = WireDateCodec.format(envelope.createdAt) else {
       throw WireProtocolError(
@@ -317,8 +321,8 @@ import Foundation
     _ record: WireEventRecord,
     limits: WireProtocolLimits
   ) throws {
-    let bytes = try record.jsonValue().deterministicData()
-    guard bytes.count <= limits.maximumEventBytes else {
+    let byteCount = try record.deterministicEncodedByteCount()
+    guard byteCount <= limits.maximumEventBytes else {
       throw WireProtocolError(
         code: .frameTooLarge,
         path: "event",

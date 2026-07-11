@@ -58,7 +58,7 @@ Internally, hash indexes provide event-ID and keep-latest lookup, while per-prio
 
 If the next fairly selected event cannot fit the remaining batch bytes, selection stops without removing or skipping it. The next flush can send it because a valid batch configuration fits every valid single queue event.
 
-The queue also supports a synchronous offer operation for transport backpressure. It presents the next fair candidate to its owner and removes it only when the owner accepts it. Stopping leaves that candidate's insertion ordinal, indexes, accounted bytes, and weighted scheduler credit unchanged, so a later attempt observes the same ordering without a dequeue-and-reinsert cycle. An owner preflight can remove locally invalid work, such as a stale route-bound reply, before the transport byte budget is evaluated; that work consumes a bounded candidate slot but no transport bytes.
+The queue also supports a synchronous active offer operation for transport backpressure. It presents the next fair candidate to its owner and removes it only when the owner accepts it. The operation has separate positive service and byte bounds plus a captured nonnegative token allowance, so token-free expiry and route maintenance can continue after live Event admission pauses. Stopping leaves the candidate's insertion ordinal, indexes, accounted bytes, and weighted scheduler credit unchanged, so a later attempt observes the same ordering without a dequeue-and-reinsert cycle. An owner preflight can remove locally invalid work, such as a stale route-bound reply, before the transport byte budget is evaluated; that work consumes a bounded candidate slot but no transport bytes.
 
 ## Telemetry and clearing
 

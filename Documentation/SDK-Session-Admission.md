@@ -6,7 +6,7 @@ NearWire now contains the repository-internal App-side operation that turns one 
 
 Constructing an admission value performs no discovery, permission request, network operation, task, timer, persistence, Keychain access, process-lease claim, SDK state mutation, or event transfer. Only one explicit internal `run()` starts work, and that operation is single-use.
 
-Public connection APIs, process-lease orchestration, active event transfer, effective-rate negotiation, reconnection, background behavior, and lifecycle state publication remain later roadmap work.
+Public connection APIs, process-lease orchestration, reconnection, background behavior, and lifecycle state publication remain later roadmap work. The repository-internal active transfer stage that consumes an admitted attachment is documented in [SDK-Active-Event-Pump.md](SDK-Active-Event-Pump.md).
 
 ## Sequence
 
@@ -73,6 +73,8 @@ Task cancellation that arrives after acknowledgement commit cannot use the old a
 
 Admission uses one closed internal error code set. Descriptions are generated only from those codes. Pairing codes, Bonjour names, `vid`, endpoints, interface names, installation IDs, application metadata, certificates, raw Network.framework errors, peer rejection text, wire bytes, and event content are not propagated through admission diagnostics or reflection.
 
-## Residual Scope
+## Handoff to Active Transfer
 
-The admitted core intentionally remains in policy negotiation and rejects Event-lane traffic. The next `sdk-active-event-pump` change will activate event transfer, preserve the same channel and decoder, apply policy negotiation, drain the SDK queue, validate route and sequence, and publish incoming events. A later `sdk-public-connect` change will claim the process lease before admission and expose supported connection operations and safe public state transitions.
+The admitted core remains in policy negotiation and rejects Event-lane traffic until exactly one internal active runner claims the attachment. That runner preserves the same channel, ingress, decoder, codec, route, relay, and terminal owner while enabling negotiated bidirectional transfer. See [SDK-Active-Event-Pump.md](SDK-Active-Event-Pump.md).
+
+A later `sdk-public-connect` change will claim the process lease before admission and expose supported connection operations and safe public state transitions.

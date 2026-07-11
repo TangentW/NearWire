@@ -76,6 +76,21 @@ import Foundation
     preflightLane: (WireLane) throws -> Void = { _ in },
     onFrame: (WireFrame) throws -> Void
   ) throws {
+    let exceededLimit = try consumeBounded(
+      bytes,
+      maximumCompletedFrames: Int.max,
+      preflightLane: preflightLane,
+      onFrame: onFrame
+    )
+    precondition(!exceededLimit)
+  }
+
+  public mutating func consumeBounded(
+    _ bytes: Data,
+    maximumCompletedFrames: Int,
+    preflightLane: (WireLane) throws -> Void = { _ in },
+    onFrame: (WireFrame) throws -> Void
+  ) throws -> Bool {
     if let terminalError {
       throw WireProtocolError(
         code: .decoderFailed,
@@ -84,9 +99,17 @@ import Foundation
         disposition: .connectionTerminal
       )
     }
+    guard maximumCompletedFrames > 0 else {
+      throw WireProtocolError(
+        code: .invalidConfiguration,
+        path: "maximumCompletedFrames",
+        message: "Completed-frame bound must be positive."
+      )
+    }
 
     do {
       var index = bytes.startIndex
+      var completedFrames = 0
       while index < bytes.endIndex {
         if prefix.count < 4 {
           let needed = 4 - prefix.count
@@ -151,7 +174,9 @@ import Foundation
           let frame = WireFrame(lane: lane, payload: payload)
           resetFrameState()
           do {
+            if completedFrames == maximumCompletedFrames { return true }
             try onFrame(frame)
+            completedFrames += 1
           } catch {
             throw WireProtocolError(
               code: .callbackFailed,
@@ -161,6 +186,7 @@ import Foundation
           }
         }
       }
+      return false
     } catch let error as WireProtocolError {
       let terminal = error.asConnectionTerminal()
       terminalError = terminal

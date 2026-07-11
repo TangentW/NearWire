@@ -8,6 +8,2290 @@ import XCTest
 @_spi(NearWireInternal) @testable import NearWireTransport
 
 final class SDKSessionAdmissionTests: XCTestCase {
+  func testActivePumpActivatesConservativePolicyAndObservesTermination() async throws {
+    let fixture = try SessionAdmissionFixture()
+    let admitted = try await fixture.admit()
+    let attachment = try await admitted.attachEventPump()
+    let pump = SDKActiveEventPump(attachment: attachment, owner: NearWire())
+
+    await fixture.driver.waitForReceive()
+    let run = Task { try await pump.run() }
+    await sessionWaitUntil {
+      await attachment.transportCore.snapshot().state == .negotiatingPolicy
+    }
+    let offer = try WireFlowPolicy(
+      appUplinkEventsPerSecond: 1_000,
+      appDownlinkEventsPerSecond: 500
+    )
+    fixture.driver.completeReceive(
+      try fixture.sessionCodec.encode(
+        WireFlowPolicyOffer(policy: offer),
+        phase: .negotiatingPolicy
+      )
+    )
+
+    let handle = try await run.value
+    let snapshot = await attachment.transportCore.snapshot()
+    XCTAssertEqual(snapshot.state, .active)
+    XCTAssertEqual(snapshot.effectiveUplinkRate, 100)
+    XCTAssertEqual(snapshot.effectiveDownlinkRate, 50)
+    XCTAssertEqual(handle.description, "<redacted-active-event-pump-handle>")
+
+    await sdkWaitUntil { fixture.driver.sentData.count == 2 }
+    let accepted = try decodeAcceptedPolicy(
+      fixture.driver.sentData[1],
+      codec: fixture.sessionCodec,
+      phase: .negotiatingPolicy
+    )
+    XCTAssertEqual(accepted.policy.appUplinkEventsPerSecond, 100)
+    XCTAssertEqual(accepted.policy.appDownlinkEventsPerSecond, 50)
+
+    let observer = handle.termination
+    let wait = Task { try await observer.wait() }
+    await sessionWaitUntil {
+      await attachment.transportCore.snapshot().hasPendingTerminationObservation
+    }
+    handle.cancel()
+    let terminalCode = try await wait.value
+    XCTAssertEqual(terminalCode, .cancelled)
+    await assertAdmissionError(.terminationWaitAlreadyStarted) {
+      _ = try await observer.wait()
+    }
+  }
+
+  func testDynamicPolicyUsesFreshConservativeBoundary() async throws {
+    let fixture = try SessionAdmissionFixture()
+    let admitted = try await fixture.admit()
+    let attachment = try await admitted.attachEventPump()
+    let clock = SessionMonotonicSequence(values: [50, 100, 200])
+    let owner = NearWire(
+      dependencies: SDKRuntimeDependencies(
+        wallClock: { Date(timeIntervalSince1970: 0) },
+        monotonicClock: { clock.next() },
+        identifierGenerator: { UUID() }
+      )
+    )
+    let run = Task {
+      try await SDKActiveEventPump(attachment: attachment, owner: owner).run()
+    }
+    await fixture.driver.waitForReceive()
+    await sessionWaitUntil {
+      await attachment.transportCore.snapshot().state == .negotiatingPolicy
+    }
+    fixture.driver.completeReceive(
+      try fixture.sessionCodec.encode(
+        WireFlowPolicyOffer(
+          policy: try WireFlowPolicy(
+            appUplinkEventsPerSecond: 80,
+            appDownlinkEventsPerSecond: 40
+          )
+        ),
+        phase: .negotiatingPolicy
+      )
+    )
+    let handle = try await run.value
+    await fixture.driver.waitForReceive()
+    fixture.driver.completeReceive(
+      try fixture.sessionCodec.encode(
+        WireFlowPolicyOffer(
+          policy: try WireFlowPolicy(
+            appUplinkEventsPerSecond: 1_000,
+            appDownlinkEventsPerSecond: 0
+          )
+        ),
+        phase: .active
+      )
+    )
+    await sessionWaitUntil { fixture.driver.sentData.count == 3 }
+    let snapshot = await attachment.transportCore.snapshot()
+    XCTAssertEqual(snapshot.effectiveUplinkRate, 100)
+    XCTAssertEqual(snapshot.effectiveDownlinkRate, 0)
+    let accepted = try decodeAcceptedPolicy(
+      fixture.driver.sentData[2],
+      codec: fixture.sessionCodec,
+      phase: .active
+    )
+    XCTAssertEqual(accepted.policy.appUplinkEventsPerSecond, 100)
+    XCTAssertEqual(accepted.policy.appDownlinkEventsPerSecond, 0)
+    handle.cancel()
+  }
+
+  func testIngressPauseParksNonterminalAndLetsTerminalBypass() {
+    let callbacks = SessionDependencyCounters()
+    let ingress = SDKSessionChannelIngress(maximumEvents: 8, maximumReceiveBytes: 64)
+    ingress.installDrain { callbacks.recordDrain() }
+    ingress.submit(.channel(.received(Data([1]))))
+    XCTAssertEqual(callbacks.drainCount, 1)
+
+    ingress.pauseNonterminalDrain()
+    guard case .parked = ingress.takeBatch(maximumItems: 8) else {
+      return XCTFail("Expected scheduled nonterminal drain to park.")
+    }
+    ingress.submit(.channel(.received(Data([2]))))
+    XCTAssertEqual(callbacks.drainCount, 1)
+    XCTAssertEqual(ingress.retainedCounts, .init(events: 2, receiveBytes: 2))
+
+    ingress.submit(
+      .channel(
+        .terminated(
+          SecureTransportError(
+            code: .endOfStream,
+            message: "private",
+            disposition: .connectionTerminal
+          )
+        )
+      )
+    )
+    XCTAssertEqual(callbacks.drainCount, 2)
+    guard case .batch(let terminal) = ingress.takeBatch(maximumItems: 8) else {
+      return XCTFail("Expected terminal bypass batch.")
+    }
+    XCTAssertEqual(terminal.count, 1)
+    ingress.stop()
+    ingress.resumeNonterminalDrain()
+    XCTAssertEqual(ingress.currentMode, .stopped)
+  }
+
+  func testActiveLimitsRejectEveryZeroAndHardMaximumOverflow() throws {
+    XCTAssertNoThrow(try SDKActiveEventPumpLimits())
+    XCTAssertThrowsError(try SDKActiveEventPumpLimits(initialPolicyTimeoutSeconds: 0))
+    XCTAssertThrowsError(
+      try SDKActiveEventPumpLimits(maximumIncomingEvents: 10_001)
+    )
+    XCTAssertThrowsError(
+      try SDKActiveEventPumpLimits(maximumIncomingEncodedBytes: 0)
+    )
+    XCTAssertThrowsError(
+      try SDKActiveEventPumpLimits(maximumCompletedFramesPerReceive: 1_025)
+    )
+    XCTAssertThrowsError(
+      try SDKActiveEventPumpLimits(maximumOutboundServiceUnitsPerTurn: 0)
+    )
+    XCTAssertThrowsError(
+      try SDKActiveEventPumpLimits(maximumOutboundAccountedBytesPerTurn: 0)
+    )
+    XCTAssertThrowsError(
+      try SDKActiveEventPumpLimits(maximumIncomingPublicationsPerTurn: 257)
+    )
+    XCTAssertThrowsError(
+      try SDKActiveEventPumpLimits(maximumDeferredPolicyTransactions: 129)
+    )
+  }
+
+  func testActiveRunCancellationDuringBindingWinsWithoutWakeInstallation() async throws {
+    let fixture = try SessionAdmissionFixture()
+    let admitted = try await fixture.admit()
+    let attachment = try await admitted.attachEventPump()
+    let binding = SessionAsyncBarrier()
+    let pump = SDKActiveEventPump(
+      attachment: attachment,
+      owner: NearWire(),
+      dependencies: SDKActiveEventPumpDependencies(
+        sleep: sessionTestSleep,
+        beforeWakeRegistration: { await binding.wait() },
+        beforeActivationCommit: {},
+        beforeActivationResume: {},
+        operationGateHooks: .none
+      )
+    )
+    let run = Task { try await pump.run() }
+    await binding.waitUntilEntered()
+    run.cancel()
+    await assertAdmissionError(.cancelled) {
+      _ = try await run.value
+    }
+    binding.release()
+    await sessionWaitUntil { fixture.driver.cancelCount == 1 }
+    let terminal = await attachment.transportCore.snapshot().terminalCode
+    XCTAssertEqual(terminal, .cancelled)
+  }
+
+  func testPolicyDeadlineCoversSuspendedOwnerBinding() async throws {
+    let fixture = try SessionAdmissionFixture()
+    let admitted = try await fixture.admit()
+    let attachment = try await admitted.attachEventPump()
+    let binding = SessionAsyncBarrier()
+    let deadline = SessionAsyncBarrier()
+    let pump = SDKActiveEventPump(
+      attachment: attachment,
+      owner: NearWire(),
+      dependencies: SDKActiveEventPumpDependencies(
+        sleep: { _ in await deadline.wait() },
+        beforeWakeRegistration: { await binding.wait() },
+        beforeActivationCommit: {},
+        beforeActivationResume: {},
+        operationGateHooks: .none
+      )
+    )
+    let run = Task { try await pump.run() }
+    await binding.waitUntilEntered()
+    await deadline.waitUntilEntered()
+    deadline.release()
+    await assertAdmissionError(.policyNegotiationTimedOut) {
+      _ = try await run.value
+    }
+    binding.release()
+    await sessionWaitUntil { fixture.driver.cancelCount == 1 }
+    let terminal = await attachment.transportCore.snapshot().terminalCode
+    XCTAssertEqual(terminal, .policyNegotiationTimedOut)
+  }
+
+  func testPolicyDeadlineAfterSuccessfulRegistrationWithNoOffer() async throws {
+    let fixture = try SessionAdmissionFixture()
+    let admitted = try await fixture.admit()
+    let attachment = try await admitted.attachEventPump()
+    let deadline = SessionDeadlineController()
+    let run = Task {
+      try await SDKActiveEventPump(
+        attachment: attachment,
+        owner: NearWire(),
+        dependencies: SDKActiveEventPumpDependencies(
+          sleep: { try await deadline.sleep(seconds: $0) },
+          beforeWakeRegistration: {},
+          beforeActivationCommit: {},
+          beforeActivationResume: {},
+          operationGateHooks: .none
+        )
+      ).run()
+    }
+    await sessionWaitUntil {
+      await attachment.transportCore.snapshot().state == .negotiatingPolicy
+    }
+    await deadline.waitForRequest(seconds: 10)
+    XCTAssertEqual(fixture.driver.sentData.count, 1)
+    deadline.fire(seconds: 10)
+    await assertAdmissionError(.policyNegotiationTimedOut) { _ = try await run.value }
+    let snapshot = await attachment.transportCore.snapshot()
+    XCTAssertEqual(snapshot.terminalCode, .policyNegotiationTimedOut)
+    XCTAssertFalse(snapshot.hasOwnerRefresh)
+    XCTAssertEqual(fixture.driver.sentData.count, 1)
+  }
+
+  func testPolicyPullAndActiveRunnerOwnershipAreIrreversible() async throws {
+    do {
+      let fixture = try SessionAdmissionFixture()
+      let admitted = try await fixture.admit()
+      let attachment = try await admitted.attachEventPump()
+      let pendingPull = Task { try await attachment.nextPolicyMessage() }
+      await sessionWaitUntil { await attachment.transportCore.snapshot().hasPendingPolicyPull }
+      let pump = SDKActiveEventPump(attachment: attachment, owner: NearWire())
+      await assertAdmissionError(.policyConsumerClaimed) {
+        _ = try await pump.run()
+      }
+      pendingPull.cancel()
+      await assertAdmissionError(.pullCancelled) {
+        _ = try await pendingPull.value
+      }
+      admitted.cancel()
+    }
+
+    do {
+      let fixture = try SessionAdmissionFixture()
+      let admitted = try await fixture.admit()
+      let attachment = try await admitted.attachEventPump()
+      let binding = SessionAsyncBarrier()
+      let pump = SDKActiveEventPump(
+        attachment: attachment,
+        owner: NearWire(),
+        dependencies: SDKActiveEventPumpDependencies(
+          sleep: sessionTestSleep,
+          beforeWakeRegistration: { await binding.wait() },
+          beforeActivationCommit: {},
+          beforeActivationResume: {},
+          operationGateHooks: .none
+        )
+      )
+      let run = Task { try await pump.run() }
+      await binding.waitUntilEntered()
+      await assertAdmissionError(.policyConsumerClaimed) {
+        _ = try await attachment.nextPolicyMessage()
+      }
+      run.cancel()
+      binding.release()
+      await assertAdmissionError(.cancelled) {
+        _ = try await run.value
+      }
+    }
+  }
+
+  func testTerminationObserverDoesNotRetainFinalHandle() async throws {
+    let fixture = try SessionAdmissionFixture()
+    let admitted = try await fixture.admit()
+    let attachment = try await admitted.attachEventPump()
+    var handle: SDKActiveEventPumpHandle?
+    var run: Task<SDKActiveEventPumpHandle, Error>? = Task {
+      try await SDKActiveEventPump(attachment: attachment, owner: NearWire()).run()
+    }
+    await fixture.driver.waitForReceive()
+    await sessionWaitUntil {
+      await attachment.transportCore.snapshot().state == .negotiatingPolicy
+    }
+    fixture.driver.completeReceive(
+      try fixture.sessionCodec.encode(
+        WireFlowPolicyOffer(
+          policy: try WireFlowPolicy(
+            appUplinkEventsPerSecond: 1,
+            appDownlinkEventsPerSecond: 1
+          )
+        ),
+        phase: .negotiatingPolicy
+      )
+    )
+    handle = try await run?.value
+    run = nil
+    let observer = try XCTUnwrap(handle?.termination)
+    let wait = Task { try await observer.wait() }
+    await sessionWaitUntil {
+      await attachment.transportCore.snapshot().hasPendingTerminationObservation
+    }
+    handle = nil
+    let terminalCode = try await wait.value
+    XCTAssertEqual(terminalCode, .cancelled)
+  }
+
+  func testActiveUplinkSendsContiguousWireEventsWithinTokenAllowance() async throws {
+    let fixture = try SessionAdmissionFixture()
+    let admitted = try await fixture.admit()
+    let attachment = try await admitted.attachEventPump()
+    let owner = NearWire()
+    for value in 1...3 {
+      _ = try await owner.send(type: "test.uplink", content: ["value": value])
+    }
+    let pump = SDKActiveEventPump(
+      attachment: attachment,
+      owner: owner,
+      dependencies: SDKActiveEventPumpDependencies(
+        sleep: sessionTestSleep,
+        sleepNanoseconds: { _ in throw CancellationError() },
+        beforeWakeRegistration: {},
+        beforeActivationCommit: {},
+        beforeActivationResume: {},
+        operationGateHooks: .none
+      )
+    )
+    let run = Task { try await pump.run() }
+    await fixture.driver.waitForReceive()
+    await sessionWaitUntil {
+      await attachment.transportCore.snapshot().state == .negotiatingPolicy
+    }
+    fixture.driver.completeReceive(
+      try fixture.sessionCodec.encode(
+        WireFlowPolicyOffer(
+          policy: try WireFlowPolicy(
+            appUplinkEventsPerSecond: 1,
+            appDownlinkEventsPerSecond: 1
+          )
+        ),
+        phase: .negotiatingPolicy
+      )
+    )
+    let handle = try await run.value
+    await sdkWaitUntil { fixture.driver.sentData.count >= 4 }
+    let sent = fixture.driver.sentData
+    guard sent.count >= 4 else {
+      let snapshot = await attachment.transportCore.snapshot()
+      let diagnostics = try await owner.bufferDiagnostics()
+      handle.cancel()
+      return XCTFail(
+        "Expected two active Events; sent=\(sent.count), terminal=\(String(describing: snapshot.terminalCode)), queued=\(diagnostics.eventCount)."
+      )
+    }
+
+    let first = try decodeEventPayload(sent[2], codec: fixture.sessionCodec)
+    let second = try decodeEventPayload(sent[3], codec: fixture.sessionCodec)
+    XCTAssertEqual(first.record.envelope.sequence.rawValue, 0)
+    XCTAssertEqual(second.record.envelope.sequence.rawValue, 1)
+    XCTAssertEqual(first.record.envelope.direction, .appToViewer)
+    XCTAssertEqual(
+      first.record.envelope.sessionEpoch.rawValue, fixture.sessionUUID.nearWireCanonicalString)
+    let diagnostics = try await owner.bufferDiagnostics()
+    XCTAssertEqual(diagnostics.eventCount, 1)
+    handle.cancel()
+  }
+
+  func testActiveDownlinkValidatesAndPublishesViewerEvent() async throws {
+    let fixture = try SessionAdmissionFixture()
+    let admitted = try await fixture.admit()
+    let attachment = try await admitted.attachEventPump()
+    let owner = NearWire()
+    let run = Task { try await SDKActiveEventPump(attachment: attachment, owner: owner).run() }
+    await fixture.driver.waitForReceive()
+    await sessionWaitUntil {
+      await attachment.transportCore.snapshot().state == .negotiatingPolicy
+    }
+    fixture.driver.completeReceive(
+      try fixture.sessionCodec.encode(
+        WireFlowPolicyOffer(
+          policy: try WireFlowPolicy(
+            appUplinkEventsPerSecond: 10,
+            appDownlinkEventsPerSecond: 10
+          )
+        ),
+        phase: .negotiatingPolicy
+      )
+    )
+    let handle = try await run.value
+
+    let eventTask = Task { () throws -> NearWireEvent? in
+      var iterator = owner.events.makeAsyncIterator()
+      return try await iterator.next()
+    }
+    await sdkWaitUntil { owner.streamSubscriberCounts.events == 1 }
+    await fixture.driver.waitForReceive()
+    let record = try makeSessionIncomingRecord(
+      route: admitted.route,
+      sequence: 0,
+      id: "30000000-0000-0000-0000-000000000001"
+    )
+    fixture.driver.completeReceive(
+      try fixture.sessionCodec.encode(WireEventPayload(record: record), phase: .active)
+    )
+
+    let published = try await eventTask.value
+    let received = try XCTUnwrap(published)
+    XCTAssertEqual(received.id.uuidString.lowercased(), record.envelope.id.rawValue)
+    XCTAssertEqual(received.type, "viewer.command")
+    XCTAssertEqual(received.direction, .viewerToApp)
+    let metadata = try XCTUnwrap(received.session)
+    XCTAssertEqual(metadata.sequence, 0)
+    XCTAssertEqual(metadata.sourceID, admitted.route.viewerID)
+    XCTAssertEqual(metadata.targetID, admitted.route.appID)
+    let snapshot = await attachment.transportCore.snapshot()
+    XCTAssertEqual(snapshot.retainedIncomingEvents, 0)
+    XCTAssertEqual(snapshot.retainedIncomingEncodedBytes, 0)
+    handle.cancel()
+  }
+
+  func testTerminalFirstDownlinkPublicationRetainsChargeUntilGateResolution() async throws {
+    let fixture = try SessionAdmissionFixture()
+    let admitted = try await fixture.admit()
+    let attachment = try await admitted.attachEventPump()
+    let owner = NearWire()
+    let beforeClaim = SessionOneShotAsyncBarrier()
+    let beforeCompletion = SessionOneShotAsyncBarrier()
+    let capture = SDKLockedCapture<NearWireEvent>()
+    let consumer = Task {
+      do {
+        for try await event in owner.events { capture.append(event) }
+      } catch {}
+    }
+    await sdkWaitUntil { owner.streamSubscriberCounts.events == 1 }
+    let run = Task {
+      try await SDKActiveEventPump(
+        attachment: attachment,
+        owner: owner,
+        dependencies: SDKActiveEventPumpDependencies(
+          sleep: sessionTestSleep,
+          beforeWakeRegistration: {},
+          beforeActivationCommit: {},
+          beforeActivationResume: {},
+          beforeIncomingPublicationClaim: { await beforeClaim.waitOnce() },
+          beforeIncomingPublicationCompletion: { await beforeCompletion.waitOnce() },
+          operationGateHooks: .none
+        )
+      ).run()
+    }
+    await fixture.driver.waitForReceive()
+    await sessionWaitUntil {
+      await attachment.transportCore.snapshot().state == .negotiatingPolicy
+    }
+    fixture.driver.completeReceive(
+      try fixture.sessionCodec.encode(
+        WireFlowPolicyOffer(
+          policy: try WireFlowPolicy(
+            appUplinkEventsPerSecond: 1,
+            appDownlinkEventsPerSecond: 1
+          )
+        ),
+        phase: .negotiatingPolicy
+      )
+    )
+    let handle = try await run.value
+    await fixture.driver.waitForReceive()
+    let record = try makeSessionIncomingRecord(
+      route: admitted.route,
+      sequence: 0,
+      id: "30000000-0000-0000-0000-000000000081"
+    )
+    fixture.driver.completeReceive(
+      try fixture.sessionCodec.encode(WireEventPayload(record: record), phase: .active)
+    )
+    await beforeClaim.waitUntilEntered()
+    let suspended = await attachment.transportCore.snapshot()
+    XCTAssertEqual(suspended.retainedIncomingEvents, 1)
+    XCTAssertGreaterThan(suspended.retainedIncomingEncodedBytes, 0)
+
+    handle.cancel()
+    await sessionWaitUntil {
+      await attachment.transportCore.snapshot().terminalCode == .cancelled
+    }
+    beforeClaim.release()
+    await beforeCompletion.waitUntilEntered()
+    XCTAssertTrue(capture.snapshot.isEmpty)
+    let terminal = await attachment.transportCore.snapshot()
+    XCTAssertEqual(terminal.retainedIncomingEvents, 0)
+    XCTAssertEqual(terminal.retainedIncomingEncodedBytes, 0)
+    beforeCompletion.release()
+    await sessionWaitUntil { fixture.driver.cancelCount == 1 }
+    XCTAssertEqual(fixture.driver.cancelCount, 1)
+    consumer.cancel()
+  }
+
+  func testPublicationDefersPoliciesAndCommitsInOrder() async throws {
+    let fixture = try SessionAdmissionFixture()
+    let admitted = try await fixture.admit()
+    let attachment = try await admitted.attachEventPump()
+    let owner = NearWire()
+    let beforeCompletion = SessionOneShotAsyncBarrier()
+    let capture = SDKLockedCapture<NearWireEvent>()
+    let consumer = Task {
+      do {
+        for try await event in owner.events { capture.append(event) }
+      } catch {}
+    }
+    await sdkWaitUntil { owner.streamSubscriberCounts.events == 1 }
+    let run = Task {
+      try await SDKActiveEventPump(
+        attachment: attachment,
+        owner: owner,
+        dependencies: SDKActiveEventPumpDependencies(
+          sleep: sessionTestSleep,
+          beforeWakeRegistration: {},
+          beforeActivationCommit: {},
+          beforeActivationResume: {},
+          beforeIncomingPublicationCompletion: { await beforeCompletion.waitOnce() },
+          operationGateHooks: .none
+        )
+      ).run()
+    }
+    await fixture.driver.waitForReceive()
+    await sessionWaitUntil {
+      await attachment.transportCore.snapshot().state == .negotiatingPolicy
+    }
+    fixture.driver.completeReceive(
+      try fixture.sessionCodec.encode(
+        WireFlowPolicyOffer(
+          policy: try WireFlowPolicy(
+            appUplinkEventsPerSecond: 10,
+            appDownlinkEventsPerSecond: 10
+          )
+        ),
+        phase: .negotiatingPolicy
+      )
+    )
+    let handle = try await run.value
+    await fixture.driver.waitForReceive()
+    let record = try makeSessionIncomingRecord(
+      route: admitted.route,
+      sequence: 0,
+      id: "30000000-0000-0000-0000-000000000082"
+    )
+    fixture.driver.completeReceive(
+      try fixture.sessionCodec.encode(WireEventPayload(record: record), phase: .active)
+    )
+    await beforeCompletion.waitUntilEntered()
+    await sdkWaitUntil { capture.snapshot.count == 1 }
+    let suspended = await attachment.transportCore.snapshot()
+    XCTAssertEqual(suspended.retainedIncomingEvents, 1)
+    XCTAssertGreaterThan(suspended.retainedIncomingEncodedBytes, 0)
+    XCTAssertEqual(
+      capture.snapshot.map { $0.id.uuidString.lowercased() },
+      [record.envelope.id.rawValue]
+    )
+
+    await fixture.driver.waitForReceive()
+    fixture.driver.completeReceive(
+      try fixture.sessionCodec.encode(
+        WireFlowPolicyOffer(
+          policy: try WireFlowPolicy(
+            appUplinkEventsPerSecond: 7,
+            appDownlinkEventsPerSecond: 6
+          )
+        ),
+        phase: .active
+      )
+    )
+    await sessionWaitUntil {
+      await attachment.transportCore.snapshot().deferredPolicyCount == 1
+    }
+    await fixture.driver.waitForReceive()
+    fixture.driver.completeReceive(
+      try fixture.sessionCodec.encode(
+        WireFlowPolicyOffer(
+          policy: try WireFlowPolicy(
+            appUplinkEventsPerSecond: 5,
+            appDownlinkEventsPerSecond: 4
+          )
+        ),
+        phase: .active
+      )
+    )
+    await sessionWaitUntil {
+      await attachment.transportCore.snapshot().deferredPolicyCount == 2
+    }
+    beforeCompletion.release()
+    await sessionWaitUntil {
+      let snapshot = await attachment.transportCore.snapshot()
+      return snapshot.deferredPolicyCount == 0 && snapshot.effectiveDownlinkRate == 4
+    }
+    let completed = await attachment.transportCore.snapshot()
+    XCTAssertEqual(completed.retainedIncomingEvents, 0)
+    XCTAssertEqual(completed.effectiveUplinkRate, 5)
+    XCTAssertEqual(completed.effectiveDownlinkRate, 4)
+    XCTAssertEqual(capture.snapshot.count, 1)
+    handle.cancel()
+    consumer.cancel()
+  }
+
+  func testPublicationFirstTerminalRaceRejectsStaleCoreResult() async throws {
+    let fixture = try SessionAdmissionFixture()
+    let admitted = try await fixture.admit()
+    let attachment = try await admitted.attachEventPump()
+    let owner = NearWire()
+    let beforeCompletion = SessionOneShotAsyncBarrier()
+    let afterCompletion = SessionOneShotAsyncBarrier()
+    let capture = SDKLockedCapture<NearWireEvent>()
+    let consumer = Task {
+      do {
+        for try await event in owner.events { capture.append(event) }
+      } catch {}
+    }
+    await sdkWaitUntil { owner.streamSubscriberCounts.events == 1 }
+    let run = Task {
+      try await SDKActiveEventPump(
+        attachment: attachment,
+        owner: owner,
+        dependencies: SDKActiveEventPumpDependencies(
+          sleep: sessionTestSleep,
+          beforeWakeRegistration: {},
+          beforeActivationCommit: {},
+          beforeActivationResume: {},
+          beforeIncomingPublicationCompletion: { await beforeCompletion.waitOnce() },
+          afterIncomingPublicationCompletion: { await afterCompletion.waitOnce() },
+          operationGateHooks: .none
+        )
+      ).run()
+    }
+    await fixture.driver.waitForReceive()
+    await sessionWaitUntil {
+      await attachment.transportCore.snapshot().state == .negotiatingPolicy
+    }
+    fixture.driver.completeReceive(
+      try fixture.sessionCodec.encode(
+        WireFlowPolicyOffer(
+          policy: try WireFlowPolicy(
+            appUplinkEventsPerSecond: 10,
+            appDownlinkEventsPerSecond: 10
+          )
+        ),
+        phase: .negotiatingPolicy
+      )
+    )
+    let handle = try await run.value
+    await fixture.driver.waitForReceive()
+    let record = try makeSessionIncomingRecord(
+      route: admitted.route,
+      sequence: 0,
+      id: "30000000-0000-0000-0000-000000000092"
+    )
+    fixture.driver.completeReceive(
+      try fixture.sessionCodec.encode(WireEventPayload(record: record), phase: .active)
+    )
+    await beforeCompletion.waitUntilEntered()
+    await sdkWaitUntil { capture.snapshot.count == 1 }
+    let committed = await attachment.transportCore.snapshot()
+    XCTAssertEqual(committed.retainedIncomingEvents, 1)
+    XCTAssertGreaterThan(committed.retainedIncomingEncodedBytes, 0)
+    XCTAssertEqual(committed.effectiveDownlinkRate, 10)
+
+    handle.cancel()
+    await sessionWaitUntil {
+      await attachment.transportCore.snapshot().terminalCode == .cancelled
+    }
+    let terminal = await attachment.transportCore.snapshot()
+    XCTAssertEqual(terminal.retainedIncomingEvents, 0)
+    XCTAssertEqual(terminal.retainedIncomingEncodedBytes, 0)
+    XCTAssertEqual(terminal.deferredPolicyCount, 0)
+    XCTAssertNil(terminal.effectiveUplinkRate)
+    XCTAssertNil(terminal.effectiveDownlinkRate)
+    XCTAssertEqual(capture.snapshot.count, 1)
+
+    beforeCompletion.release()
+    await afterCompletion.waitUntilEntered()
+    let afterStaleResult = await attachment.transportCore.snapshot()
+    XCTAssertEqual(afterStaleResult, terminal)
+    XCTAssertEqual(capture.snapshot.count, 1)
+    await sessionWaitUntil { fixture.driver.cancelCount == 1 }
+    XCTAssertEqual(fixture.driver.cancelCount, 1)
+    afterCompletion.release()
+    consumer.cancel()
+  }
+
+  func testTerminalAfterCommittedUplinkPrefixRejectsStaleDrainResult() async throws {
+    let fixture = try SessionAdmissionFixture()
+    let admitted = try await fixture.admit()
+    let attachment = try await admitted.attachEventPump()
+    let owner = NearWire()
+    let sent = try await owner.send(type: "test.committed-prefix", content: 1)
+    let beforeCompletion = SessionOneShotAsyncBarrier()
+    let afterCompletion = SessionOneShotAsyncBarrier()
+    let sentBeforePump = fixture.driver.sentData.count
+    let run = Task {
+      try await SDKActiveEventPump(
+        attachment: attachment,
+        owner: owner,
+        dependencies: SDKActiveEventPumpDependencies(
+          sleep: sessionTestSleep,
+          beforeWakeRegistration: {},
+          beforeActivationCommit: {},
+          beforeActivationResume: {},
+          beforeOutboundTurnCompletion: { await beforeCompletion.waitOnce() },
+          afterOutboundTurnCompletion: { await afterCompletion.waitOnce() },
+          operationGateHooks: .none
+        )
+      ).run()
+    }
+    await fixture.driver.waitForReceive()
+    await sessionWaitUntil {
+      await attachment.transportCore.snapshot().state == .negotiatingPolicy
+    }
+    fixture.driver.completeReceive(
+      try fixture.sessionCodec.encode(
+        WireFlowPolicyOffer(
+          policy: try WireFlowPolicy(
+            appUplinkEventsPerSecond: 1,
+            appDownlinkEventsPerSecond: 1
+          )
+        ),
+        phase: .negotiatingPolicy
+      )
+    )
+    let handle = try await run.value
+    await beforeCompletion.waitUntilEntered()
+    let committedDiagnostics = try await owner.bufferDiagnostics()
+    let awaitingResult = await attachment.transportCore.snapshot()
+    XCTAssertEqual(committedDiagnostics.eventCount, 0)
+    XCTAssertEqual(committedDiagnostics.statistics.transportAccepted, 1)
+    XCTAssertEqual(awaitingResult.outboundNextSequence, 0)
+    XCTAssertEqual(awaitingResult.uplinkAvailableTokens, 2)
+    XCTAssertTrue(awaitingResult.hasOutboundDrain)
+    XCTAssertGreaterThanOrEqual(fixture.driver.sentData.count, sentBeforePump + 2)
+    XCTAssertTrue(committedDiagnostics.statistics.transportAccepted > 0)
+    XCTAssertTrue(sent.isBuffered)
+
+    handle.cancel()
+    await sessionWaitUntil {
+      await attachment.transportCore.snapshot().terminalCode == .cancelled
+    }
+    let terminal = await attachment.transportCore.snapshot()
+    XCTAssertNil(terminal.outboundNextSequence)
+    XCTAssertNil(terminal.uplinkAvailableTokens)
+    XCTAssertFalse(terminal.hasOutboundDrain)
+    let transportCountBeforeStaleResult = fixture.driver.sentData.count
+    beforeCompletion.release()
+    await afterCompletion.waitUntilEntered()
+    let afterStaleResult = await attachment.transportCore.snapshot()
+    XCTAssertEqual(afterStaleResult, terminal)
+    XCTAssertEqual(fixture.driver.sentData.count, transportCountBeforeStaleResult)
+    let finalDiagnostics = try await owner.bufferDiagnostics()
+    XCTAssertEqual(finalDiagnostics.eventCount, 0)
+    XCTAssertEqual(finalDiagnostics.statistics.transportAccepted, 1)
+    await sessionWaitUntil { fixture.driver.cancelCount == 1 }
+    XCTAssertEqual(fixture.driver.cancelCount, 1)
+    afterCompletion.release()
+  }
+
+  func testDeferredPolicyOverflowDuringPublicationFailsClosed() async throws {
+    let fixture = try SessionAdmissionFixture()
+    let admitted = try await fixture.admit()
+    let attachment = try await admitted.attachEventPump()
+    let beforeCompletion = SessionOneShotAsyncBarrier()
+    let limits = try SDKActiveEventPumpLimits(maximumDeferredPolicyTransactions: 1)
+    let run = Task {
+      try await SDKActiveEventPump(
+        attachment: attachment,
+        owner: NearWire(),
+        limits: limits,
+        dependencies: SDKActiveEventPumpDependencies(
+          sleep: sessionTestSleep,
+          beforeWakeRegistration: {},
+          beforeActivationCommit: {},
+          beforeActivationResume: {},
+          beforeIncomingPublicationCompletion: { await beforeCompletion.waitOnce() },
+          operationGateHooks: .none
+        )
+      ).run()
+    }
+    await fixture.driver.waitForReceive()
+    await sessionWaitUntil {
+      await attachment.transportCore.snapshot().state == .negotiatingPolicy
+    }
+    fixture.driver.completeReceive(
+      try fixture.sessionCodec.encode(
+        WireFlowPolicyOffer(
+          policy: try WireFlowPolicy(
+            appUplinkEventsPerSecond: 10,
+            appDownlinkEventsPerSecond: 10
+          )
+        ),
+        phase: .negotiatingPolicy
+      )
+    )
+    let handle = try await run.value
+    await fixture.driver.waitForReceive()
+    let record = try makeSessionIncomingRecord(
+      route: admitted.route,
+      sequence: 0,
+      id: "30000000-0000-0000-0000-000000000083"
+    )
+    fixture.driver.completeReceive(
+      try fixture.sessionCodec.encode(WireEventPayload(record: record), phase: .active)
+    )
+    await beforeCompletion.waitUntilEntered()
+    for expectedCount in 1...2 {
+      await fixture.driver.waitForReceive()
+      fixture.driver.completeReceive(
+        try fixture.sessionCodec.encode(
+          WireFlowPolicyOffer(
+            policy: try WireFlowPolicy(
+              appUplinkEventsPerSecond: Double(10 - expectedCount),
+              appDownlinkEventsPerSecond: Double(10 - expectedCount)
+            )
+          ),
+          phase: .active
+        )
+      )
+      if expectedCount == 1 {
+        await sessionWaitUntil {
+          await attachment.transportCore.snapshot().deferredPolicyCount == 1
+        }
+      }
+    }
+    await sessionWaitUntil {
+      await attachment.transportCore.snapshot().terminalCode == .activeWorkLimitExceeded
+    }
+    let terminal = await attachment.transportCore.snapshot()
+    XCTAssertEqual(terminal.terminalCode, .activeWorkLimitExceeded)
+    XCTAssertEqual(terminal.retainedIncomingEvents, 0)
+    XCTAssertEqual(terminal.deferredPolicyCount, 0)
+    beforeCompletion.release()
+    handle.cancel()
+  }
+
+  func testActiveDownlinkSlowSubscriberDoesNotBlockFastSubscriber() async throws {
+    let fixture = try SessionAdmissionFixture()
+    let admitted = try await fixture.admit()
+    let attachment = try await admitted.attachEventPump()
+    let owner = NearWire(
+      configuration: try NearWireConfiguration(eventStreamBufferCapacity: 1)
+    )
+    var slow = owner.events.makeAsyncIterator()
+    var fast = owner.events.makeAsyncIterator()
+    let run = Task { try await SDKActiveEventPump(attachment: attachment, owner: owner).run() }
+    await fixture.driver.waitForReceive()
+    await sessionWaitUntil {
+      await attachment.transportCore.snapshot().state == .negotiatingPolicy
+    }
+    fixture.driver.completeReceive(
+      try fixture.sessionCodec.encode(
+        WireFlowPolicyOffer(
+          policy: try WireFlowPolicy(
+            appUplinkEventsPerSecond: 10,
+            appDownlinkEventsPerSecond: 10
+          )
+        ),
+        phase: .negotiatingPolicy
+      )
+    )
+    let handle = try await run.value
+    for sequence in 0..<2 {
+      await fixture.driver.waitForReceive()
+      let record = try makeSessionIncomingRecord(
+        route: admitted.route,
+        sequence: UInt64(sequence),
+        id: String(format: "30000000-0000-0000-0000-%012d", 90 + sequence)
+      )
+      fixture.driver.completeReceive(
+        try fixture.sessionCodec.encode(WireEventPayload(record: record), phase: .active)
+      )
+      let fastEvent = try await fast.next()
+      XCTAssertEqual(fastEvent?.session?.sequence, UInt64(sequence))
+    }
+    let slowFirst = try await slow.next()
+    XCTAssertEqual(slowFirst?.session?.sequence, 0)
+    do {
+      _ = try await slow.next()
+      XCTFail("Expected isolated slow-subscriber overflow.")
+    } catch {
+      assertNearWireError(error, code: .streamOverflow)
+    }
+    handle.cancel()
+  }
+
+  func testTransportBlockWithWholeTokensDoesNotPollUntilCapacityProgress() async throws {
+    let transportLimits = try SecureTransportLimits(
+      maximumPendingSendCount: 3,
+      maximumPendingSendBytes: 4 * 1_024 * 1_024,
+      maximumSingleSendBytes: WireFrameLimits.default.maximumEncodedFrameBytes(for: .event),
+      connectionTimeoutSeconds: 1
+    )
+    let fixture = try SessionAdmissionFixture(
+      transportLimits: transportLimits,
+      autoCompleteSends: false
+    )
+    let admitted = try await fixture.admit()
+    let attachment = try await admitted.attachEventPump()
+    let owner = NearWire()
+    _ = try await owner.send(type: "test.blocked", content: 1)
+    let operationEntries = SDKLockedCapture<String>()
+    let run = Task {
+      try await SDKActiveEventPump(
+        attachment: attachment,
+        owner: owner,
+        dependencies: SDKActiveEventPumpDependencies(
+          sleep: sessionTestSleep,
+          beforeWakeRegistration: {},
+          beforeActivationCommit: {},
+          beforeActivationResume: {},
+          liveOperationHooks: SDKActiveLiveOperationHooks(
+            beforeScheduleObservation: { operationEntries.append("schedule") },
+            beforeDrain: { operationEntries.append("drain") }
+          ),
+          operationGateHooks: .none
+        )
+      ).run()
+    }
+    await fixture.driver.waitForReceive()
+    await sessionWaitUntil {
+      await attachment.transportCore.snapshot().state == .negotiatingPolicy
+    }
+    fixture.driver.completeReceive(
+      try fixture.sessionCodec.encode(
+        WireFlowPolicyOffer(
+          policy: try WireFlowPolicy(
+            appUplinkEventsPerSecond: 100,
+            appDownlinkEventsPerSecond: 1
+          )
+        ),
+        phase: .negotiatingPolicy
+      )
+    )
+    let handle = try await run.value
+    await sessionWaitUntil {
+      await attachment.transportCore.snapshot().isOutboundTransportBlocked
+    }
+    let blockedTurns = await attachment.transportCore.snapshot().outboundTurnStarts
+    let blockedEntries = operationEntries.snapshot.count
+    _ = try await owner.bufferDiagnostics()
+    _ = await attachment.transportCore.snapshot()
+    let stableBlockedSnapshot = await attachment.transportCore.snapshot()
+    XCTAssertEqual(stableBlockedSnapshot.outboundTurnStarts, blockedTurns)
+    XCTAssertEqual(operationEntries.snapshot.count, blockedEntries)
+    XCTAssertTrue(stableBlockedSnapshot.hasOutboundDecision)
+
+    fixture.driver.completeNextSend()
+    await sessionWaitUntil {
+      await attachment.transportCore.snapshot().outboundTurnStarts > blockedTurns
+    }
+    let stillBlockedTurns = await attachment.transportCore.snapshot().outboundTurnStarts
+    let stillBlockedEntries = operationEntries.snapshot.count
+    _ = try await owner.bufferDiagnostics()
+    _ = await attachment.transportCore.snapshot()
+    let secondStableBlockedSnapshot = await attachment.transportCore.snapshot()
+    XCTAssertEqual(secondStableBlockedSnapshot.outboundTurnStarts, stillBlockedTurns)
+    XCTAssertEqual(operationEntries.snapshot.count, stillBlockedEntries)
+
+    fixture.driver.completeNextSend()
+    await sessionWaitUntil { (try? await owner.bufferDiagnostics().eventCount) == 0 }
+    let diagnostics = try await owner.bufferDiagnostics()
+    XCTAssertEqual(diagnostics.eventCount, 0)
+    handle.cancel()
+  }
+
+  func testPermanentCoreCapturesZeroFractionalOneAndBurstTokenAllowances() async throws {
+    struct Case {
+      let name: String
+      let rate: Double
+      let expectedAccepted: Int
+      let expectedRemainingTokens: Double
+      let exercisesFractionalRefill: Bool
+    }
+    let cases = [
+      Case(
+        name: "zero", rate: 0, expectedAccepted: 0, expectedRemainingTokens: 0,
+        exercisesFractionalRefill: false),
+      Case(
+        name: "fractional", rate: 0.5, expectedAccepted: 1, expectedRemainingTokens: 0.5,
+        exercisesFractionalRefill: true),
+      Case(
+        name: "one", rate: 0.5, expectedAccepted: 1, expectedRemainingTokens: 0,
+        exercisesFractionalRefill: false),
+      Case(
+        name: "burst", rate: 2, expectedAccepted: 4, expectedRemainingTokens: 0,
+        exercisesFractionalRefill: false),
+    ]
+
+    for value in cases {
+      let fixture = try SessionAdmissionFixture()
+      let admitted = try await fixture.admit()
+      let attachment = try await admitted.attachEventPump()
+      let clock = SDKTestClock(
+        monotonic: 1_000_000_000,
+        identifiers: (0..<5).map { _ in UUID() }
+      )
+      let owner = NearWire(
+        configuration: try NearWireConfiguration(
+          maximumUplinkEventsPerSecond: value.rate,
+          maximumDownlinkEventsPerSecond: 1
+        ),
+        dependencies: clock.dependencies
+      )
+      for index in 0..<5 {
+        _ = try await owner.send(type: "test.token-state.\(value.name)", content: index)
+      }
+      let run = Task {
+        try await SDKActiveEventPump(
+          attachment: attachment,
+          owner: owner,
+          dependencies: SDKActiveEventPumpDependencies(
+            sleep: sessionTestSleep,
+            sleepNanoseconds: { _ in throw CancellationError() },
+            beforeWakeRegistration: {},
+            beforeActivationCommit: {},
+            beforeActivationResume: {},
+            operationGateHooks: .none
+          )
+        ).run()
+      }
+      await fixture.driver.waitForReceive()
+      await sessionWaitUntil {
+        await attachment.transportCore.snapshot().state == .negotiatingPolicy
+      }
+      fixture.driver.completeReceive(
+        try fixture.sessionCodec.encode(
+          WireFlowPolicyOffer(
+            policy: try WireFlowPolicy(
+              appUplinkEventsPerSecond: value.rate,
+              appDownlinkEventsPerSecond: 1
+            )
+          ),
+          phase: .negotiatingPolicy
+        )
+      )
+      let handle = try await run.value
+      if value.exercisesFractionalRefill {
+        await sessionWaitUntil {
+          let snapshot = await attachment.transportCore.snapshot()
+          let diagnostics = try? await owner.bufferDiagnostics()
+          return !snapshot.hasOutboundDrain && diagnostics?.eventCount == 4
+        }
+        let completedTurns = await attachment.transportCore.snapshot().outboundTurnStarts
+        clock.advanceMonotonic(by: 1_000_000_000)
+        _ = try await owner.send(type: "test.token-state.fractional-trigger", content: 5)
+        await sessionWaitUntil {
+          let snapshot = await attachment.transportCore.snapshot()
+          return !snapshot.hasOutboundDrain && snapshot.outboundTurnStarts > completedTurns
+        }
+      }
+      let expectedRemainingEvents =
+        5 - value.expectedAccepted + (value.exercisesFractionalRefill ? 1 : 0)
+      await sessionWaitUntil {
+        let snapshot = await attachment.transportCore.snapshot()
+        let diagnostics = try? await owner.bufferDiagnostics()
+        return !snapshot.hasOutboundDrain
+          && diagnostics?.eventCount == expectedRemainingEvents
+      }
+      let snapshot = await attachment.transportCore.snapshot()
+      let diagnostics = try await owner.bufferDiagnostics()
+      XCTAssertEqual(snapshot.outboundNextSequence, UInt64(value.expectedAccepted), value.name)
+      XCTAssertEqual(
+        try XCTUnwrap(snapshot.uplinkAvailableTokens),
+        value.expectedRemainingTokens,
+        accuracy: 0.000_000_001,
+        value.name
+      )
+      XCTAssertEqual(diagnostics.eventCount, expectedRemainingEvents, value.name)
+      XCTAssertEqual(
+        diagnostics.statistics.transportAccepted,
+        UInt64(value.expectedAccepted),
+        value.name
+      )
+      handle.cancel()
+      await sessionWaitUntil { fixture.driver.cancelCount == 1 }
+    }
+  }
+
+  func testCapacityCompletionBeforeBlockedResultRetriesAcceptedCandidate() async throws {
+    let transportLimits = try SecureTransportLimits(
+      maximumPendingSendCount: 3,
+      maximumPendingSendBytes: 4 * 1_024 * 1_024,
+      maximumSingleSendBytes: WireFrameLimits.default.maximumEncodedFrameBytes(for: .event),
+      connectionTimeoutSeconds: 1
+    )
+    let fixture = try SessionAdmissionFixture(
+      transportLimits: transportLimits,
+      autoCompleteSends: false
+    )
+    let admitted = try await fixture.admit()
+    let attachment = try await admitted.attachEventPump()
+    let owner = NearWire()
+    _ = try await owner.send(type: "test.completion-before-result", content: 1)
+    let secondTurn = SessionNthAsyncBarrier(targetEntry: 2)
+    let run = Task {
+      try await SDKActiveEventPump(
+        attachment: attachment,
+        owner: owner,
+        dependencies: SDKActiveEventPumpDependencies(
+          sleep: sessionTestSleep,
+          beforeWakeRegistration: {},
+          beforeActivationCommit: {},
+          beforeActivationResume: {},
+          beforeOutboundTurnCompletion: { await secondTurn.waitAtTarget() },
+          operationGateHooks: .none
+        )
+      ).run()
+    }
+    await fixture.driver.waitForReceive()
+    await sessionWaitUntil {
+      await attachment.transportCore.snapshot().state == .negotiatingPolicy
+    }
+    fixture.driver.completeReceive(
+      try fixture.sessionCodec.encode(
+        WireFlowPolicyOffer(
+          policy: try WireFlowPolicy(
+            appUplinkEventsPerSecond: 100,
+            appDownlinkEventsPerSecond: 1
+          )
+        ),
+        phase: .negotiatingPolicy
+      )
+    )
+    let handle = try await run.value
+    await sessionWaitUntil {
+      await attachment.transportCore.snapshot().isOutboundTransportBlocked
+    }
+
+    fixture.driver.completeNextSend()
+    await secondTurn.waitUntilTargetEntered()
+    fixture.driver.completeNextSend()
+    secondTurn.release()
+    await sessionWaitUntil { (try? await owner.bufferDiagnostics().eventCount) == 0 }
+    let diagnostics = try await owner.bufferDiagnostics()
+    XCTAssertEqual(diagnostics.eventCount, 0)
+    XCTAssertGreaterThanOrEqual(fixture.driver.sentData.count, 3)
+    handle.cancel()
+  }
+
+  func testActiveFrameQuantumFailsClosedWithoutContinuationChain() async throws {
+    let fixture = try SessionAdmissionFixture()
+    let admitted = try await fixture.admit()
+    let attachment = try await admitted.attachEventPump()
+    let limits = try SDKActiveEventPumpLimits(maximumCompletedFramesPerReceive: 2)
+    let run = Task {
+      try await SDKActiveEventPump(attachment: attachment, owner: NearWire(), limits: limits).run()
+    }
+    await fixture.driver.waitForReceive()
+    await sessionWaitUntil {
+      await attachment.transportCore.snapshot().state == .negotiatingPolicy
+    }
+    fixture.driver.completeReceive(
+      try fixture.sessionCodec.encode(
+        WireFlowPolicyOffer(
+          policy: try WireFlowPolicy(
+            appUplinkEventsPerSecond: 1,
+            appDownlinkEventsPerSecond: 1
+          )
+        ),
+        phase: .negotiatingPolicy
+      )
+    )
+    let handle = try await run.value
+    await fixture.driver.waitForReceive()
+    let ping = try fixture.sessionCodec.encode(WirePing(nonce: 1), phase: .active)
+    fixture.driver.completeReceive(ping + ping)
+    await fixture.driver.waitForReceive()
+    let withinQuantumSnapshot = await attachment.transportCore.snapshot()
+    XCTAssertEqual(withinQuantumSnapshot.state, .active)
+
+    let split = ping.index(ping.startIndex, offsetBy: ping.count / 2)
+    fixture.driver.completeReceive(ping + ping + ping[..<split])
+    await fixture.driver.waitForReceive()
+    let fragmentedSnapshot = await attachment.transportCore.snapshot()
+    XCTAssertEqual(fragmentedSnapshot.state, .active)
+    fixture.driver.completeReceive(Data(ping[split...]))
+    await fixture.driver.waitForReceive()
+    let completedFragmentSnapshot = await attachment.transportCore.snapshot()
+    XCTAssertEqual(completedFragmentSnapshot.state, .active)
+
+    fixture.driver.completeReceive(ping + ping + ping)
+    await sessionWaitUntil {
+      await attachment.transportCore.snapshot().terminalCode == .activeWorkLimitExceeded
+    }
+    let snapshot = await attachment.transportCore.snapshot()
+    XCTAssertEqual(snapshot.terminalCode, .activeWorkLimitExceeded)
+    XCTAssertEqual(snapshot.retainedIncomingEvents, 0)
+    handle.cancel()
+  }
+
+  func testOwnerShutdownSignalDuringRefreshSchedulesOneSuccessor() async throws {
+    let fixture = try SessionAdmissionFixture()
+    let admitted = try await fixture.admit()
+    let attachment = try await admitted.attachEventPump()
+    let owner = NearWire()
+    let barrier = SessionOneShotAsyncBarrier()
+    let run = Task {
+      try await SDKActiveEventPump(
+        attachment: attachment,
+        owner: owner,
+        dependencies: SDKActiveEventPumpDependencies(
+          sleep: sessionTestSleep,
+          beforeWakeRegistration: {},
+          beforeActivationCommit: {},
+          beforeActivationResume: {},
+          beforeOwnerRefreshCompletion: { await barrier.waitOnce() },
+          operationGateHooks: .none
+        )
+      ).run()
+    }
+    await sessionWaitUntil {
+      await attachment.transportCore.snapshot().state == .negotiatingPolicy
+    }
+    _ = try await owner.send(type: "test.refresh-race", content: 1)
+    await barrier.waitUntilEntered()
+    await owner.shutdown()
+    await sessionWaitUntil {
+      await attachment.transportCore.snapshot().hasPendingOutboundWork
+    }
+    barrier.release()
+    await assertAdmissionError(.ownerUnavailable) { _ = try await run.value }
+    let snapshot = await attachment.transportCore.snapshot()
+    XCTAssertEqual(snapshot.terminalCode, .ownerUnavailable)
+    XCTAssertFalse(snapshot.hasOwnerRefresh)
+    XCTAssertFalse(snapshot.hasPendingOutboundWork)
+  }
+
+  func testCapturedOwnerUnavailablePrecedesInitialPolicyActivation() async throws {
+    let fixture = try SessionAdmissionFixture()
+    let admitted = try await fixture.admit()
+    let attachment = try await admitted.attachEventPump()
+    let owner = NearWire()
+    let barrier = SessionOneShotAsyncBarrier()
+    let run = Task {
+      try await SDKActiveEventPump(
+        attachment: attachment,
+        owner: owner,
+        dependencies: SDKActiveEventPumpDependencies(
+          sleep: sessionTestSleep,
+          beforeWakeRegistration: {},
+          beforeActivationCommit: {},
+          beforeActivationResume: {},
+          beforeOwnerRefreshCompletion: { await barrier.waitOnce() },
+          operationGateHooks: .none
+        )
+      ).run()
+    }
+    await sessionWaitUntil {
+      await attachment.transportCore.snapshot().state == .negotiatingPolicy
+    }
+    await owner.shutdown()
+    await barrier.waitUntilEntered()
+    await fixture.driver.waitForReceive()
+    fixture.driver.completeReceive(
+      try fixture.sessionCodec.encode(
+        WireFlowPolicyOffer(
+          policy: try WireFlowPolicy(
+            appUplinkEventsPerSecond: 1,
+            appDownlinkEventsPerSecond: 1
+          )
+        ),
+        phase: .negotiatingPolicy
+      )
+    )
+    await sessionWaitUntil {
+      await attachment.transportCore.snapshot().deferredPolicyCount == 1
+    }
+    let held = await attachment.transportCore.snapshot()
+    XCTAssertEqual(held.state, .negotiatingPolicy)
+    XCTAssertEqual(fixture.driver.sentData.count, 1)
+    barrier.release()
+    await assertAdmissionError(.ownerUnavailable) { _ = try await run.value }
+    let terminal = await attachment.transportCore.snapshot()
+    XCTAssertEqual(terminal.terminalCode, .ownerUnavailable)
+    XCTAssertEqual(fixture.driver.sentData.count, 1)
+  }
+
+  func testCapturedLiveOwnerResultAllowsDeferredInitialPolicy() async throws {
+    let fixture = try SessionAdmissionFixture()
+    let admitted = try await fixture.admit()
+    let attachment = try await admitted.attachEventPump()
+    let owner = NearWire()
+    let barrier = SessionOneShotAsyncBarrier()
+    let run = Task {
+      try await SDKActiveEventPump(
+        attachment: attachment,
+        owner: owner,
+        dependencies: SDKActiveEventPumpDependencies(
+          sleep: sessionTestSleep,
+          beforeWakeRegistration: {},
+          beforeActivationCommit: {},
+          beforeActivationResume: {},
+          beforeOwnerRefreshCompletion: { await barrier.waitOnce() },
+          operationGateHooks: .none
+        )
+      ).run()
+    }
+    await sessionWaitUntil {
+      await attachment.transportCore.snapshot().state == .negotiatingPolicy
+    }
+    _ = try await owner.send(type: "test.live-refresh", content: 1)
+    await barrier.waitUntilEntered()
+    await fixture.driver.waitForReceive()
+    fixture.driver.completeReceive(
+      try fixture.sessionCodec.encode(
+        WireFlowPolicyOffer(
+          policy: try WireFlowPolicy(
+            appUplinkEventsPerSecond: 1,
+            appDownlinkEventsPerSecond: 1
+          )
+        ),
+        phase: .negotiatingPolicy
+      )
+    )
+    await sessionWaitUntil {
+      await attachment.transportCore.snapshot().deferredPolicyCount == 1
+    }
+    barrier.release()
+    let handle = try await run.value
+    let active = await attachment.transportCore.snapshot()
+    XCTAssertEqual(active.state, .active)
+    XCTAssertEqual(active.deferredPolicyCount, 0)
+    XCTAssertEqual(active.effectiveUplinkRate, 1)
+    handle.cancel()
+  }
+
+  func testInitialPolicyOutranksRelatchedOwnerSignalStorm() async throws {
+    let fixture = try SessionAdmissionFixture()
+    let admitted = try await fixture.admit()
+    let attachment = try await admitted.attachEventPump()
+    let owner = NearWire()
+    let refresh = SessionOneShotAsyncBarrier()
+    let run = Task {
+      try await SDKActiveEventPump(
+        attachment: attachment,
+        owner: owner,
+        dependencies: SDKActiveEventPumpDependencies(
+          sleep: sessionTestSleep,
+          beforeWakeRegistration: {},
+          beforeActivationCommit: {},
+          beforeActivationResume: {},
+          beforeOwnerRefreshCompletion: { await refresh.waitOnce() },
+          operationGateHooks: .none
+        )
+      ).run()
+    }
+    await sessionWaitUntil {
+      await attachment.transportCore.snapshot().state == .negotiatingPolicy
+    }
+    _ = try await owner.send(type: "test.signal-storm.seed", content: 0)
+    await refresh.waitUntilEntered()
+    await fixture.driver.waitForReceive()
+    fixture.driver.completeReceive(
+      try fixture.sessionCodec.encode(
+        WireFlowPolicyOffer(
+          policy: try WireFlowPolicy(
+            appUplinkEventsPerSecond: 100,
+            appDownlinkEventsPerSecond: 100
+          )
+        ),
+        phase: .negotiatingPolicy
+      )
+    )
+    for index in 1...64 {
+      _ = try await owner.send(type: "test.signal-storm", content: index)
+    }
+    await sessionWaitUntil {
+      let snapshot = await attachment.transportCore.snapshot()
+      return snapshot.deferredPolicyCount == 1 && snapshot.hasPendingOutboundWork
+    }
+
+    refresh.release()
+    let handle = try await run.value
+    let active = await attachment.transportCore.snapshot()
+    XCTAssertEqual(active.state, .active)
+    XCTAssertEqual(active.deferredPolicyCount, 0)
+    XCTAssertEqual(active.effectiveUplinkRate, 100)
+    handle.cancel()
+  }
+
+  func testDynamicPolicyClockReversalFailsBeforeAcceptanceOrBucketInstall() async throws {
+    let fixture = try SessionAdmissionFixture()
+    let admitted = try await fixture.admit()
+    let attachment = try await admitted.attachEventPump()
+    let clock = SDKTestClock(monotonic: 2_000_000_000)
+    let owner = NearWire(dependencies: clock.dependencies)
+    let run = Task {
+      try await SDKActiveEventPump(attachment: attachment, owner: owner).run()
+    }
+    await fixture.driver.waitForReceive()
+    await sessionWaitUntil {
+      await attachment.transportCore.snapshot().state == .negotiatingPolicy
+    }
+    fixture.driver.completeReceive(
+      try fixture.sessionCodec.encode(
+        WireFlowPolicyOffer(
+          policy: try WireFlowPolicy(
+            appUplinkEventsPerSecond: 10,
+            appDownlinkEventsPerSecond: 10
+          )
+        ),
+        phase: .negotiatingPolicy
+      )
+    )
+    let handle = try await run.value
+    await sessionWaitUntil {
+      !(await attachment.transportCore.snapshot().hasOutboundDrain)
+    }
+    let acceptedSendCount = fixture.driver.sentData.count
+    clock.setMonotonic(1_000_000_000)
+    await fixture.driver.waitForReceive()
+    fixture.driver.completeReceive(
+      try fixture.sessionCodec.encode(
+        WireFlowPolicyOffer(
+          policy: try WireFlowPolicy(
+            appUplinkEventsPerSecond: 5,
+            appDownlinkEventsPerSecond: 4
+          )
+        ),
+        phase: .active
+      )
+    )
+    await sessionWaitUntil {
+      await attachment.transportCore.snapshot().terminalCode == .clockFailed
+    }
+    let terminal = await attachment.transportCore.snapshot()
+    XCTAssertNil(terminal.effectiveUplinkRate)
+    XCTAssertNil(terminal.effectiveDownlinkRate)
+    XCTAssertNil(terminal.uplinkAvailableTokens)
+    XCTAssertEqual(fixture.driver.sentData.count, acceptedSendCount)
+    await sessionWaitUntil { fixture.driver.cancelCount == 1 }
+    XCTAssertEqual(fixture.driver.cancelCount, 1)
+    handle.cancel()
+  }
+
+  func testDeferredPolicyCommitsAfterBlockedOutboundResult() async throws {
+    let transportLimits = try SecureTransportLimits(
+      maximumPendingSendCount: 3,
+      maximumPendingSendBytes: 4 * 1_024 * 1_024,
+      maximumSingleSendBytes: WireFrameLimits.default.maximumEncodedFrameBytes(for: .event),
+      connectionTimeoutSeconds: 1
+    )
+    let fixture = try SessionAdmissionFixture(
+      transportLimits: transportLimits,
+      autoCompleteSends: false
+    )
+    let admitted = try await fixture.admit()
+    let attachment = try await admitted.attachEventPump()
+    let owner = NearWire()
+    _ = try await owner.send(type: "test.blocked-policy", content: 1)
+    let barrier = SessionOneShotAsyncBarrier()
+    let run = Task {
+      try await SDKActiveEventPump(
+        attachment: attachment,
+        owner: owner,
+        dependencies: SDKActiveEventPumpDependencies(
+          sleep: sessionTestSleep,
+          beforeWakeRegistration: {},
+          beforeActivationCommit: {},
+          beforeActivationResume: {},
+          beforeOutboundTurnCompletion: { await barrier.waitOnce() },
+          operationGateHooks: .none
+        )
+      ).run()
+    }
+    await fixture.driver.waitForReceive()
+    await sessionWaitUntil {
+      await attachment.transportCore.snapshot().state == .negotiatingPolicy
+    }
+    fixture.driver.completeReceive(
+      try fixture.sessionCodec.encode(
+        WireFlowPolicyOffer(
+          policy: try WireFlowPolicy(
+            appUplinkEventsPerSecond: 100,
+            appDownlinkEventsPerSecond: 100
+          )
+        ),
+        phase: .negotiatingPolicy
+      )
+    )
+    let handle = try await run.value
+    await barrier.waitUntilEntered()
+    await fixture.driver.waitForReceive()
+    fixture.driver.completeReceive(
+      try fixture.sessionCodec.encode(
+        WireFlowPolicyOffer(
+          policy: try WireFlowPolicy(
+            appUplinkEventsPerSecond: 7,
+            appDownlinkEventsPerSecond: 6
+          )
+        ),
+        phase: .active
+      )
+    )
+    await sessionWaitUntil {
+      await attachment.transportCore.snapshot().deferredPolicyCount == 1
+    }
+    barrier.release()
+    await sessionWaitUntil {
+      let snapshot = await attachment.transportCore.snapshot()
+      return snapshot.deferredPolicyCount == 0 && snapshot.effectiveUplinkRate == 7
+    }
+    let snapshot = await attachment.transportCore.snapshot()
+    XCTAssertEqual(snapshot.effectiveUplinkRate, 7)
+    XCTAssertEqual(snapshot.effectiveDownlinkRate, 6)
+    XCTAssertEqual(snapshot.deferredPolicyCount, 0)
+    handle.cancel()
+  }
+
+  func testTerminationObservationCancellationWinnerSurvivesTerminalCleanup() async throws {
+    let fixture = try SessionAdmissionFixture()
+    let admitted = try await fixture.admit()
+    let attachment = try await admitted.attachEventPump()
+    let run = Task {
+      try await SDKActiveEventPump(attachment: attachment, owner: NearWire()).run()
+    }
+    await fixture.driver.waitForReceive()
+    await sessionWaitUntil {
+      await attachment.transportCore.snapshot().state == .negotiatingPolicy
+    }
+    fixture.driver.completeReceive(
+      try fixture.sessionCodec.encode(
+        WireFlowPolicyOffer(
+          policy: try WireFlowPolicy(
+            appUplinkEventsPerSecond: 1,
+            appDownlinkEventsPerSecond: 1
+          )
+        ),
+        phase: .negotiatingPolicy
+      )
+    )
+    let handle = try await run.value
+    let delayed = SessionDelayedNotifications()
+    let gate = SDKSessionPullCancellationGate(notificationScheduler: { delayed.store($0) })
+    let wait = Task {
+      try await attachment.transportCore.waitForActiveTermination(
+        token: SDKActiveTerminationToken(),
+        cancellationGate: gate
+      )
+    }
+    await sessionWaitUntil {
+      await attachment.transportCore.snapshot().hasPendingTerminationObservation
+    }
+    gate.cancel()
+    handle.cancel()
+    await assertAdmissionError(.terminationWaitCancelled) { _ = try await wait.value }
+    delayed.fireAll()
+    let snapshot = await attachment.transportCore.snapshot()
+    XCTAssertEqual(snapshot.terminalCode, .cancelled)
+    XCTAssertFalse(snapshot.hasPendingTerminationObservation)
+  }
+
+  func testLiveOperationHooksTargetCompletionObserverAndTerminalBoundaries() async throws {
+    let fixture = try SessionAdmissionFixture()
+    let admitted = try await fixture.admit()
+    let attachment = try await admitted.attachEventPump()
+    let entries = SDKLockedCapture<String>()
+    let run = Task {
+      try await SDKActiveEventPump(
+        attachment: attachment,
+        owner: NearWire(),
+        dependencies: SDKActiveEventPumpDependencies(
+          sleep: sessionTestSleep,
+          beforeWakeRegistration: {},
+          beforeActivationCommit: {},
+          beforeActivationResume: {},
+          liveOperationHooks: SDKActiveLiveOperationHooks(
+            beforeMailboxCompletion: { entries.append("mailbox-completion") },
+            beforeObserverCancellation: { entries.append("observer-cancellation") },
+            beforeTerminalClose: { entries.append("terminal-close") }
+          ),
+          operationGateHooks: .none
+        )
+      ).run()
+    }
+    await fixture.driver.waitForReceive()
+    await sessionWaitUntil {
+      await attachment.transportCore.snapshot().state == .negotiatingPolicy
+    }
+    fixture.driver.completeReceive(
+      try fixture.sessionCodec.encode(
+        WireFlowPolicyOffer(
+          policy: try WireFlowPolicy(
+            appUplinkEventsPerSecond: 1,
+            appDownlinkEventsPerSecond: 1
+          )
+        ),
+        phase: .negotiatingPolicy
+      )
+    )
+    let handle = try await run.value
+    await sdkWaitUntil { entries.snapshot.contains("mailbox-completion") }
+
+    let observer = Task { try await handle.termination.wait() }
+    await sessionWaitUntil {
+      await attachment.transportCore.snapshot().hasPendingTerminationObservation
+    }
+    observer.cancel()
+    do {
+      _ = try await observer.value
+      XCTFail("Expected observer-local cancellation.")
+    } catch {
+      XCTAssertEqual(
+        (error as? SDKSessionAdmissionError)?.code,
+        .terminationWaitCancelled
+      )
+    }
+    await sdkWaitUntil { entries.snapshot.contains("observer-cancellation") }
+
+    handle.cancel()
+    await sessionWaitUntil {
+      await attachment.transportCore.snapshot().terminalCode == .cancelled
+    }
+    XCTAssertTrue(entries.snapshot.contains("terminal-close"))
+    XCTAssertEqual(entries.snapshot.filter { $0 == "observer-cancellation" }.count, 1)
+    XCTAssertEqual(entries.snapshot.filter { $0 == "terminal-close" }.count, 1)
+  }
+
+  func testRemoteDropDiagnosticsAccumulateWithSaturation() async throws {
+    let fixture = try SessionAdmissionFixture()
+    let admitted = try await fixture.admit()
+    let attachment = try await admitted.attachEventPump()
+    let run = Task {
+      try await SDKActiveEventPump(attachment: attachment, owner: NearWire()).run()
+    }
+    await fixture.driver.waitForReceive()
+    await sessionWaitUntil {
+      await attachment.transportCore.snapshot().state == .negotiatingPolicy
+    }
+    fixture.driver.completeReceive(
+      try fixture.sessionCodec.encode(
+        WireFlowPolicyOffer(
+          policy: try WireFlowPolicy(
+            appUplinkEventsPerSecond: 1,
+            appDownlinkEventsPerSecond: 1
+          )
+        ),
+        phase: .negotiatingPolicy
+      )
+    )
+    let handle = try await run.value
+    await fixture.driver.waitForReceive()
+    let maximum = try fixture.sessionCodec.encode(
+      WireDropSummaryPayload(
+        overflowDropped: UInt64.max,
+        expired: UInt64.max,
+        coalesced: UInt64.max
+      ),
+      phase: .active
+    )
+    let additional = try fixture.sessionCodec.encode(
+      WireDropSummaryPayload(overflowDropped: 1, expired: 1, coalesced: 1),
+      phase: .active
+    )
+    fixture.driver.completeReceive(maximum + additional)
+    await sessionWaitUntil {
+      await attachment.transportCore.snapshot().remoteOverflowDropped == UInt64.max
+    }
+    let snapshot = await attachment.transportCore.snapshot()
+    XCTAssertEqual(snapshot.remoteOverflowDropped, UInt64.max)
+    XCTAssertEqual(snapshot.remoteExpired, UInt64.max)
+    XCTAssertEqual(snapshot.remoteCoalesced, UInt64.max)
+    handle.cancel()
+  }
+
+  func testZeroRateDownlinkExpiryIncrementsLocalDiagnostic() async throws {
+    let fixture = try SessionAdmissionFixture()
+    let admitted = try await fixture.admit()
+    let attachment = try await admitted.attachEventPump()
+    let clock = SDKTestClock()
+    let owner = NearWire(dependencies: clock.dependencies)
+    let sleeper = SessionNanosecondSleepController()
+    let run = Task {
+      try await SDKActiveEventPump(
+        attachment: attachment,
+        owner: owner,
+        dependencies: SDKActiveEventPumpDependencies(
+          sleep: sessionTestSleep,
+          sleepNanoseconds: { try await sleeper.sleep(nanoseconds: $0) },
+          beforeWakeRegistration: {},
+          beforeActivationCommit: {},
+          beforeActivationResume: {},
+          operationGateHooks: .none
+        )
+      ).run()
+    }
+    await fixture.driver.waitForReceive()
+    await sessionWaitUntil {
+      await attachment.transportCore.snapshot().state == .negotiatingPolicy
+    }
+    fixture.driver.completeReceive(
+      try fixture.sessionCodec.encode(
+        WireFlowPolicyOffer(
+          policy: try WireFlowPolicy(
+            appUplinkEventsPerSecond: 1,
+            appDownlinkEventsPerSecond: 0
+          )
+        ),
+        phase: .negotiatingPolicy
+      )
+    )
+    let handle = try await run.value
+    await fixture.driver.waitForReceive()
+    let record = try makeSessionIncomingRecord(
+      route: admitted.route,
+      sequence: 0,
+      id: "30000000-0000-0000-0000-000000000031",
+      remainingTTLNanoseconds: 10
+    )
+    fixture.driver.completeReceive(
+      try fixture.sessionCodec.encode(WireEventPayload(record: record), phase: .active)
+    )
+    await sleeper.waitForRequest(nanoseconds: 10)
+    clock.advanceMonotonic(by: 10)
+    sleeper.fire(nanoseconds: 10)
+    await sessionWaitUntil {
+      await attachment.transportCore.snapshot().localIncomingExpired == 1
+    }
+    let snapshot = await attachment.transportCore.snapshot()
+    XCTAssertEqual(snapshot.localIncomingExpired, 1)
+    XCTAssertEqual(snapshot.retainedIncomingEvents, 0)
+    XCTAssertEqual(snapshot.retainedIncomingEncodedBytes, 0)
+    handle.cancel()
+  }
+
+  func testIncomingTurnQuantumDoesNotPublishAfterConsumingExpiryAllowance() async throws {
+    let fixture = try SessionAdmissionFixture()
+    let admitted = try await fixture.admit()
+    let attachment = try await admitted.attachEventPump()
+    let clock = SDKTestClock()
+    let owner = NearWire(dependencies: clock.dependencies)
+    let sleeper = SessionNanosecondSleepController()
+    let immediateContinuation = SessionOneShotAsyncBarrier()
+    let limits = try SDKActiveEventPumpLimits(maximumIncomingPublicationsPerTurn: 1)
+    let run = Task {
+      try await SDKActiveEventPump(
+        attachment: attachment,
+        owner: owner,
+        limits: limits,
+        dependencies: SDKActiveEventPumpDependencies(
+          sleep: sessionTestSleep,
+          sleepNanoseconds: { try await sleeper.sleep(nanoseconds: $0) },
+          beforeWakeRegistration: {},
+          beforeActivationCommit: {},
+          beforeActivationResume: {},
+          beforeImmediateIncomingDecisionCompletion: {
+            await immediateContinuation.waitOnce()
+          },
+          operationGateHooks: .none
+        )
+      ).run()
+    }
+    await fixture.driver.waitForReceive()
+    await sessionWaitUntil {
+      await attachment.transportCore.snapshot().state == .negotiatingPolicy
+    }
+    fixture.driver.completeReceive(
+      try fixture.sessionCodec.encode(
+        WireFlowPolicyOffer(
+          policy: try WireFlowPolicy(
+            appUplinkEventsPerSecond: 1,
+            appDownlinkEventsPerSecond: 0
+          )
+        ),
+        phase: .negotiatingPolicy
+      )
+    )
+    let handle = try await run.value
+    await fixture.driver.waitForReceive()
+    let expiring = try makeSessionIncomingRecord(
+      route: admitted.route,
+      sequence: 0,
+      id: "30000000-0000-0000-0000-000000000071",
+      remainingTTLNanoseconds: 500_000_000
+    )
+    let live = try makeSessionIncomingRecord(
+      route: admitted.route,
+      sequence: 1,
+      id: "30000000-0000-0000-0000-000000000072",
+      remainingTTLNanoseconds: 2_000_000_000
+    )
+    fixture.driver.completeReceive(
+      try fixture.sessionCodec.encode(
+        WireEventBatchPayload(records: [expiring, live]),
+        phase: .active
+      )
+    )
+    await sleeper.waitForRequest(nanoseconds: 500_000_000)
+    await fixture.driver.waitForReceive()
+    fixture.driver.completeReceive(
+      try fixture.sessionCodec.encode(
+        WireFlowPolicyOffer(
+          policy: try WireFlowPolicy(
+            appUplinkEventsPerSecond: 1,
+            appDownlinkEventsPerSecond: 1
+          )
+        ),
+        phase: .active
+      )
+    )
+    clock.advanceMonotonic(by: 1_000_000_000)
+    sleeper.fire(nanoseconds: 500_000_000)
+    await immediateContinuation.waitUntilEntered()
+    let afterExpiry = await attachment.transportCore.snapshot()
+    XCTAssertEqual(afterExpiry.localIncomingExpired, 1)
+    XCTAssertEqual(afterExpiry.retainedIncomingEvents, 1)
+    XCTAssertTrue(afterExpiry.hasIncomingDecision)
+    immediateContinuation.release()
+    handle.cancel()
+  }
+
+  func testOwnerShutdownDuringPolicyNegotiationIsLevelTriggered() async throws {
+    let fixture = try SessionAdmissionFixture()
+    let admitted = try await fixture.admit()
+    let attachment = try await admitted.attachEventPump()
+    let owner = NearWire()
+    let run = Task { try await SDKActiveEventPump(attachment: attachment, owner: owner).run() }
+    await sessionWaitUntil {
+      await attachment.transportCore.snapshot().state == .negotiatingPolicy
+    }
+    await owner.shutdown()
+    await assertAdmissionError(.ownerUnavailable) { _ = try await run.value }
+    let snapshot = await attachment.transportCore.snapshot()
+    XCTAssertEqual(snapshot.terminalCode, .ownerUnavailable)
+    XCTAssertFalse(snapshot.hasOwnerRefresh)
+    await sessionWaitUntil { fixture.driver.cancelCount == 1 }
+  }
+
+  func testOwnerShutdownTerminatesActiveEmptyAndZeroRateSessions() async throws {
+    for rate in [1.0, 0.0] {
+      let fixture = try SessionAdmissionFixture()
+      let admitted = try await fixture.admit()
+      let attachment = try await admitted.attachEventPump()
+      let owner = NearWire()
+      let run = Task {
+        try await SDKActiveEventPump(attachment: attachment, owner: owner).run()
+      }
+      await fixture.driver.waitForReceive()
+      await sessionWaitUntil {
+        await attachment.transportCore.snapshot().state == .negotiatingPolicy
+      }
+      fixture.driver.completeReceive(
+        try fixture.sessionCodec.encode(
+          WireFlowPolicyOffer(
+            policy: try WireFlowPolicy(
+              appUplinkEventsPerSecond: rate,
+              appDownlinkEventsPerSecond: rate
+            )
+          ),
+          phase: .negotiatingPolicy
+        )
+      )
+      let handle = try await run.value
+      await owner.shutdown()
+      await sessionWaitUntil {
+        await attachment.transportCore.snapshot().terminalCode == .ownerUnavailable
+      }
+      let terminal = await attachment.transportCore.snapshot()
+      XCTAssertEqual(terminal.terminalCode, .ownerUnavailable)
+      XCTAssertFalse(terminal.hasOutboundDecision)
+      XCTAssertFalse(terminal.hasIncomingDecision)
+      handle.cancel()
+    }
+  }
+
+  func testPrecancelledRunnerWinsOverExistingPolicyPullOwnership() async throws {
+    let fixture = try SessionAdmissionFixture()
+    let admitted = try await fixture.admit()
+    let attachment = try await admitted.attachEventPump()
+    let pull = Task { try await attachment.nextPolicyMessage() }
+    await sessionWaitUntil { await attachment.transportCore.snapshot().hasPendingPolicyPull }
+    let gate = SDKSessionPullCancellationGate()
+    gate.cancel()
+    await assertAdmissionError(.cancelled) {
+      try await attachment.transportCore.startActivePump(
+        token: SDKActiveRunToken(),
+        cancellationGate: gate,
+        owner: NearWire(),
+        limits: .default,
+        dependencies: .live
+      )
+    }
+    await assertAdmissionError(.cancelled) { _ = try await pull.value }
+    let snapshot = await attachment.transportCore.snapshot()
+    XCTAssertEqual(snapshot.terminalCode, .cancelled)
+  }
+
+  func testCancellationLatchedAtActivationCommitReturnsNoHandle() async throws {
+    let fixture = try SessionAdmissionFixture()
+    let admitted = try await fixture.admit()
+    let attachment = try await admitted.attachEventPump()
+    let barrier = SDKSynchronousBarrier()
+    let pump = SDKActiveEventPump(
+      attachment: attachment,
+      owner: NearWire(),
+      dependencies: SDKActiveEventPumpDependencies(
+        sleep: sessionTestSleep,
+        beforeWakeRegistration: {},
+        beforeActivationCommit: { barrier.block() },
+        beforeActivationResume: {},
+        operationGateHooks: .none
+      )
+    )
+    let run = Task { try await pump.run() }
+    await fixture.driver.waitForReceive()
+    await sessionWaitUntil {
+      await attachment.transportCore.snapshot().state == .negotiatingPolicy
+    }
+    fixture.driver.completeReceive(
+      try fixture.sessionCodec.encode(
+        WireFlowPolicyOffer(
+          policy: try WireFlowPolicy(
+            appUplinkEventsPerSecond: 1,
+            appDownlinkEventsPerSecond: 1
+          )
+        ),
+        phase: .negotiatingPolicy
+      )
+    )
+    await barrier.waitUntilReached()
+    run.cancel()
+    barrier.release()
+    await assertAdmissionError(.cancelled) { _ = try await run.value }
+    let snapshot = await attachment.transportCore.snapshot()
+    XCTAssertEqual(snapshot.terminalCode, .cancelled)
+  }
+
+  func testActiveDownlinkRouteMismatchFailsBeforePublication() async throws {
+    let fixture = try SessionAdmissionFixture()
+    let admitted = try await fixture.admit()
+    let attachment = try await admitted.attachEventPump()
+    let owner = NearWire()
+    let run = Task { try await SDKActiveEventPump(attachment: attachment, owner: owner).run() }
+    await fixture.driver.waitForReceive()
+    await sessionWaitUntil {
+      await attachment.transportCore.snapshot().state == .negotiatingPolicy
+    }
+    fixture.driver.completeReceive(
+      try fixture.sessionCodec.encode(
+        WireFlowPolicyOffer(
+          policy: try WireFlowPolicy(
+            appUplinkEventsPerSecond: 1,
+            appDownlinkEventsPerSecond: 1
+          )
+        ),
+        phase: .negotiatingPolicy
+      )
+    )
+    let handle = try await run.value
+    await fixture.driver.waitForReceive()
+    var wrong = admitted.route
+    wrong = SDKSessionRoute(
+      sessionEpoch: wrong.sessionEpoch,
+      viewerID: wrong.viewerID,
+      appID: "wrong-app"
+    )
+    let record = try makeSessionIncomingRecord(
+      route: wrong,
+      sequence: 0,
+      id: "30000000-0000-0000-0000-000000000011"
+    )
+    fixture.driver.completeReceive(
+      try fixture.sessionCodec.encode(WireEventPayload(record: record), phase: .active)
+    )
+    await sessionWaitUntil {
+      await attachment.transportCore.snapshot().terminalCode == .routeMismatch
+    }
+    let snapshot = await attachment.transportCore.snapshot()
+    XCTAssertEqual(snapshot.terminalCode, .routeMismatch)
+    XCTAssertEqual(snapshot.retainedIncomingEvents, 0)
+    XCTAssertEqual(owner.streamSubscriberCounts.events, 0)
+    handle.cancel()
+  }
+
+  func testActiveDownlinkWrongDirectionMapsSequenceViolation() async throws {
+    let fixture = try SessionAdmissionFixture()
+    let admitted = try await fixture.admit()
+    let attachment = try await admitted.attachEventPump()
+    let run = Task {
+      try await SDKActiveEventPump(attachment: attachment, owner: NearWire()).run()
+    }
+    await fixture.driver.waitForReceive()
+    await sessionWaitUntil {
+      await attachment.transportCore.snapshot().state == .negotiatingPolicy
+    }
+    fixture.driver.completeReceive(
+      try fixture.sessionCodec.encode(
+        WireFlowPolicyOffer(
+          policy: try WireFlowPolicy(
+            appUplinkEventsPerSecond: 1,
+            appDownlinkEventsPerSecond: 1
+          )
+        ),
+        phase: .negotiatingPolicy
+      )
+    )
+    let handle = try await run.value
+    await fixture.driver.waitForReceive()
+    let wrongDirection = try makeSessionIncomingRecord(
+      route: admitted.route,
+      sequence: 0,
+      id: "30000000-0000-0000-0000-000000000051",
+      direction: .appToViewer
+    )
+    fixture.driver.completeReceive(
+      try fixture.sessionCodec.encode(
+        WireEventPayload(record: wrongDirection),
+        phase: .active
+      )
+    )
+    await sessionWaitUntil {
+      await attachment.transportCore.snapshot().terminalCode == .sequenceViolation
+    }
+    let snapshot = await attachment.transportCore.snapshot()
+    XCTAssertEqual(snapshot.terminalCode, .sequenceViolation)
+    handle.cancel()
+  }
+
+  func testHeterogeneousBatchUsesExactPerRecordRetentionBytes() async throws {
+    let fixture = try SessionAdmissionFixture(maximumEventBytes: 1_024)
+    let admitted = try await fixture.admit()
+    let attachment = try await admitted.attachEventPump()
+    let limits = try SDKActiveEventPumpLimits(maximumIncomingEncodedBytes: 1_024)
+    let run = Task {
+      try await SDKActiveEventPump(
+        attachment: attachment,
+        owner: NearWire(),
+        limits: limits
+      ).run()
+    }
+    await fixture.driver.waitForReceive()
+    await sessionWaitUntil {
+      await attachment.transportCore.snapshot().state == .negotiatingPolicy
+    }
+    fixture.driver.completeReceive(
+      try fixture.sessionCodec.encode(
+        WireFlowPolicyOffer(
+          policy: try WireFlowPolicy(
+            appUplinkEventsPerSecond: 1,
+            appDownlinkEventsPerSecond: 0
+          )
+        ),
+        phase: .negotiatingPolicy
+      )
+    )
+    let handle = try await run.value
+    await fixture.driver.waitForReceive()
+    let first = try makeSessionIncomingRecord(
+      route: admitted.route,
+      sequence: 0,
+      id: "30000000-0000-0000-0000-000000000061",
+      content: .string(String(repeating: "a", count: 450))
+    )
+    let second = try makeSessionIncomingRecord(
+      route: admitted.route,
+      sequence: 1,
+      id: "30000000-0000-0000-0000-000000000062",
+      content: .string(String(repeating: "b", count: 450))
+    )
+    let firstBytes = try first.deterministicEncodedByteCount()
+    let secondBytes = try second.deterministicEncodedByteCount()
+    XCTAssertLessThanOrEqual(firstBytes, 1_024)
+    XCTAssertLessThanOrEqual(secondBytes, 1_024)
+    XCTAssertGreaterThan(firstBytes + secondBytes, 1_024)
+    fixture.driver.completeReceive(
+      try fixture.sessionCodec.encode(
+        WireEventBatchPayload(records: [first, second], limits: fixture.sessionCodec.limits),
+        phase: .active
+      )
+    )
+    await sessionWaitUntil {
+      await attachment.transportCore.snapshot().terminalCode == .activeIngressOverflow
+    }
+    let snapshot = await attachment.transportCore.snapshot()
+    XCTAssertEqual(snapshot.terminalCode, .activeIngressOverflow)
+    XCTAssertEqual(snapshot.retainedIncomingEvents, 0)
+    XCTAssertEqual(snapshot.retainedIncomingEncodedBytes, 0)
+    handle.cancel()
+  }
+
+  func testIncomingInFlightContributesToCombinedCountAndByteLimits() async throws {
+    func exercise(
+      maximumEventBytes: Int,
+      limits: SDKActiveEventPumpLimits,
+      content: JSONValue
+    ) async throws {
+      let fixture = try SessionAdmissionFixture(maximumEventBytes: maximumEventBytes)
+      let admitted = try await fixture.admit()
+      let attachment = try await admitted.attachEventPump()
+      let beforeCompletion = SessionOneShotAsyncBarrier()
+      let run = Task {
+        try await SDKActiveEventPump(
+          attachment: attachment,
+          owner: NearWire(),
+          limits: limits,
+          dependencies: SDKActiveEventPumpDependencies(
+            sleep: sessionTestSleep,
+            beforeWakeRegistration: {},
+            beforeActivationCommit: {},
+            beforeActivationResume: {},
+            beforeIncomingPublicationCompletion: { await beforeCompletion.waitOnce() },
+            operationGateHooks: .none
+          )
+        ).run()
+      }
+      await fixture.driver.waitForReceive()
+      await sessionWaitUntil {
+        await attachment.transportCore.snapshot().state == .negotiatingPolicy
+      }
+      fixture.driver.completeReceive(
+        try fixture.sessionCodec.encode(
+          WireFlowPolicyOffer(
+            policy: try WireFlowPolicy(
+              appUplinkEventsPerSecond: 1,
+              appDownlinkEventsPerSecond: 10
+            )
+          ),
+          phase: .negotiatingPolicy
+        )
+      )
+      let handle = try await run.value
+      await fixture.driver.waitForReceive()
+      let first = try makeSessionIncomingRecord(
+        route: admitted.route,
+        sequence: 0,
+        id: "30000000-0000-0000-0000-000000000101",
+        content: content
+      )
+      fixture.driver.completeReceive(
+        try fixture.sessionCodec.encode(WireEventPayload(record: first), phase: .active)
+      )
+      await beforeCompletion.waitUntilEntered()
+      let inFlight = await attachment.transportCore.snapshot()
+      XCTAssertEqual(inFlight.retainedIncomingEvents, 1)
+      XCTAssertEqual(
+        inFlight.retainedIncomingEncodedBytes,
+        try first.deterministicEncodedByteCount()
+      )
+
+      await fixture.driver.waitForReceive()
+      let second = try makeSessionIncomingRecord(
+        route: admitted.route,
+        sequence: 1,
+        id: "30000000-0000-0000-0000-000000000102",
+        content: content
+      )
+      fixture.driver.completeReceive(
+        try fixture.sessionCodec.encode(WireEventPayload(record: second), phase: .active)
+      )
+      await sessionWaitUntil {
+        await attachment.transportCore.snapshot().terminalCode == .activeIngressOverflow
+      }
+      let terminal = await attachment.transportCore.snapshot()
+      XCTAssertEqual(terminal.terminalCode, .activeIngressOverflow)
+      XCTAssertEqual(terminal.retainedIncomingEvents, 0)
+      XCTAssertEqual(terminal.retainedIncomingEncodedBytes, 0)
+      beforeCompletion.release()
+      handle.cancel()
+    }
+
+    try await exercise(
+      maximumEventBytes: 1_024,
+      limits: SDKActiveEventPumpLimits(
+        maximumIncomingEvents: 1,
+        maximumIncomingEncodedBytes: 8 * 1_024 * 1_024
+      ),
+      content: .integer(1)
+    )
+    try await exercise(
+      maximumEventBytes: 1_024,
+      limits: SDKActiveEventPumpLimits(
+        maximumIncomingEvents: 2,
+        maximumIncomingEncodedBytes: 1_024
+      ),
+      content: .string(String(repeating: "x", count: 450))
+    )
+  }
+
+  func testTransportCrossLimitIncludesCompleteEventWrapper() async throws {
+    let codec = try makeSDKTestSessionCodec(maximumEventBytes: 1_024)
+    let maximumFrameBytes = try codec.maximumEncodedSingleEventFrameBytes()
+    let transportLimits = try SecureTransportLimits(
+      maximumPendingSendBytes: 4 * 1_024 * 1_024,
+      maximumSingleSendBytes: maximumFrameBytes - 1,
+      connectionTimeoutSeconds: 1
+    )
+    let fixture = try SessionAdmissionFixture(
+      maximumEventBytes: 1_024,
+      transportLimits: transportLimits
+    )
+    let admitted = try await fixture.admit()
+    let attachment = try await admitted.attachEventPump()
+    await assertAdmissionError(.invalidLocalConfiguration) {
+      _ = try await SDKActiveEventPump(attachment: attachment, owner: NearWire()).run()
+    }
+    let snapshot = await attachment.transportCore.snapshot()
+    XCTAssertEqual(snapshot.terminalCode, .invalidLocalConfiguration)
+  }
+
+  func testIncomingQueueKeepsExactFIFOAndOneDeadlineNodePerItem() throws {
+    let route = SDKSessionRoute(
+      sessionEpoch: UUID(uuidString: "123e4567-e89b-12d3-a456-426614174000")!,
+      viewerID: "viewer-installation",
+      appID: "phone-installation"
+    )
+    func item(_ suffix: String, sequence: UInt64, ttl: UInt64, bytes: Int) throws
+      -> SDKIncomingEventItem
+    {
+      let record = try makeSessionIncomingRecord(
+        route: route,
+        sequence: sequence,
+        id: "30000000-0000-0000-0000-\(suffix)",
+        remainingTTLNanoseconds: ttl
+      )
+      return SDKIncomingEventItem(
+        received: try record.receiverEvent(receivedAtNanoseconds: 100),
+        encodedByteCount: bytes
+      )
+    }
+
+    let first = try item("000000000021", sequence: 0, ttl: 30, bytes: 11)
+    let second = try item("000000000022", sequence: 1, ttl: 10, bytes: 12)
+    let third = try item("000000000023", sequence: 2, ttl: 20, bytes: 13)
+    var queue = SDKIncomingEventQueue(maximumCount: 3, maximumEncodedBytes: 64)
+    try queue.appendAtomically([first, second, third])
+    XCTAssertEqual(
+      queue.snapshot,
+      .init(count: 3, encodedBytes: 36, heapNodeCount: 3, nextDeadlineNanoseconds: 110)
+    )
+
+    XCTAssertEqual(
+      try queue.removeExpired(nowNanoseconds: 115, maximumCount: 1),
+      [
+        second.received.envelope.id
+      ])
+    XCTAssertEqual(queue.snapshot.count, 2)
+    XCTAssertEqual(queue.snapshot.heapNodeCount, 2)
+    XCTAssertEqual(queue.popHead(), first)
+    XCTAssertEqual(queue.popHead(), third)
+    XCTAssertEqual(queue.snapshot.count, 0)
+    XCTAssertEqual(queue.snapshot.heapNodeCount, 0)
+
+    var atomic = SDKIncomingEventQueue(maximumCount: 2, maximumEncodedBytes: 64)
+    XCTAssertThrowsError(try atomic.appendAtomically([first, second, third]))
+    XCTAssertEqual(atomic.snapshot.count, 0)
+    XCTAssertEqual(atomic.snapshot.heapNodeCount, 0)
+    XCTAssertEqual(atomic.snapshot.encodedBytes, 0)
+  }
+
   func testHappyPathPreservesCoalescedPolicyAcrossAttachment() async throws {
     let fixture = try SessionAdmissionFixture()
     let task = Task { try await fixture.admission.run() }
@@ -159,9 +2443,11 @@ final class SDKSessionAdmissionTests: XCTestCase {
         )
       )
     )
-    let batch = terminalIngress.takeBatch(maximumItems: 8)
-    XCTAssertEqual(batch?.count, 1)
-    if case .channel(.terminated)? = batch?.first {
+    guard case .batch(let batch) = terminalIngress.takeBatch(maximumItems: 8) else {
+      return XCTFail("Expected terminal to replace queued bytes.")
+    }
+    XCTAssertEqual(batch.count, 1)
+    if case .channel(.terminated) = batch.first {
     } else {
       XCTFail("Expected terminal to replace queued bytes.")
     }
@@ -1012,7 +3298,7 @@ final class SDKSessionAdmissionTests: XCTestCase {
     let channel = dependencies.makeChannel(discovered) { _ in }
 
     let state = await channel.state
-    let installedLimits = await channel.limits
+    let installedLimits = channel.limits
     XCTAssertEqual(state, .setup)
     XCTAssertEqual(installedLimits, transportLimits)
   }
@@ -1534,10 +3820,58 @@ final class SDKSessionAdmissionTests: XCTestCase {
       XCTAssertEqual(recorder.receivedBytes, expectedAppHello)
       XCTAssertFalse(recorder.didFail)
 
-      admitted.cancel()
-      if let viewerChannel = recorder.viewerChannel {
-        await viewerChannel.cancel()
+      let attachment = try await admitted.attachEventPump()
+      let owner = NearWire()
+      _ = try await owner.send(type: "integration.uplink", content: ["value": 1])
+      let activeRun = Task {
+        try await SDKActiveEventPump(attachment: attachment, owner: owner).run()
       }
+      await sessionWaitUntil {
+        await attachment.transportCore.snapshot().state == .negotiatingPolicy
+      }
+      let viewerChannel = try XCTUnwrap(recorder.viewerChannel)
+      try await viewerChannel.send(
+        try codec.encode(
+          WireFlowPolicyOffer(
+            policy: try WireFlowPolicy(
+              appUplinkEventsPerSecond: 10,
+              appDownlinkEventsPerSecond: 10
+            )
+          ),
+          phase: .negotiatingPolicy
+        )
+      )
+      let activeHandle = try await activeRun.value
+
+      let eventTask = Task { () throws -> NearWireEvent? in
+        var iterator = owner.events.makeAsyncIterator()
+        return try await iterator.next()
+      }
+      await sdkWaitUntil { owner.streamSubscriberCounts.events == 1 }
+      let downlinkRecord = try makeSessionIncomingRecord(
+        route: admitted.route,
+        sequence: 0,
+        id: "30000000-0000-0000-0000-000000000041"
+      )
+      try await viewerChannel.send(
+        try codec.encode(WireEventPayload(record: downlinkRecord), phase: .active)
+      )
+      let receivedEvent = try await eventTask.value
+      let published = try XCTUnwrap(receivedEvent)
+      XCTAssertEqual(published.id.uuidString.lowercased(), downlinkRecord.envelope.id.rawValue)
+
+      await sdkWaitUntil {
+        sessionFrameCount(in: Data(recorder.receivedBytes.dropFirst(expectedAppHello.count))) >= 2
+      }
+      let activeAppBytes = Data(recorder.receivedBytes.dropFirst(expectedAppHello.count))
+      let messageTypes = try decodeSessionMessageTypes(activeAppBytes, codec: codec)
+      XCTAssertEqual(Array(messageTypes.prefix(2)), [.flowPolicyAccepted, .event])
+      let diagnostics = try await owner.bufferDiagnostics()
+      XCTAssertEqual(diagnostics.eventCount, 0)
+      XCTAssertFalse(recorder.didFail)
+
+      activeHandle.cancel()
+      await viewerChannel.cancel()
       listener.cancel()
     #else
       throw XCTSkip("The unrestricted real-TLS admission integration gate runs on macOS.")
@@ -1557,10 +3891,13 @@ private struct SessionAdmissionFixture {
 
   init(
     advertisedViewerID: String = "viewer-installation",
-    admissionLimits: SDKSessionAdmissionLimits = .default
+    admissionLimits: SDKSessionAdmissionLimits = .default,
+    maximumEventBytes: Int = 256 * 1_024,
+    transportLimits providedTransportLimits: SecureTransportLimits? = nil,
+    autoCompleteSends: Bool = true
   ) throws {
-    appHello = try makeSessionHello(role: .app)
-    viewerHello = try makeSessionHello(role: .viewer)
+    appHello = try makeSessionHello(role: .app, maximumEventBytes: maximumEventBytes)
+    viewerHello = try makeSessionHello(role: .viewer, maximumEventBytes: maximumEventBytes)
     negotiation = try WireNegotiator.negotiate(local: appHello, remote: viewerHello)
     sessionCodec = try WireSessionCodec(negotiation: negotiation)
     sessionUUID = UUID(uuidString: "123e4567-e89b-12d3-a456-426614174000")!
@@ -1568,12 +3905,14 @@ private struct SessionAdmissionFixture {
       result: negotiation,
       sessionEpoch: SessionEpoch(rawValue: sessionUUID.uuidString.lowercased())
     )
-    let sessionDriver = SessionSecureDriver()
+    let sessionDriver = SessionSecureDriver(autoCompleteSends: autoCompleteSends)
     driver = sessionDriver
     let advertisedHello = try makeSessionHello(role: .viewer, installationID: advertisedViewerID)
     let discovered = try makeDiscoveredViewer(viewerHello: advertisedHello)
     let discovery = SessionTestDiscovery(result: discovered)
-    let transportLimits = try SecureTransportLimits(connectionTimeoutSeconds: 1)
+    let transportLimits =
+      try providedTransportLimits
+      ?? SecureTransportLimits(connectionTimeoutSeconds: 1)
     let dependencies = SDKSessionAdmissionDependencies(
       makeDiscovery: { _ in discovery },
       makeChannel: { _, handler in
@@ -1744,12 +4083,89 @@ private final class SessionDeadlineController: @unchecked Sendable {
   }
 }
 
+private final class SessionNanosecondSleepController: @unchecked Sendable {
+  private struct Request {
+    let id: UUID
+    let nanoseconds: UInt64
+    let continuation: CheckedContinuation<Void, Error>
+  }
+
+  private let lock = NSLock()
+  private var requests: [Request] = []
+  private var cancelled = Set<UUID>()
+
+  func sleep(nanoseconds: UInt64) async throws {
+    let id = UUID()
+    try await withTaskCancellationHandler {
+      try await withCheckedThrowingContinuation { continuation in
+        register(id: id, nanoseconds: nanoseconds, continuation: continuation)
+      }
+    } onCancel: {
+      self.cancel(id: id)
+    }
+  }
+
+  func fire(nanoseconds: UInt64) {
+    let waiter: CheckedContinuation<Void, Error>?
+    lock.lock()
+    if let index = requests.firstIndex(where: { $0.nanoseconds == nanoseconds }) {
+      waiter = requests.remove(at: index).continuation
+    } else {
+      waiter = nil
+    }
+    lock.unlock()
+    waiter?.resume()
+  }
+
+  func waitForRequest(nanoseconds: UInt64) async {
+    await sdkWaitUntil {
+      self.lock.lock()
+      defer { self.lock.unlock() }
+      return self.requests.contains(where: { $0.nanoseconds == nanoseconds })
+    }
+  }
+
+  private func register(
+    id: UUID,
+    nanoseconds: UInt64,
+    continuation: CheckedContinuation<Void, Error>
+  ) {
+    lock.lock()
+    if cancelled.remove(id) != nil {
+      lock.unlock()
+      continuation.resume(throwing: CancellationError())
+      return
+    }
+    requests.append(Request(id: id, nanoseconds: nanoseconds, continuation: continuation))
+    lock.unlock()
+  }
+
+  private func cancel(id: UUID) {
+    let waiter: CheckedContinuation<Void, Error>?
+    lock.lock()
+    if let index = requests.firstIndex(where: { $0.id == id }) {
+      waiter = requests.remove(at: index).continuation
+    } else {
+      cancelled.insert(id)
+      waiter = nil
+    }
+    lock.unlock()
+    waiter?.resume(throwing: CancellationError())
+  }
+}
+
 private final class SessionSecureDriver: SecureConnectionDriving, @unchecked Sendable {
   private let lock = NSLock()
   private var stateHandler: (@Sendable (SecureDriverState) -> Void)?
   private var receiveCompletion: (@Sendable (Data?, Bool, Bool) -> Void)?
   private var _sentData: [Data] = []
   private var _cancelCount = 0
+  private var sendCompletions: [@Sendable (Bool) -> Void] = []
+  private let autoCompleteSends: Bool
+
+  init(autoCompleteSends: Bool = true) {
+    self.autoCompleteSends = autoCompleteSends
+  }
 
   func start(stateHandler: @escaping @Sendable (SecureDriverState) -> Void) {
     lock.lock()
@@ -1769,14 +4185,23 @@ private final class SessionSecureDriver: SecureConnectionDriving, @unchecked Sen
   func send(_ data: Data, completion: @escaping @Sendable (Bool) -> Void) {
     lock.lock()
     _sentData.append(data)
+    if !autoCompleteSends { sendCompletions.append(completion) }
     lock.unlock()
-    completion(false)
+    if autoCompleteSends { completion(false) }
+  }
+
+  func completeNextSend(failed: Bool = false) {
+    lock.lock()
+    let completion = sendCompletions.isEmpty ? nil : sendCompletions.removeFirst()
+    lock.unlock()
+    completion?(failed)
   }
 
   func cancel() {
     lock.lock()
     _cancelCount += 1
     receiveCompletion = nil
+    sendCompletions.removeAll(keepingCapacity: false)
     lock.unlock()
   }
 
@@ -1941,6 +4366,90 @@ private final class SessionAsyncBarrier: @unchecked Sendable {
     let waiter = continuation
     continuation = nil
     lock.unlock()
+    waiter?.resume()
+  }
+}
+
+private final class SessionOneShotAsyncBarrier: @unchecked Sendable {
+  private let lock = NSLock()
+  private var didEnter = false
+  private var didRelease = false
+  private var continuation: CheckedContinuation<Void, Never>?
+
+  func waitOnce() async {
+    let shouldWait: Bool = lock.withLock {
+      guard !didEnter else { return false }
+      didEnter = true
+      return !didRelease
+    }
+    guard shouldWait else { return }
+    await withCheckedContinuation { continuation in
+      let resumeImmediately: Bool = lock.withLock {
+        if didRelease { return true }
+        self.continuation = continuation
+        return false
+      }
+      if resumeImmediately { continuation.resume() }
+    }
+  }
+
+  func waitUntilEntered() async {
+    await sdkWaitUntil { self.lock.withLock { self.didEnter } }
+  }
+
+  func release() {
+    let waiter: CheckedContinuation<Void, Never>? = lock.withLock {
+      didRelease = true
+      let waiter = continuation
+      continuation = nil
+      return waiter
+    }
+    waiter?.resume()
+  }
+}
+
+private final class SessionNthAsyncBarrier: @unchecked Sendable {
+  private let lock = NSLock()
+  private let targetEntry: Int
+  private var entryCount = 0
+  private var didEnterTarget = false
+  private var didRelease = false
+  private var continuation: CheckedContinuation<Void, Never>?
+
+  init(targetEntry: Int) {
+    precondition(targetEntry > 0)
+    self.targetEntry = targetEntry
+  }
+
+  func waitAtTarget() async {
+    let shouldWait: Bool = lock.withLock {
+      entryCount += 1
+      guard entryCount == targetEntry else { return false }
+      didEnterTarget = true
+      return !didRelease
+    }
+    guard shouldWait else { return }
+    await withCheckedContinuation { continuation in
+      let resumeImmediately: Bool = lock.withLock {
+        if didRelease { return true }
+        self.continuation = continuation
+        return false
+      }
+      if resumeImmediately { continuation.resume() }
+    }
+  }
+
+  func waitUntilTargetEntered() async {
+    await sdkWaitUntil { self.lock.withLock { self.didEnterTarget } }
+  }
+
+  func release() {
+    let waiter: CheckedContinuation<Void, Never>? = lock.withLock {
+      didRelease = true
+      let waiter = continuation
+      continuation = nil
+      return waiter
+    }
     waiter?.resume()
   }
 }
@@ -2118,7 +4627,8 @@ private func makeSessionHello(
   installationID: String? = nil,
   versions: WireVersionRange = .v1,
   codecs: Set<WireCodecIdentifier> = [.json],
-  sendPolicies: Set<WireSendPolicy> = [.normal, .keepLatest]
+  sendPolicies: Set<WireSendPolicy> = [.normal, .keepLatest],
+  maximumEventBytes: Int = 256 * 1_024
 ) throws -> WireHello {
   try WireHello(
     versions: versions,
@@ -2128,6 +4638,7 @@ private func makeSessionHello(
       rawValue: installationID ?? (role == .app ? "phone-installation" : "viewer-installation")
     ),
     codecs: codecs,
+    maximumEventBytes: maximumEventBytes,
     sendPolicies: sendPolicies
   )
 }
@@ -2162,6 +4673,109 @@ private func assertAdmissionError(
     XCTAssertEqual(error.code, code)
   } catch {
     XCTFail("Expected SDKSessionAdmissionError, received \(type(of: error)).")
+  }
+}
+
+private func decodeAcceptedPolicy(
+  _ data: Data,
+  codec: WireSessionCodec,
+  phase: WireSessionPhase
+) throws -> WireFlowPolicyAccepted {
+  var decoder = WireFrameDecoder()
+  var decoded: WireFlowPolicyAccepted?
+  try decoder.consume(data) { frame in
+    let message = try codec.decode(frame: frame, phase: phase)
+    decoded = try codec.decode(WireFlowPolicyAccepted.self, from: message)
+  }
+  return try XCTUnwrap(decoded)
+}
+
+private func decodeEventPayload(
+  _ data: Data,
+  codec: WireSessionCodec
+) throws -> WireEventPayload {
+  var decoder = WireFrameDecoder()
+  var decoded: WireEventPayload?
+  try decoder.consume(data) { frame in
+    let message = try codec.decode(frame: frame, phase: .active)
+    decoded = try codec.decode(WireEventPayload.self, from: message)
+  }
+  return try XCTUnwrap(decoded)
+}
+
+private func sessionFrameCount(in data: Data) -> Int {
+  var decoder = WireFrameDecoder()
+  var count = 0
+  do {
+    try decoder.consume(data) { _ in count += 1 }
+  } catch {
+    return 0
+  }
+  return count
+}
+
+private func decodeSessionMessageTypes(
+  _ data: Data,
+  codec: WireSessionCodec
+) throws -> [WireMessageType] {
+  var decoder = WireFrameDecoder()
+  var types: [WireMessageType] = []
+  try decoder.consume(data) { frame in
+    types.append(try codec.decode(frame: frame, phase: .active).type)
+  }
+  return types
+}
+
+private func makeSessionIncomingRecord(
+  route: SDKSessionRoute,
+  sequence: UInt64,
+  id: String,
+  remainingTTLNanoseconds: UInt64 = 60_000_000_000,
+  content: JSONValue = .object(["value": .integer(1)]),
+  direction: EventDirection = .viewerToApp
+) throws -> WireEventRecord {
+  let source =
+    direction == .viewerToApp
+    ? EventEndpoint(role: .viewer, id: try EndpointID(rawValue: route.viewerID))
+    : EventEndpoint(role: .app, id: try EndpointID(rawValue: route.appID))
+  let target =
+    direction == .viewerToApp
+    ? EventEndpoint(role: .app, id: try EndpointID(rawValue: route.appID))
+    : EventEndpoint(role: .viewer, id: try EndpointID(rawValue: route.viewerID))
+  let envelope = try EventEnvelope(
+    id: EventID(rawValue: id),
+    type: .user("viewer.command"),
+    content: content,
+    createdAt: Date(timeIntervalSince1970: 1_700_000_001),
+    monotonicTimestampNanoseconds: 1_000_000_000,
+    source: source,
+    target: target,
+    direction: direction,
+    sessionEpoch: SessionEpoch(rawValue: route.sessionEpoch.nearWireCanonicalString),
+    sequence: EventSequence(sequence),
+    priority: .normal,
+    ttl: .default,
+    causality: EventCausality()
+  )
+  return try WireEventRecord(
+    envelope: envelope,
+    remainingTTLNanoseconds: remainingTTLNanoseconds
+  )
+}
+
+private final class SessionMonotonicSequence: @unchecked Sendable {
+  private let lock = NSLock()
+  private var values: [UInt64]
+
+  init(values: [UInt64]) {
+    self.values = values
+  }
+
+  func next() -> UInt64 {
+    lock.lock()
+    defer { lock.unlock() }
+    if values.count > 1 { return values.removeFirst() }
+    return values.first ?? 0
   }
 }
 

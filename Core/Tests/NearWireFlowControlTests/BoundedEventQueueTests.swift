@@ -46,6 +46,250 @@ final class BoundedEventQueueTests: XCTestCase {
     XCTAssertEqual(try JSONDecoder().decode(EventPriority.self, from: data), .critical)
   }
 
+  func testActiveScheduleObservationReturnsFutureDeadlineAndStableFairID() throws {
+    var queue = BoundedEventQueue<String>()
+    let first = try makeTestEvent(1, ttlMilliseconds: 2)
+    let second = try makeTestEvent(2, priority: .critical, ttlMilliseconds: 3)
+    _ = try queue.enqueue(first, nowOnQueueClockNanoseconds: 0)
+    _ = try queue.enqueue(second, nowOnQueueClockNanoseconds: 0)
+
+    let firstObservation = try queue.observeActiveSchedule(
+      nowOnQueueClockNanoseconds: 0,
+      maximumServiceUnits: 1,
+      authorizeExpiration: { _, _ in
+        XCTFail("No expiration should be offered.")
+        return false
+      }
+    )
+    let secondObservation = try queue.observeActiveSchedule(
+      nowOnQueueClockNanoseconds: 0,
+      maximumServiceUnits: 1,
+      authorizeExpiration: { _, _ in
+        XCTFail("No expiration should be offered.")
+        return false
+      }
+    )
+
+    XCTAssertEqual(firstObservation.expiredEventIDs, [])
+    XCTAssertFalse(firstObservation.dueWorkRemains)
+    XCTAssertEqual(firstObservation.nextExpirationDeadlineNanoseconds, 2_000_000)
+    XCTAssertEqual(firstObservation.nextFairCandidateID, second.id)
+    XCTAssertEqual(secondObservation.nextFairCandidateID, second.id)
+
+    let dequeued = try queue.dequeue(
+      maximumCount: 1,
+      maximumBytes: 1,
+      nowOnQueueClockNanoseconds: 0
+    )
+    XCTAssertEqual(dequeued.events.map(\.id), [second.id])
+  }
+
+  func testActiveScheduleExpirationUsesQuantumAndReportsImmediateContinuation() throws {
+    var queue = BoundedEventQueue<String>()
+    let events = try (1...3).map { try makeTestEvent($0, ttlMilliseconds: 1) }
+    for event in events {
+      _ = try queue.enqueue(event, nowOnQueueClockNanoseconds: 0)
+    }
+    var committed: [EventID] = []
+
+    let first = try queue.observeActiveSchedule(
+      nowOnQueueClockNanoseconds: 1_000_000,
+      maximumServiceUnits: 2,
+      authorizeExpiration: { event, commit in
+        commit()
+        committed.append(event.id)
+        return true
+      }
+    )
+    XCTAssertEqual(first.expiredEventIDs, Array(events.prefix(2)).map(\.id))
+    XCTAssertEqual(committed, first.expiredEventIDs)
+    XCTAssertTrue(first.dueWorkRemains)
+    XCTAssertNil(first.nextExpirationDeadlineNanoseconds)
+    XCTAssertNil(first.nextFairCandidateID)
+    XCTAssertEqual(queue.eventCount, 1)
+
+    let second = try queue.observeActiveSchedule(
+      nowOnQueueClockNanoseconds: 1_000_000,
+      maximumServiceUnits: 2,
+      authorizeExpiration: { _, commit in
+        commit()
+        return true
+      }
+    )
+    XCTAssertEqual(second.expiredEventIDs, [events[2].id])
+    XCTAssertFalse(second.dueWorkRemains)
+    XCTAssertNil(second.nextExpirationDeadlineNanoseconds)
+    XCTAssertEqual(queue.eventCount, 0)
+    XCTAssertEqual(queue.statistics.expired, 3)
+  }
+
+  func testActiveSchedulePreviewReportsDueWorkWithoutMutation() throws {
+    var queue = BoundedEventQueue<String>()
+    let first = try makeTestEvent(1, ttlMilliseconds: 1)
+    let second = try makeTestEvent(2, ttlMilliseconds: 1)
+    _ = try queue.enqueue(first, nowOnQueueClockNanoseconds: 0)
+    _ = try queue.enqueue(second, nowOnQueueClockNanoseconds: 0)
+    let beforeStatistics = queue.statistics
+
+    let preview = try queue.previewActiveSchedule(
+      nowOnQueueClockNanoseconds: 1_000_000,
+      maximumServiceUnits: 2
+    )
+
+    XCTAssertEqual(preview.expiredEventIDs, [])
+    XCTAssertTrue(preview.dueWorkRemains)
+    XCTAssertNil(preview.nextExpirationDeadlineNanoseconds)
+    XCTAssertNil(preview.nextFairCandidateID)
+    XCTAssertFalse(preview.stoppedByAuthorization)
+    XCTAssertEqual(queue.eventCount, 2)
+    XCTAssertEqual(queue.statistics, beforeStatistics)
+  }
+
+  func testActiveScheduleTerminalFirstLeavesDueEventAndStatisticsUnchanged() throws {
+    var queue = BoundedEventQueue<String>()
+    let event = try makeTestEvent(1, ttlMilliseconds: 1)
+    _ = try queue.enqueue(event, nowOnQueueClockNanoseconds: 0)
+    let beforeStatistics = queue.statistics
+
+    let result = try queue.observeActiveSchedule(
+      nowOnQueueClockNanoseconds: 1_000_000,
+      maximumServiceUnits: 1,
+      authorizeExpiration: { _, _ in false }
+    )
+
+    XCTAssertTrue(result.stoppedByAuthorization)
+    XCTAssertTrue(result.dueWorkRemains)
+    XCTAssertEqual(result.expiredEventIDs, [])
+    XCTAssertEqual(queue.eventCount, 1)
+    XCTAssertEqual(queue.statistics, beforeStatistics)
+  }
+
+  func testActiveScheduleInvalidQuantumAndBackwardClockAreAtomic() throws {
+    var queue = BoundedEventQueue<String>()
+    let event = try makeTestEvent(1, ttlMilliseconds: 10)
+    _ = try queue.enqueue(event, nowOnQueueClockNanoseconds: 5)
+
+    assertFlowError(.invalidBatchConfiguration) {
+      _ = try queue.observeActiveSchedule(
+        nowOnQueueClockNanoseconds: 5,
+        maximumServiceUnits: 0,
+        authorizeExpiration: { _, _ in false }
+      )
+    }
+    assertFlowError(.invalidClock) {
+      _ = try queue.observeActiveSchedule(
+        nowOnQueueClockNanoseconds: 4,
+        maximumServiceUnits: 1,
+        authorizeExpiration: { _, _ in false }
+      )
+    }
+    XCTAssertEqual(queue.eventCount, 1)
+    XCTAssertEqual(queue.accountedByteCount, event.accountedByteCount)
+  }
+
+  func testActiveOfferBoundsAcceptedPrefixSeparatelyFromMaintenance() throws {
+    var queue = BoundedEventQueue<String>()
+    let expired = try makeTestEvent(1, ttlMilliseconds: 1)
+    let routed = try makeTestEvent(2, value: "route-drop", ttlMilliseconds: 10)
+    let first = try makeTestEvent(3, value: "first", ttlMilliseconds: 10)
+    let second = try makeTestEvent(4, value: "second", ttlMilliseconds: 10)
+    for event in [expired, routed, first, second] {
+      _ = try queue.enqueue(event, nowOnQueueClockNanoseconds: 0)
+    }
+    var accepted: [EventID] = []
+    var routingDropped: [EventID] = []
+
+    let result = try queue.offerActive(
+      maximumServiceUnits: 4,
+      maximumAcceptedEventCount: 1,
+      maximumBytes: 10,
+      nowOnQueueClockNanoseconds: 1_000_000,
+      authorizeExpiration: { _, commit in
+        commit()
+        return true
+      },
+      preflight: { event, commit in
+        guard event.value == "route-drop" else { return .eligible }
+        commit()
+        routingDropped.append(event.id)
+        return .removeWithoutAccounting
+      },
+      decision: { event, commit in
+        commit()
+        accepted.append(event.id)
+        return .remove
+      }
+    )
+
+    XCTAssertEqual(result.expiredEventIDs, [expired.id])
+    XCTAssertEqual(routingDropped, [routed.id])
+    XCTAssertEqual(accepted, [first.id])
+    XCTAssertEqual(result.acceptedEventCount, 1)
+    XCTAssertEqual(result.serviceUnits, 3)
+    XCTAssertTrue(result.stoppedOnCandidate)
+    XCTAssertTrue(result.eligibleWorkRemains)
+    XCTAssertEqual(result.nextFairCandidateID, second.id)
+    XCTAssertEqual(queue.eventCount, 1)
+  }
+
+  func testActiveOfferTerminalFirstCandidatePreservesFairnessAndIdentity() throws {
+    var queue = BoundedEventQueue<String>()
+    let critical = try makeTestEvent(1, priority: .critical)
+    let normal = try makeTestEvent(2, priority: .normal)
+    _ = try queue.enqueue(critical, nowOnQueueClockNanoseconds: 0)
+    _ = try queue.enqueue(normal, nowOnQueueClockNanoseconds: 0)
+    let beforeStatistics = queue.statistics
+
+    let result = try queue.offerActive(
+      maximumServiceUnits: 2,
+      maximumAcceptedEventCount: 2,
+      maximumBytes: 2,
+      nowOnQueueClockNanoseconds: 0,
+      authorizeExpiration: { _, _ in false },
+      preflight: { _, _ in .eligible },
+      decision: { _, _ in .stop }
+    )
+    XCTAssertTrue(result.stoppedOnCandidate)
+    XCTAssertEqual(result.serviceUnits, 1)
+    XCTAssertEqual(result.nextFairCandidateID, critical.id)
+    XCTAssertEqual(queue.statistics, beforeStatistics)
+    XCTAssertEqual(queue.eventCount, 2)
+
+    let next = try queue.dequeue(
+      maximumCount: 1,
+      maximumBytes: 1,
+      nowOnQueueClockNanoseconds: 0
+    )
+    XCTAssertEqual(next.events.map(\.id), [critical.id])
+  }
+
+  func testActiveOfferByteBoundLeavesCandidateUnchangedWithoutDecision() throws {
+    var queue = BoundedEventQueue<String>()
+    let event = try makeTestEvent(1, bytes: 2)
+    _ = try queue.enqueue(event, nowOnQueueClockNanoseconds: 0)
+    var decisionCalls = 0
+
+    let result = try queue.offerActive(
+      maximumServiceUnits: 1,
+      maximumAcceptedEventCount: 1,
+      maximumBytes: 1,
+      nowOnQueueClockNanoseconds: 0,
+      authorizeExpiration: { _, _ in false },
+      preflight: { _, _ in .eligible },
+      decision: { _, _ in
+        decisionCalls += 1
+        return .stop
+      }
+    )
+
+    XCTAssertEqual(decisionCalls, 0)
+    XCTAssertTrue(result.stoppedOnCandidate)
+    XCTAssertEqual(result.serviceUnits, 0)
+    XCTAssertEqual(result.nextFairCandidateID, event.id)
+    XCTAssertEqual(queue.eventCount, 1)
+    XCTAssertEqual(queue.accountedByteCount, 2)
+  }
+
   func testNormalEventsRemainDistinctAndCountOverflowEvictsOldestLowPriority() throws {
     let limits = try EventQueueLimits(
       maximumEventCount: 2,

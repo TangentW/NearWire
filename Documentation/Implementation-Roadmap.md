@@ -46,7 +46,7 @@ Compose pairing discovery, peer-to-peer-enabled TLS connection, hello and admiss
 
 ### 11. `sdk-active-event-pump`
 
-Implement outbound queue draining, incoming event delivery, sequence validation, active-route affinity, negotiated flow policy, and bounded transport backpressure for one admitted session.
+Implement outbound queue draining, incoming event delivery, sequence validation, active-route affinity, negotiated flow policy, and bounded transport backpressure for one admitted session. This internal layer is implemented; supported connection orchestration remains item 12.
 
 ### 12. `sdk-public-connect`
 
