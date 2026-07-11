@@ -128,6 +128,57 @@ final class WireMessageTests: XCTestCase {
     }
   }
 
+  func testExpectedVersionGuardPrecedesV1EnvelopeSemantics() throws {
+    let futureWithoutV1Fields = WireFrame(
+      lane: .control,
+      payload: try JSONValue.object(["version": .integer(2)]).deterministicData()
+    )
+    assertWireError(.incompatibleVersion) {
+      _ = try WireMessage.decode(
+        from: futureWithoutV1Fields,
+        expectedVersion: .v1
+      )
+    }
+
+    let futureEventOnControl = WireFrame(
+      lane: .control,
+      payload: try WireMessage(
+        version: WireProtocolVersion(2),
+        type: .event,
+        body: .object([:])
+      ).deterministicPayloadData()
+    )
+    assertWireError(.incompatibleVersion) {
+      _ = try WireMessage.decode(
+        from: futureEventOnControl,
+        expectedVersion: .v1
+      )
+    }
+
+    let rawFuturePing = WireFrame(
+      lane: .control,
+      payload: try WireMessage(
+        version: WireProtocolVersion(2),
+        type: .ping,
+        body: .object([:])
+      ).deterministicPayloadData()
+    )
+    let rawMessage = try WireMessage.decode(from: rawFuturePing)
+    XCTAssertEqual(rawMessage.version, try WireProtocolVersion(2))
+    XCTAssertEqual(rawMessage.type, .ping)
+
+    let negotiation = try WireNegotiator.negotiate(
+      local: makeHello(role: .app),
+      remote: makeHello(role: .viewer)
+    )
+    let session = try WireSessionCodec(negotiation: negotiation)
+    XCTAssertThrowsError(try session.decode(frame: futureEventOnControl, phase: .active)) { error in
+      let wireError = error as? WireProtocolError
+      XCTAssertEqual(wireError?.code, .incompatibleVersion)
+      XCTAssertEqual(wireError?.disposition, .connectionTerminal)
+    }
+  }
+
   func testSessionCodecRejectsUnsupportedVersionAndLocalLimitWidening() throws {
     let future = try WireNegotiator.negotiate(
       local: makeHello(role: .app, maximum: 2),

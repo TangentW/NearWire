@@ -36,55 +36,59 @@ Implement bounded pairing-code normalization, exact Bonjour identity, shared `vi
 
 Implement the internal process-wide exact-owner connection lease across independently loaded NearWire images, including bounded bootstrap, safe contention, stale-handle protection, and no public connection API.
 
-### 9. `sdk-session-admission`
+### 9. `core-wire-prehandshake-codec`
+
+Add the fixed V1 bootstrap codec that exchanges only hello, safe error, and disconnect before a negotiation result exists, with lane-first rejection, version-confusion prevention, sealed typed results, and no channel lifecycle.
+
+### 10. `sdk-session-admission`
 
 Compose pairing discovery, peer-to-peer-enabled TLS connection, hello and admission handshake, Viewer identity, active route ownership, and negotiated capabilities behind internal session admission.
 
-### 10. `sdk-active-event-pump`
+### 11. `sdk-active-event-pump`
 
 Implement outbound queue draining, incoming event delivery, sequence validation, active-route affinity, negotiated flow policy, and bounded transport backpressure for one admitted session.
 
-### 11. `sdk-public-connect`
+### 12. `sdk-public-connect`
 
 Expose explicit instance-based connection entry points, claim the process lease, map every internal admission and ownership failure to safe public errors, and publish connection state without reconnection or background behavior.
 
-### 12. `sdk-connection-lifecycle`
+### 13. `sdk-connection-lifecycle`
 
 Implement explicit disconnect, transient-failure classification, bounded reconnection, background transitions, exact-handle release, route replacement, and final public connection-state behavior.
 
-### 13. `sdk-ui`
+### 14. `sdk-ui`
 
 Implement the optional injected-instance NearWireUI connection-code, status, error, and disconnect components without hidden SDK ownership or persistence.
 
-### 14. `sdk-performance`
+### 15. `sdk-performance`
 
 Implement opt-in one-second performance snapshots, supported public collectors, resource-safe start and stop behavior, keep-latest delivery, unavailable metric semantics, and overhead benchmarks.
 
-### 15. `viewer-application-foundation`
+### 16. `viewer-application-foundation`
 
 Create the manually maintained NearWireViewer Xcode project and native SwiftUI application, automatic listener startup, TLS identity lifecycle, pairing-code display, default automatic admission, optional confirmation, and clean window shutdown.
 
-### 16. `viewer-multidevice-flow-control`
+### 17. `viewer-multidevice-flow-control`
 
 Implement multi-device sessions, device identity and nicknames, one-to-many connection management, requested and effective rates, Bundle-ID preferences, queue telemetry, and device isolation tests.
 
-### 17. `viewer-local-store-search`
+### 18. `viewer-local-store-search`
 
 Implement SQLite persistence, automatic sessions, 3 GiB and seven-day defaults, transactional cleanup, pinned-session protection, search indexing, JSON-path filters, pagination, and streaming JSON export.
 
-### 18. `viewer-event-explorer-control`
+### 19. `viewer-event-explorer-control`
 
 Implement the three-column event explorer, single and merged timelines, receive-time ordering, detail inspection, renderers, pause-without-data-loss, simple Viewer-to-App control composition, and session causality display.
 
-### 19. `viewer-performance-dashboard`
+### 20. `viewer-performance-dashboard`
 
 Implement performance projections, current metric cards, synchronized charts, gaps, unavailable metrics, time ranges, bucketed aggregation, and raw-event traceability.
 
-### 20. `demo-distribution-e2e`
+### 21. `demo-distribution-e2e`
 
 Create the manually maintained root Demo project, validate SPM and CocoaPods integration against one app implementation, exercise bidirectional events and performance collection, and run device-to-Viewer end-to-end suites.
 
-### 21. `release-hardening`
+### 22. `release-hardening`
 
 Complete protocol compatibility matrices, security and resource-exhaustion tests, multi-device performance targets, packaging verification, API documentation, operator documentation, signing and distribution readiness, and the final requirement-by-requirement completion audit.
 

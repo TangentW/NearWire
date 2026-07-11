@@ -19,8 +19,16 @@ struct WireMessage: Equatable, Sendable {
 
   static func decode(
     from frame: WireFrame,
-    limits: WireProtocolLimits = .default
+    limits: WireProtocolLimits = .default,
+    expectedVersion: WireProtocolVersion? = nil
   ) throws -> WireMessage {
+    guard frame.payload.count <= limits.frame.maximumPayloadBytes(for: frame.lane) else {
+      throw WireProtocolError(
+        code: .frameTooLarge,
+        path: "payload",
+        message: "Frame payload exceeds its lane limit."
+      )
+    }
     let eventLimits = try EventValidationLimits(
       maximumTypeBytes: 128,
       maximumContentDepth: 64,
@@ -55,11 +63,18 @@ struct WireMessage: Equatable, Sendable {
     }
     let object = try WireJSON.object(root, path: "$")
     let versionValue = try WireJSON.required("version", in: object, path: "$")
+    let version = try WireProtocolVersion(
+      WireJSON.uint16IncludingZero(versionValue, path: "$.version")
+    )
+    if let expectedVersion, version != expectedVersion {
+      throw WireProtocolError(
+        code: .incompatibleVersion,
+        path: "version",
+        message: "Message version differs from the expected wire version."
+      )
+    }
     let typeValue = try WireJSON.required("type", in: object, path: "$")
     let body = try WireJSON.required("body", in: object, path: "$")
-    let version = try WireProtocolVersion(
-      WireJSON.uint16(versionValue, path: "$.version")
-    )
     let type = try WireMessageType(
       WireJSON.string(typeValue, path: "$.type")
     )
@@ -136,6 +151,83 @@ enum WireMessageCodec {
   }
 }
 
+@_spi(NearWireInternal) public enum WirePreHandshakeMessage: Equatable, Sendable {
+  case hello(WireHello)
+  case error(WireErrorPayload)
+  case disconnect(WireDisconnect)
+}
+
+@_spi(NearWireInternal) public struct WirePreHandshakeCodec: Sendable {
+  public let limits: WireProtocolLimits
+
+  public init(limits: WireProtocolLimits = .default) {
+    self.limits = limits
+  }
+
+  private func encodePayload<Payload: WireMessagePayload>(_ payload: Payload) throws -> Data {
+    try WireMessageAdmission.validate(
+      lane: Payload.lane,
+      type: Payload.messageType,
+      phase: .preHandshake,
+      capabilities: []
+    )
+    return try WireMessageCodec.encode(payload, version: .v1, limits: limits)
+  }
+
+  public func encode(_ payload: WireHello) throws -> Data {
+    try encodePayload(payload)
+  }
+
+  public func encode(_ payload: WireErrorPayload) throws -> Data {
+    try encodePayload(payload)
+  }
+
+  public func encode(_ payload: WireDisconnect) throws -> Data {
+    try encodePayload(payload)
+  }
+
+  public func decode(frame: WireFrame) throws -> WirePreHandshakeMessage {
+    do {
+      try WireMessageAdmission.preflight(
+        lane: frame.lane,
+        phase: .preHandshake,
+        capabilities: []
+      )
+      let message = try WireMessage.decode(
+        from: frame,
+        limits: limits,
+        expectedVersion: .v1
+      )
+      try WireMessageAdmission.validate(
+        lane: frame.lane,
+        type: message.type,
+        phase: .preHandshake,
+        capabilities: []
+      )
+      switch message.type {
+      case .hello:
+        return .hello(try WireMessageCodec.decode(WireHello.self, from: message, limits: limits))
+      case .error:
+        return .error(
+          try WireMessageCodec.decode(WireErrorPayload.self, from: message, limits: limits)
+        )
+      case .disconnect:
+        return .disconnect(
+          try WireMessageCodec.decode(WireDisconnect.self, from: message, limits: limits)
+        )
+      default:
+        throw WireProtocolError(
+          code: .unsupportedMessageType,
+          path: "type",
+          message: "Message type is unavailable before handshake."
+        )
+      }
+    } catch let error as WireProtocolError {
+      throw error.asConnectionTerminal()
+    }
+  }
+}
+
 @_spi(NearWireInternal) public struct WireSessionCodec: Sendable {
   public let selectedVersion: WireProtocolVersion
   public let capabilities: Set<WireCapability>
@@ -200,14 +292,11 @@ enum WireMessageCodec {
         phase: phase,
         capabilities: capabilities
       )
-      let message = try WireMessage.decode(from: frame, limits: limits)
-      guard message.version == selectedVersion else {
-        throw WireProtocolError(
-          code: .incompatibleVersion,
-          path: "version",
-          message: "Message version differs from the negotiated session version."
-        )
-      }
+      let message = try WireMessage.decode(
+        from: frame,
+        limits: limits,
+        expectedVersion: selectedVersion
+      )
       try WireMessageAdmission.validate(
         lane: frame.lane,
         type: message.type,

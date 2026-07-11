@@ -2,7 +2,7 @@
 
 ## Supported Boundary
 
-The primary SDK is the `NearWire` module. It supports iOS 16 or later, Xcode 16 or later, Swift 5 language mode, Swift Package Manager, and CocoaPods. Its supported signatures use only Foundation and supported types declared by the NearWire module. Core event, flow-control, wire, transport, Network.framework, and Security.framework values are hidden behind the repository-only `NearWireInternal` SPI, including when CocoaPods compiles Core and SDK sources into one module.
+The primary SDK is the `NearWire` module. It supports iOS 16 or later, Xcode 16 or later, Swift 5 language mode, Swift Package Manager, and CocoaPods. Its supported signatures use only Foundation and supported types declared by the NearWire module. Core event, flow-control, wire, pre-handshake codec and typed result, admitted-message, transport, Network.framework, and Security.framework values are hidden behind the repository-only `NearWireInternal` SPI or module-internal boundaries, including when CocoaPods compiles Core and SDK sources into one module.
 
 The SDK uses Swift concurrency. It does not provide a singleton, delegate API, Combine publisher, NotificationCenter contract, or Objective-C compatibility layer.
 

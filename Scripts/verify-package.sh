@@ -54,6 +54,7 @@ swift format lint --recursive \
   Scripts/Fixtures/WirePublicAPI.swift \
   Scripts/Fixtures/ForbiddenWirePayload.swift \
   Scripts/Fixtures/ForbiddenSDKImplementationType.swift \
+  Scripts/Fixtures/ForbiddenPreHandshakeAPI.swift \
   Scripts/Fixtures/ForbiddenProcessLeaseAPI.swift
 
 xcode_version="$(xcodebuild -version)"
@@ -190,6 +191,25 @@ if ! grep -Fq "cannot find 'ProcessConnectionLeaseRegistry' in scope" \
   exit 1
 fi
 
+forbidden_pre_handshake_spm="$package_harness/forbidden-pre-handshake-spm.log"
+if xcrun swiftc \
+  -typecheck \
+  -swift-version 5 \
+  -target arm64-apple-ios16.0 \
+  -sdk "$ios_sdk" \
+  -I "$ios_module_path" \
+  Scripts/Fixtures/ForbiddenPreHandshakeAPI.swift \
+  >"$forbidden_pre_handshake_spm" 2>&1; then
+  echo "Swift Package consumer unexpectedly accessed pre-handshake transport SPI." >&2
+  exit 1
+fi
+if ! grep -Fq "cannot find 'WirePreHandshakeCodec' in scope" \
+  "$forbidden_pre_handshake_spm"; then
+  echo "Swift Package pre-handshake boundary failed for an unexpected reason." >&2
+  cat "$forbidden_pre_handshake_spm" >&2
+  exit 1
+fi
+
 spm_sdk_symbols="$package_harness/spm-sdk-symbols.log"
 find "$ROOT/.build/ios16" -path '*/NearWire.build/*.o' -exec nm {} + \
   >"$spm_sdk_symbols"
@@ -273,7 +293,8 @@ ruby -rjson -e '
   forbidden = %w[
     NearWireCore NearWireFlowControl NearWireTransport JSONValue EventDraft
     EventEnvelope BoundedEventQueue SecureByteChannel NWConnection NWListener
-    NWParameters SecIdentity ProcessConnectionLease
+    NWParameters SecIdentity ProcessConnectionLease WirePreHandshakeCodec
+    WirePreHandshakeMessage WireAdmittedMessage WireMessagePayload
   ]
   violations = forbidden.select { |name| public_api.include?(name) }
   abort "Supported SDK API exposes implementation-only types: #{violations.join(", ")}" unless violations.empty?
@@ -354,6 +375,25 @@ if ! grep -Fq "cannot find 'ProcessConnectionLeaseRegistry' in scope" \
   "$forbidden_lease_pod"; then
   echo "CocoaPods process-lease boundary failed for an unexpected reason." >&2
   cat "$forbidden_lease_pod" >&2
+  exit 1
+fi
+
+forbidden_pre_handshake_pod="$package_harness/forbidden-pre-handshake-pod.log"
+if xcrun swiftc \
+  -typecheck \
+  -swift-version 5 \
+  -target arm64-apple-ios16.0 \
+  -sdk "$ios_sdk" \
+  -I "$cocoapods_module_dir" \
+  Scripts/Fixtures/ForbiddenPreHandshakeAPI.swift \
+  >"$forbidden_pre_handshake_pod" 2>&1; then
+  echo "CocoaPods consumer unexpectedly accessed pre-handshake transport SPI." >&2
+  exit 1
+fi
+if ! grep -Fq "cannot find 'WirePreHandshakeCodec' in scope" \
+  "$forbidden_pre_handshake_pod"; then
+  echo "CocoaPods pre-handshake boundary failed for an unexpected reason." >&2
+  cat "$forbidden_pre_handshake_pod" >&2
   exit 1
 fi
 

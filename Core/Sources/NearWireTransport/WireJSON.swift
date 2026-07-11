@@ -52,6 +52,14 @@ enum WireJSON {
     return UInt16(integer)
   }
 
+  static func uint16IncludingZero(_ value: JSONValue, path: String) throws -> UInt16 {
+    let integer = try int64(value, path: path)
+    guard integer >= 0, integer <= Int64(UInt16.max) else {
+      throw invalid(path, "Expected a UInt16 value.")
+    }
+    return UInt16(integer)
+  }
+
   static func uint64(_ value: JSONValue, path: String) throws -> UInt64 {
     let raw = try string(value, path: path)
     guard let value = UInt64(raw), raw == String(value) else {
