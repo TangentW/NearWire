@@ -1,0 +1,22 @@
+COMMAND:
+ env DO_NOT_TRACK=1 openspec --no-color validate --all --strict --no-interactive
+RUN_ID: 20260711T012245Z-60850
+GATE_ID: openspec
+STARTED_AT_UTC: 2026-07-11T01:22:46Z
+
+✓ spec/bounded-event-queue
+✓ spec/change-quality-gates
+✓ change/core-transport-security
+✓ spec/event-model
+✓ spec/event-rate-control
+✓ spec/performance-snapshot-schema
+✓ spec/repository-structure
+✓ spec/sdk-distribution
+✓ spec/wire-event-transfer
+✓ spec/wire-framing
+✓ spec/wire-message-protocol
+✓ spec/wire-session-negotiation
+Totals: 12 passed, 0 failed (12 items)
+
+EXIT_STATUS: 0
+FINISHED_AT_UTC: 2026-07-11T01:22:46Z

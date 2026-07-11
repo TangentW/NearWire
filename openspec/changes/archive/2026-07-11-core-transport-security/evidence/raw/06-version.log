@@ -1,0 +1,10 @@
+COMMAND:
+ ./Scripts/verify-version.sh
+RUN_ID: 20260711T012245Z-60850
+GATE_ID: version
+STARTED_AT_UTC: 2026-07-11T01:22:52Z
+
+Version verification passed for 0.1.0.
+
+EXIT_STATUS: 0
+FINISHED_AT_UTC: 2026-07-11T01:22:52Z

@@ -47,6 +47,10 @@ swift format lint --recursive \
   Core \
   SDK \
   Scripts/Fixtures/CorePackage.swift \
+  Scripts/Fixtures/SecureTransportPublicAPI.swift \
+  Scripts/Fixtures/ForbiddenPlaintextTransport.swift \
+  Scripts/Fixtures/ForbiddenRawSecureChannel.swift \
+  Scripts/Fixtures/ForbiddenSameModuleRawSecureChannel.swift \
   Scripts/Fixtures/WirePublicAPI.swift \
   Scripts/Fixtures/ForbiddenWirePayload.swift
 
@@ -184,6 +188,79 @@ if ! grep -Fq "cannot find type 'WireMessagePayload' in scope" \
 fi
 
 echo "Wire payload public API sealing passed."
+
+xcrun swiftc \
+  -typecheck \
+  -I "$macos_module_path" \
+  Scripts/Fixtures/SecureTransportPublicAPI.swift
+
+forbidden_plaintext_diagnostics="$package_harness/forbidden-plaintext-transport.log"
+if xcrun swiftc \
+  -typecheck \
+  -I "$macos_module_path" \
+  Scripts/Fixtures/ForbiddenPlaintextTransport.swift \
+  >"$forbidden_plaintext_diagnostics" 2>&1; then
+  echo "External code unexpectedly constructed supported plaintext transport." >&2
+  exit 1
+fi
+if ! grep -Fq "cannot find 'SecureNetworkParameters' in scope" \
+  "$forbidden_plaintext_diagnostics"; then
+  echo "Plaintext transport boundary failed for an unexpected compiler reason." >&2
+  cat "$forbidden_plaintext_diagnostics" >&2
+  exit 1
+fi
+
+echo "Mandatory TLS public API boundary passed."
+
+forbidden_raw_channel_diagnostics="$package_harness/forbidden-raw-secure-channel.log"
+if xcrun swiftc \
+  -typecheck \
+  -I "$macos_module_path" \
+  Scripts/Fixtures/ForbiddenRawSecureChannel.swift \
+  >"$forbidden_raw_channel_diagnostics" 2>&1; then
+  echo "External code unexpectedly wrapped a plaintext connection in a secure channel." >&2
+  exit 1
+fi
+if ! grep -Fq "initializer is inaccessible due to 'fileprivate' protection level" \
+  "$forbidden_raw_channel_diagnostics"; then
+  echo "Raw secure-channel boundary failed for an unexpected compiler reason." >&2
+  cat "$forbidden_raw_channel_diagnostics" >&2
+  exit 1
+fi
+
+echo "Raw connection wrapping boundary passed."
+
+same_module_sources=()
+while IFS= read -r source; do
+  same_module_sources+=("$source")
+done < <(find Core/Sources -type f -name '*.swift' -print | sort)
+forbidden_same_module_diagnostics="$package_harness/forbidden-same-module-channel.log"
+if xcrun swiftc \
+  -typecheck \
+  -module-name NearWire \
+  "${same_module_sources[@]}" \
+  Scripts/Fixtures/ForbiddenSameModuleRawSecureChannel.swift \
+  >"$forbidden_same_module_diagnostics" 2>&1; then
+  echo "A CocoaPods-style same module unexpectedly wrapped a plaintext connection." >&2
+  exit 1
+fi
+if ! grep -Fq "argument type 'NWConnection' does not conform to expected type 'SecureConnectionDriving'" \
+  "$forbidden_same_module_diagnostics"; then
+  echo "Same-module raw channel boundary failed for an unexpected compiler reason." >&2
+  cat "$forbidden_same_module_diagnostics" >&2
+  exit 1
+fi
+
+echo "CocoaPods same-module raw connection boundary passed."
+
+if rg -n \
+  'SecItem(Add|Update|Delete)|SecKeyCreateRandom|SecItemExport|SecItemImport' \
+  Core/Sources/NearWireTransport; then
+  echo "Transport production code unexpectedly manages certificate or key lifecycle." >&2
+  exit 1
+fi
+
+echo "Transport identity lifecycle boundary passed."
 
 read -r simulator_id simulator_initial_state <<< "$(xcrun simctl list devices available -j | ruby -rjson -e '
   data = JSON.parse(STDIN.read)

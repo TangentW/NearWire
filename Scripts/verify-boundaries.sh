@@ -18,6 +18,15 @@ mkdir -p \
 
 ruby Scripts/check-swift-boundaries.rb
 
+if rg -n \
+  'SecureConnectionDriving|SecureByteChannel[[:space:]]*\(|NWConnection[[:space:]]*\(' \
+  SDK/Sources; then
+  echo "SDK sources bypass the mandatory secure transport factories." >&2
+  exit 1
+fi
+
+echo "SDK secure transport construction boundary passed."
+
 package_json="$(swift package \
   --cache-path "$ROOT/.build/cache" \
   --config-path "$ROOT/.build/config" \

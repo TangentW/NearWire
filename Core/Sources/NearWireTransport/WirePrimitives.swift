@@ -239,7 +239,10 @@ public struct WireProductVersion: Codable, Equatable, Hashable, Sendable {
 }
 
 public struct WireFrameLimits: Equatable, Sendable {
+  public static let encodedFrameOverheadBytes = 5
   public static let hardMaximumPayloadBytes = 16 * 1_024 * 1_024
+  public static let hardMaximumEncodedFrameBytes =
+    hardMaximumPayloadBytes + encodedFrameOverheadBytes
   public static let `default` = WireFrameLimits(
     uncheckedControlPayloadBytes: 64 * 1_024,
     eventPayloadBytes: 1_024 * 1_024
@@ -272,6 +275,10 @@ public struct WireFrameLimits: Equatable, Sendable {
     case .control: maximumControlPayloadBytes
     case .event: maximumEventPayloadBytes
     }
+  }
+
+  public func maximumEncodedFrameBytes(for lane: WireLane) -> Int {
+    maximumPayloadBytes(for: lane) + Self.encodedFrameOverheadBytes
   }
 
   private init(uncheckedControlPayloadBytes: Int, eventPayloadBytes: Int) {
