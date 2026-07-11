@@ -1,7 +1,7 @@
 import XCTest
 
-@testable import NearWireCore
-@testable import NearWireTransport
+@_spi(NearWireInternal) @testable import NearWireCore
+@_spi(NearWireInternal) @testable import NearWireTransport
 
 final class WireNegotiationTests: XCTestCase {
   func testHighestVersionConservativeLimitAndCapabilityIntersection() throws {

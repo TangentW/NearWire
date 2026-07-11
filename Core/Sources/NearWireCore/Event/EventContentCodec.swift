@@ -1,6 +1,6 @@
 import Foundation
 
-public struct EventContentCodec: Sendable {
+@_spi(NearWireInternal) public struct EventContentCodec: Sendable {
   public let limits: EventValidationLimits
 
   public init(limits: EventValidationLimits = .default) {

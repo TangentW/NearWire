@@ -17,9 +17,11 @@ The root package exposes three supported SDK products:
 - `NearWireUI`
 - `NearWirePerformance`
 
-`NearWireCore` is present for the local Viewer build and repository tests. It is an internal product and is not covered by consumer API compatibility guarantees.
+`NearWireCore` is present for the local Viewer build and repository tests. Its declarations use the `NearWireInternal` Swift SPI so CocoaPods can compile Core and SDK sources into one module without making Core values visible to a normal `import NearWire`. Repository-owned targets opt into that SPI explicitly. It is an internal product and is not covered by consumer API compatibility guarantees.
 
 Supported SDK signatures never expose a type that exists only in NearWireCore, NearWireTransport, or NearWireFlowControl. Public event, configuration, and result models belong to `NearWire`, `NearWireUI`, or `NearWirePerformance` and convert to internal wire models behind the supported module boundary.
+
+`NearWireBuiltins` is a separate narrow SPI on the supported SDK module. It lets repository-owned optional modules, such as `NearWirePerformance`, enqueue reserved `nearwire.*` events through the same facade and queue. It is not an application API and does not grant access to the broader `NearWireInternal` implementation SPI.
 
 The root package intentionally has no external package dependencies. Viewer-only dependencies are managed by the Viewer Xcode project and are never resolved by SDK consumers.
 

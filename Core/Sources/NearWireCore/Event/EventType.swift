@@ -1,6 +1,6 @@
 import Foundation
 
-public struct EventType: Codable, Hashable, Sendable {
+@_spi(NearWireInternal) public struct EventType: Codable, Hashable, Sendable {
   public enum Namespace: Sendable {
     case user
     case platform

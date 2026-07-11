@@ -1,10 +1,10 @@
 import Foundation
 
 #if SWIFT_PACKAGE
-  import NearWireCore
+  @_spi(NearWireInternal) import NearWireCore
 #endif
 
-public struct WireNegotiationResult: Equatable, Sendable {
+@_spi(NearWireInternal) public struct WireNegotiationResult: Equatable, Sendable {
   public let selectedVersion: WireProtocolVersion
   public let selectedCodec: WireCodecIdentifier
   public let maximumEventBytes: Int
@@ -14,7 +14,7 @@ public struct WireNegotiationResult: Equatable, Sendable {
 
 }
 
-public enum WireNegotiator {
+@_spi(NearWireInternal) public enum WireNegotiator {
   public static func negotiate(
     local: WireHello,
     remote: WireHello

@@ -1,3 +1,3 @@
-import NearWireTransport
+@_spi(NearWireInternal) import NearWireTransport
 
 struct ForgedWirePayload: WireMessagePayload {}

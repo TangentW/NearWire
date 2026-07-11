@@ -1,6 +1,6 @@
 import Foundation
 
-public struct WireFrame: Equatable, Sendable {
+@_spi(NearWireInternal) public struct WireFrame: Equatable, Sendable {
   public let lane: WireLane
   public let payload: Data
 
@@ -10,7 +10,7 @@ public struct WireFrame: Equatable, Sendable {
   }
 }
 
-public enum WireFrameEncoder {
+@_spi(NearWireInternal) public enum WireFrameEncoder {
   public static func encode(
     lane: WireLane,
     payload: Data,
@@ -51,7 +51,7 @@ public enum WireFrameEncoder {
   }
 }
 
-public struct WireFrameDecoder: Sendable {
+@_spi(NearWireInternal) public struct WireFrameDecoder: Sendable {
   public let limits: WireFrameLimits
 
   private var prefix: [UInt8] = []

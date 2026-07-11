@@ -1,7 +1,8 @@
 import Foundation
+@_spi(NearWireInternal) import NearWireCore
 import XCTest
 
-@testable import NearWireTransport
+@_spi(NearWireInternal) @testable import NearWireTransport
 
 final class WireGoldenFixtureTests: XCTestCase {
   func testCanonicalFixtureBytesAndCheckedInFiles() throws {

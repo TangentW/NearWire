@@ -52,4 +52,8 @@ Pod::Spec.new do |spec|
     performance.dependency "NearWire/SDK"
     performance.source_files = "SDK/Sources/NearWirePerformance/**/*.swift"
   end
+
+  spec.test_spec "PublicAPI" do |test|
+    test.source_files = "SDK/Tests/PublicAPIConsumer/**/*.swift"
+  end
 end

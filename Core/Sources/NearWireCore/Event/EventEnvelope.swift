@@ -1,6 +1,6 @@
 import Foundation
 
-public struct EventEnvelope: Codable, Equatable, Hashable, Sendable {
+@_spi(NearWireInternal) public struct EventEnvelope: Codable, Equatable, Hashable, Sendable {
   public let id: EventID
   public let type: EventType
   public let content: JSONValue
@@ -135,7 +135,7 @@ public struct EventEnvelope: Codable, Equatable, Hashable, Sendable {
   }
 }
 
-public struct EventEnvelopeContext: Equatable, Hashable, Sendable {
+@_spi(NearWireInternal) public struct EventEnvelopeContext: Equatable, Hashable, Sendable {
   public let source: EventEndpoint
   public let target: EventEndpoint
   public let direction: EventDirection
@@ -161,7 +161,7 @@ public struct EventEnvelopeContext: Equatable, Hashable, Sendable {
   }
 }
 
-public struct EventEnvelopeFactory: Sendable {
+@_spi(NearWireInternal) public struct EventEnvelopeFactory: Sendable {
   public typealias WallClock = @Sendable () -> Date
   public typealias MonotonicClock = @Sendable () -> UInt64
   public typealias IdentifierGenerator = @Sendable () -> EventID

@@ -1,6 +1,6 @@
 import Foundation
 
-public struct FlowControlError: Error, Equatable, Sendable {
+@_spi(NearWireInternal) public struct FlowControlError: Error, Equatable, Sendable {
   public enum Code: String, Codable, Sendable {
     case arithmeticOverflow
     case invalidBatchConfiguration

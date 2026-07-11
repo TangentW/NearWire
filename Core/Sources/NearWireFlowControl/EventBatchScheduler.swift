@@ -1,10 +1,10 @@
 import Foundation
 
 #if SWIFT_PACKAGE
-  import NearWireCore
+  @_spi(NearWireInternal) import NearWireCore
 #endif
 
-public struct EventBatchLimits: Equatable, Sendable {
+@_spi(NearWireInternal) public struct EventBatchLimits: Equatable, Sendable {
   public static let `default` = EventBatchLimits(
     uncheckedMaximumEventCount: 256,
     maximumAccountedBytes: 512 * 1_024,
@@ -69,7 +69,7 @@ public struct EventBatchLimits: Equatable, Sendable {
   }
 }
 
-public struct EventBatch<Value: Sendable>: Sendable {
+@_spi(NearWireInternal) public struct EventBatch<Value: Sendable>: Sendable {
   public let events: [PendingEvent<Value>]
   public let accountedByteCount: Int
 
@@ -82,14 +82,14 @@ public struct EventBatch<Value: Sendable>: Sendable {
 
 extension EventBatch: Equatable where Value: Equatable {}
 
-public struct EventBatchAttempt<Value: Sendable>: Sendable {
+@_spi(NearWireInternal) public struct EventBatchAttempt<Value: Sendable>: Sendable {
   public let batch: EventBatch<Value>?
   public let expiredEventIDs: [EventID]
 }
 
 extension EventBatchAttempt: Equatable where Value: Equatable {}
 
-public struct EventBatchScheduler: Equatable, Sendable {
+@_spi(NearWireInternal) public struct EventBatchScheduler: Equatable, Sendable {
   public let limits: EventBatchLimits
   public let queueLimits: EventQueueLimits
   public private(set) var nextFlushDeadlineNanoseconds: UInt64

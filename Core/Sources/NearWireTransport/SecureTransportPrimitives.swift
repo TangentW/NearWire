@@ -1,11 +1,11 @@
 import Foundation
 
-public enum SecureTransportRole: String, Codable, Sendable {
+@_spi(NearWireInternal) public enum SecureTransportRole: String, Codable, Sendable {
   case appClient
   case viewerServer
 }
 
-public enum SecureTransportState: String, Codable, Sendable {
+@_spi(NearWireInternal) public enum SecureTransportState: String, Codable, Sendable {
   case setup
   case preparing
   case ready
@@ -14,12 +14,12 @@ public enum SecureTransportState: String, Codable, Sendable {
   case cancelled
 }
 
-public enum SecureTransportDisposition: String, Codable, Sendable {
+@_spi(NearWireInternal) public enum SecureTransportDisposition: String, Codable, Sendable {
   case operationRejected
   case connectionTerminal
 }
 
-public struct SecureTransportError: Error, Equatable, Sendable {
+@_spi(NearWireInternal) public struct SecureTransportError: Error, Equatable, Sendable {
   public enum Code: String, Codable, Sendable {
     case alreadyStarted
     case arithmeticOverflow
@@ -60,7 +60,7 @@ extension SecureTransportError: CustomStringConvertible {
   }
 }
 
-public struct SecureTransportLimits: Equatable, Sendable {
+@_spi(NearWireInternal) public struct SecureTransportLimits: Equatable, Sendable {
   public static let hardMaximumReceiveChunkBytes = 1_048_576
   public static let hardMaximumPendingSendCount = 4_096
   public static let hardMaximumPendingSendBytes = 64 * 1_024 * 1_024
@@ -137,7 +137,7 @@ public struct SecureTransportLimits: Equatable, Sendable {
   }
 }
 
-public struct SecureTLSPlan: Equatable, Sendable {
+@_spi(NearWireInternal) public struct SecureTLSPlan: Equatable, Sendable {
   public static let v1 = SecureTLSPlan()
 
   public let requiresTLS = true

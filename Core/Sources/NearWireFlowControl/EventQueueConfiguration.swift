@@ -1,10 +1,10 @@
 import Foundation
 
 #if SWIFT_PACKAGE
-  import NearWireCore
+  @_spi(NearWireInternal) import NearWireCore
 #endif
 
-public struct KeepLatestKey: Codable, Equatable, Hashable, Sendable {
+@_spi(NearWireInternal) public struct KeepLatestKey: Codable, Equatable, Hashable, Sendable {
   public let rawValue: String
 
   public init(_ rawValue: String) throws {
@@ -33,12 +33,12 @@ public struct KeepLatestKey: Codable, Equatable, Hashable, Sendable {
   }
 }
 
-public enum EventQueuePolicy: Codable, Equatable, Hashable, Sendable {
+@_spi(NearWireInternal) public enum EventQueuePolicy: Codable, Equatable, Hashable, Sendable {
   case normal
   case keepLatest(KeepLatestKey)
 }
 
-public struct EventQueueLimits: Equatable, Sendable {
+@_spi(NearWireInternal) public struct EventQueueLimits: Equatable, Sendable {
   public static let `default` = EventQueueLimits(
     uncheckedMaximumEventCount: 1_000,
     maximumTotalBytes: 4 * 1_024 * 1_024,
@@ -96,7 +96,7 @@ public struct EventQueueLimits: Equatable, Sendable {
   }
 }
 
-public struct PendingEvent<Value: Sendable>: Sendable {
+@_spi(NearWireInternal) public struct PendingEvent<Value: Sendable>: Sendable {
   public let id: EventID
   public let value: Value
   public let priority: EventPriority

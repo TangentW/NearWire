@@ -21,7 +21,7 @@ PATH_ATTRIBUTE_KEYS = %w[
   resources
   source_files
 ].freeze
-FORBIDDEN_CHILD_KEYS = %w[appspecs testspecs].freeze
+FORBIDDEN_CHILD_KEYS = %w[appspecs].freeze
 FORBIDDEN_COMPILATION_KEYS = %w[
   compiler_flags
   header_mappings_dir
@@ -55,11 +55,17 @@ ROOT_ALLOWED_KEYS = (
     summary
     swift_version
     swift_versions
+    testspecs
     version
   ] + PATH_ATTRIBUTE_KEYS + PLATFORM_ATTRIBUTE_KEYS
 ).freeze
 SUBSPEC_ALLOWED_KEYS = (
   %w[dependencies name pod_target_xcconfig subspecs] +
+  PATH_ATTRIBUTE_KEYS +
+  PLATFORM_ATTRIBUTE_KEYS
+).freeze
+TESTSPEC_ALLOWED_KEYS = (
+  %w[dependencies name pod_target_xcconfig test_type] +
   PATH_ATTRIBUTE_KEYS +
   PLATFORM_ATTRIBUTE_KEYS
 ).freeze
@@ -193,10 +199,15 @@ def validate_attributes(attributes, root_name, name, short_name, repository_root
                  when :root then ROOT_ALLOWED_KEYS
                  when :subspec then SUBSPEC_ALLOWED_KEYS
                  when :platform then PLATFORM_ALLOWED_KEYS
+                 when :testspec then TESTSPEC_ALLOWED_KEYS
                  else abort "Unknown CocoaPods attribute scope: #{scope}"
                  end
   unexpected_keys = attributes.keys - allowed_keys
   abort "Unsupported CocoaPods attributes in #{name}: #{unexpected_keys.join(", ")}" unless unexpected_keys.empty?
+
+  if scope == :testspec && attributes.fetch("test_type", "unit") != "unit"
+    abort "Only unit CocoaPods test specifications are allowed in #{name}."
+  end
 
   dependencies = attributes.fetch("dependencies", {}).keys
   external = dependencies.reject { |dependency| internal_dependency?(dependency, root_name) }
@@ -265,6 +276,19 @@ def validate_spec(spec, root_name, repository_root, roots, inherited_path = root
 
   Array(spec["subspecs"]).each do |subspec|
     validate_spec(subspec, root_name, repository_root, roots, name)
+  end
+  Array(spec["testspecs"]).each do |testspec|
+    test_name = testspec.fetch("name", "#{name}/PublicAPI")
+    abort "Only the PublicAPI CocoaPods test specification is allowed." unless test_name.split("/").last == "PublicAPI"
+    validate_attributes(
+      testspec,
+      root_name,
+      test_name,
+      "PublicAPI",
+      repository_root,
+      roots,
+      :testspec
+    )
   end
 end
 

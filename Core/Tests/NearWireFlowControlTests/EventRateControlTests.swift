@@ -1,6 +1,6 @@
 import XCTest
 
-@testable import NearWireFlowControl
+@_spi(NearWireInternal) @testable import NearWireFlowControl
 
 final class EventRateControlTests: XCTestCase {
   func testRateValidationAndConservativeNegotiation() throws {

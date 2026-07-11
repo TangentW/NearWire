@@ -1,6 +1,6 @@
 import Foundation
 
-public struct EventID: Codable, Hashable, Sendable {
+@_spi(NearWireInternal) public struct EventID: Codable, Hashable, Sendable {
   public let rawValue: String
 
   public init() {
@@ -35,7 +35,7 @@ public struct EventID: Codable, Hashable, Sendable {
   }
 }
 
-public struct SessionEpoch: Codable, Hashable, Sendable {
+@_spi(NearWireInternal) public struct SessionEpoch: Codable, Hashable, Sendable {
   public let rawValue: String
 
   public init() {
@@ -58,7 +58,7 @@ public struct SessionEpoch: Codable, Hashable, Sendable {
   }
 }
 
-public struct EndpointID: Codable, Hashable, Sendable {
+@_spi(NearWireInternal) public struct EndpointID: Codable, Hashable, Sendable {
   public let rawValue: String
 
   public init(rawValue: String) throws {
@@ -88,12 +88,12 @@ public struct EndpointID: Codable, Hashable, Sendable {
   }
 }
 
-public enum EndpointRole: String, Codable, Hashable, Sendable {
+@_spi(NearWireInternal) public enum EndpointRole: String, Codable, Hashable, Sendable {
   case app
   case viewer
 }
 
-public struct EventEndpoint: Codable, Hashable, Sendable {
+@_spi(NearWireInternal) public struct EventEndpoint: Codable, Hashable, Sendable {
   public let role: EndpointRole
   public let id: EndpointID
 
@@ -103,7 +103,7 @@ public struct EventEndpoint: Codable, Hashable, Sendable {
   }
 }
 
-public enum EventDirection: String, Codable, Hashable, Sendable {
+@_spi(NearWireInternal) public enum EventDirection: String, Codable, Hashable, Sendable {
   case appToViewer
   case viewerToApp
 
@@ -125,14 +125,14 @@ public enum EventDirection: String, Codable, Hashable, Sendable {
   }
 }
 
-public enum EventPriority: String, Codable, Hashable, Sendable {
+@_spi(NearWireInternal) public enum EventPriority: String, Codable, Hashable, Sendable {
   case low
   case normal
   case high
   case critical
 }
 
-public struct EventSequence: Codable, Hashable, Sendable {
+@_spi(NearWireInternal) public struct EventSequence: Codable, Hashable, Sendable {
   public let rawValue: UInt64
 
   public init(_ rawValue: UInt64) {
@@ -140,7 +140,7 @@ public struct EventSequence: Codable, Hashable, Sendable {
   }
 }
 
-public struct EventSchemaVersion: Codable, Hashable, Sendable {
+@_spi(NearWireInternal) public struct EventSchemaVersion: Codable, Hashable, Sendable {
   public static let current = EventSchemaVersion(unchecked: 1)
 
   public let rawValue: UInt16
@@ -171,7 +171,7 @@ public struct EventSchemaVersion: Codable, Hashable, Sendable {
   }
 }
 
-public struct EventTTL: Codable, Hashable, Sendable {
+@_spi(NearWireInternal) public struct EventTTL: Codable, Hashable, Sendable {
   public static let `default` = EventTTL(unchecked: 60_000)
 
   public let milliseconds: UInt64
@@ -224,7 +224,7 @@ public struct EventTTL: Codable, Hashable, Sendable {
   }
 }
 
-public struct EventCausality: Codable, Hashable, Sendable {
+@_spi(NearWireInternal) public struct EventCausality: Codable, Hashable, Sendable {
   public let correlationID: EventID?
   public let replyTo: EventID?
 

@@ -1,7 +1,7 @@
 import Foundation
 import XCTest
 
-@testable import NearWireTransport
+@_spi(NearWireInternal) @testable import NearWireTransport
 
 final class SecureByteChannelTests: XCTestCase {
   func testStartIsSingleShotAndCancelBeforeReadyIsTerminal() async throws {
@@ -360,6 +360,71 @@ final class SecureByteChannelTests: XCTestCase {
     XCTAssertEqual(Set(driver.sentData.compactMap(\.first)), Set(UInt8(0)..<UInt8(32)))
     XCTAssertTrue(recorder.terminalCodes.isEmpty)
     await channel.cancel()
+  }
+
+  func testNonisolatedMailboxAdmissionIsSynchronouslyBoundedUnderConcurrency() async throws {
+    let driver = FakeSecureConnectionDriver()
+    let limits = try SecureTransportLimits(
+      maximumPendingSendCount: 8,
+      maximumPendingSendBytes: 8,
+      maximumSingleSendBytes: 1
+    )
+    let channel = SecureByteChannel(driver: driver, limits: limits) { _ in }
+    try await channel.start()
+
+    let accepted = await withTaskGroup(of: Bool.self, returning: Int.self) { group in
+      for byte in UInt8(0)..<UInt8(32) {
+        group.addTask {
+          do {
+            try channel.admitSend(Data([byte]))
+            return true
+          } catch {
+            return false
+          }
+        }
+      }
+      var count = 0
+      for await didAccept in group where didAccept {
+        count += 1
+      }
+      return count
+    }
+
+    let retainedBeforeReady = await channel.retainedSendPayloadBytes
+    XCTAssertEqual(accepted, 8)
+    XCTAssertEqual(retainedBeforeReady, 8)
+    driver.emitState(.ready)
+    await waitUntil { driver.sentData.count == 1 }
+    XCTAssertEqual(driver.sentData.count, 1)
+    await channel.cancel()
+    let retainedAfterCancel = await channel.retainedSendPayloadBytes
+    XCTAssertEqual(retainedAfterCancel, 0)
+  }
+
+  func testTerminalTransitionClosesConcurrentMailboxAdmissionAndClearsBytes() async throws {
+    let driver = FakeSecureConnectionDriver()
+    let channel = SecureByteChannel(driver: driver) { _ in }
+    try await channel.start()
+
+    await withTaskGroup(of: Void.self) { group in
+      for _ in 0..<128 {
+        group.addTask {
+          _ = try? channel.admitSend(Data([1]))
+        }
+      }
+      group.addTask {
+        await channel.cancel()
+      }
+      await group.waitForAll()
+    }
+
+    let state = await channel.state
+    let retained = await channel.retainedSendPayloadBytes
+    XCTAssertEqual(state, .cancelled)
+    XCTAssertEqual(retained, 0)
+    await assertTransportError(.invalidState) {
+      try channel.admitSend(Data([1]))
+    }
   }
 
   func testSynchronousDriverCallbacksRemainSerialized() async throws {

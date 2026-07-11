@@ -25,7 +25,7 @@ module NearWireDistributionContract
     "NearWireTransportTests" => ["test", "Core/Tests/NearWireTransportTests", ["NearWireTransport"]],
     "NearWireFlowControlTests" => ["test", "Core/Tests/NearWireFlowControlTests", ["NearWireFlowControl"]],
     "NearWireTestSupportTests" => ["test", "Core/Tests/NearWireTestSupportTests", ["NearWireTestSupport"]],
-    "NearWireTests" => ["test", "SDK/Tests/NearWireTests", ["NearWire"]],
+    "NearWireTests" => ["test", "SDK/Tests/NearWireTests", %w[NearWire NearWireTransport]],
     "NearWireUITests" => ["test", "SDK/Tests/NearWireUITests", ["NearWireUI"]],
     "NearWirePerformanceTests" => ["test", "SDK/Tests/NearWirePerformanceTests", ["NearWirePerformance"]],
   }.freeze
@@ -56,6 +56,13 @@ module NearWireDistributionContract
     "DEFINES_MODULE" => "YES",
     "SWIFT_STRICT_CONCURRENCY" => "complete",
     "SWIFT_TREAT_WARNINGS_AS_ERRORS" => "YES",
+  }.freeze
+  EXPECTED_POD_TESTSPECS = {
+    "PublicAPI" => {
+      "name" => "PublicAPI",
+      "source_files" => ["SDK/Tests/PublicAPIConsumer/**/*.swift"],
+      "test_type" => "unit",
+    },
   }.freeze
 
   module_function
@@ -155,6 +162,16 @@ module NearWireDistributionContract
       [name, normalized]
     end
     assert(subspecs == expected_subspecs, "Pod subspec graph or source mappings changed.")
+
+    testspecs = Array(spec["testspecs"]).to_h do |testspec|
+      name = testspec.fetch("name").split("/").last
+      normalized = deep_copy(testspec)
+      normalized["name"] = name
+      normalized["source_files"] = Array(normalized["source_files"])
+      normalized["test_type"] = normalized.fetch("test_type", "unit")
+      [name, normalized]
+    end
+    assert(testspecs == EXPECTED_POD_TESTSPECS, "Pod public API test specification changed.")
   end
 
   def valid_package_fixture
@@ -199,6 +216,7 @@ module NearWireDistributionContract
           "source_files" => details.fetch("source_files"),
         }
       end,
+      "testspecs" => EXPECTED_POD_TESTSPECS.values,
     }
   end
 
@@ -259,6 +277,8 @@ module NearWireDistributionContract
       "Swift versions" => ->(value) { value["swift_versions"] = "6.0" },
       "default subspec" => ->(value) { value["default_subspecs"] = ["SDK", "UI"] },
       "missing subspec" => ->(value) { value["subspecs"].pop },
+      "missing public API testspec" => ->(value) { value["testspecs"].clear },
+      "public API testspec source" => ->(value) { value["testspecs"][0]["source_files"] = ["SDK/Other/**/*.swift"] },
       "subspec dependency" => ->(value) { value["subspecs"][1]["dependencies"] = {} },
       "subspec dependency constraint" => ->(value) { value["subspecs"][1]["dependencies"]["NearWire/Core"] = ["~> 1.0"] },
       "subspec source" => ->(value) { value["subspecs"][1]["source_files"] = ["SDK/Other/**/*.swift"] },

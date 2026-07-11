@@ -1,7 +1,7 @@
 import CoreFoundation
 import Foundation
 
-public indirect enum JSONValue: Equatable, Hashable, Sendable {
+@_spi(NearWireInternal) public indirect enum JSONValue: Equatable, Hashable, Sendable {
   case null
   case bool(Bool)
   case integer(Int64)

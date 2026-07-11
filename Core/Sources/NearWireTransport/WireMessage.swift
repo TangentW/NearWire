@@ -1,7 +1,7 @@
 import Foundation
 
 #if SWIFT_PACKAGE
-  import NearWireCore
+  @_spi(NearWireInternal) import NearWireCore
 #endif
 
 struct WireMessage: Equatable, Sendable {
@@ -136,7 +136,7 @@ enum WireMessageCodec {
   }
 }
 
-public struct WireSessionCodec: Sendable {
+@_spi(NearWireInternal) public struct WireSessionCodec: Sendable {
   public let selectedVersion: WireProtocolVersion
   public let capabilities: Set<WireCapability>
   public let sendPolicies: Set<WireSendPolicy>
@@ -379,14 +379,14 @@ public struct WireSessionCodec: Sendable {
   }
 }
 
-public struct WireAdmittedMessage: Sendable {
+@_spi(NearWireInternal) public struct WireAdmittedMessage: Sendable {
   fileprivate let message: WireMessage
 
   public var version: WireProtocolVersion { message.version }
   public var type: WireMessageType { message.type }
 }
 
-public enum WireSessionPhase: String, Codable, Sendable {
+@_spi(NearWireInternal) public enum WireSessionPhase: String, Codable, Sendable {
   case preHandshake
   case awaitingApproval
   case negotiatingPolicy

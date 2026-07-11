@@ -1,7 +1,7 @@
 import Foundation
 import XCTest
 
-@testable import NearWireCore
+@_spi(NearWireInternal) @testable import NearWireCore
 
 final class PerformanceSnapshotTests: XCTestCase {
   func testCompleteSnapshotRoundTripsThroughContentCodec() throws {

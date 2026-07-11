@@ -1,6 +1,6 @@
 # NearWire Core Flow Control
 
-This document describes the internal, platform-neutral queue, rate, and batching primitives shared by later SDK and Viewer layers. They are public only for cross-module compilation inside NearWire and are not supported SDK facade API.
+This document describes the internal, platform-neutral queue, rate, and batching primitives shared by later SDK and Viewer layers. They use the `NearWireInternal` Swift SPI only for repository-owned cross-module compilation and are not supported SDK facade API.
 
 ## Pending events and session ownership
 
@@ -57,6 +57,8 @@ FIFO is preserved within each priority. Global FIFO across priorities is not pro
 Internally, hash indexes provide event-ID and keep-latest lookup, while per-priority and deadline minimum heaps avoid rebuilding or sorting the entire queue for each admission or single-event drain. Stale heap nodes are validated and compacted at a bounded live-entry threshold with a small fixed floor.
 
 If the next fairly selected event cannot fit the remaining batch bytes, selection stops without removing or skipping it. The next flush can send it because a valid batch configuration fits every valid single queue event.
+
+The queue also supports a synchronous offer operation for transport backpressure. It presents the next fair candidate to its owner and removes it only when the owner accepts it. Stopping leaves that candidate's insertion ordinal, indexes, accounted bytes, and weighted scheduler credit unchanged, so a later attempt observes the same ordering without a dequeue-and-reinsert cycle. An owner preflight can remove locally invalid work, such as a stale route-bound reply, before the transport byte budget is evaluated; that work consumes a bounded candidate slot but no transport bytes.
 
 ## Telemetry and clearing
 

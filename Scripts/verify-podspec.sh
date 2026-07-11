@@ -13,6 +13,6 @@ fi
 pod_version="$(pod --version | tr -d '[:space:]')"
 ruby Scripts/check-cocoapods-version.rb "$pod_version"
 
-pod lib lint NearWire.podspec --private --skip-tests --no-ansi
+pod lib lint NearWire.podspec --private --no-ansi
 
 echo "CocoaPods podspec verification passed."

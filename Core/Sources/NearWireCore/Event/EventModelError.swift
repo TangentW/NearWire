@@ -1,6 +1,6 @@
 import Foundation
 
-public struct EventModelError: Error, Equatable, Sendable {
+@_spi(NearWireInternal) public struct EventModelError: Error, Equatable, Sendable {
   public enum Code: String, Codable, Sendable {
     case contentDecodingFailed
     case contentEncodingFailed

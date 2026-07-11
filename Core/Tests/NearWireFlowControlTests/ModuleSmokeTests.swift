@@ -1,6 +1,6 @@
 import XCTest
 
-@testable import NearWireFlowControl
+@_spi(NearWireInternal) @testable import NearWireFlowControl
 
 final class NearWireFlowControlModuleSmokeTests: XCTestCase {
   func testModuleIsAvailable() {

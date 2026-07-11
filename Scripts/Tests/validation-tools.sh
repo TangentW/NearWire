@@ -58,12 +58,31 @@ mkdir -p \
   "$fixture_root/SDK" \
   "$fixture_root/Viewer"
 
-printf '%s\n' 'public struct Fixture {}' > "$fixture_root/Core/Allowed.swift"
+printf '%s\n' '@_spi(NearWireInternal) public struct Fixture {}' > "$fixture_root/Core/Allowed.swift"
 printf '%s\n' 'public struct Fixture {}' > "$fixture_root/SDK/Allowed.swift"
 ruby Scripts/check-swift-boundaries.rb \
   --core-root "$fixture_root/Core" \
   --sdk-root "$fixture_root/SDK" \
   >/dev/null
+ruby Scripts/check-core-spi-boundary.rb \
+  --core-root "$fixture_root/Core" \
+  >/dev/null
+
+printf '%s\n' 'public struct LeakedCoreType {}' > "$fixture_root/Core/Violation.swift"
+if ruby Scripts/check-core-spi-boundary.rb \
+  --core-root "$fixture_root/Core" \
+  >/dev/null 2>&1; then
+  echo "Expected a Core declaration without SPI to fail." >&2
+  exit 1
+fi
+rm "$fixture_root/Core/Violation.swift"
+
+printf '%s\n' '@_spi(NearWireInternal)' 'public struct MultilineSPIFixture {}' \
+  > "$fixture_root/Core/MultilineSPI.swift"
+ruby Scripts/check-core-spi-boundary.rb \
+  --core-root "$fixture_root/Core" \
+  >/dev/null
+rm "$fixture_root/Core/MultilineSPI.swift"
 
 swift_import_violations=(
   '@_implementationOnly import UIKit'
@@ -188,6 +207,20 @@ valid_podspec_json='{"name":"NearWire","pod_target_xcconfig":{"DEFINES_MODULE":"
 printf '%s' "$valid_podspec_json" | ruby Scripts/check-podspec-boundaries.rb \
   --root "$fixture_root" \
   >/dev/null
+
+printf '%s\n' 'func compilePublicAPI() {}' > "$fixture_root/SDK/PublicAPI.swift"
+valid_pod_testspec_json='{"name":"NearWire","testspecs":[{"name":"PublicAPI","test_type":"unit","source_files":["SDK/PublicAPI.swift"]}]}'
+printf '%s' "$valid_pod_testspec_json" | ruby Scripts/check-podspec-boundaries.rb \
+  --root "$fixture_root" \
+  >/dev/null
+
+invalid_pod_testspec_json='{"name":"NearWire","testspecs":[{"name":"ArbitraryTests","test_type":"unit","source_files":["SDK/PublicAPI.swift"]}]}'
+if printf '%s' "$invalid_pod_testspec_json" | ruby Scripts/check-podspec-boundaries.rb \
+  --root "$fixture_root" \
+  >/dev/null 2>&1; then
+  echo "Expected an unauthorized CocoaPods test specification to fail." >&2
+  exit 1
+fi
 
 root_dependency_violation='{"name":"NearWire","dependencies":{"ExternalKit":[]}}'
 if printf '%s' "$root_dependency_violation" | ruby Scripts/check-podspec-boundaries.rb \

@@ -1,6 +1,6 @@
 import XCTest
 
-@testable import NearWireCore
+@_spi(NearWireInternal) @testable import NearWireCore
 
 final class NearWireCoreModuleSmokeTests: XCTestCase {
   func testModuleIsAvailable() {

@@ -1,10 +1,10 @@
 import Foundation
 
 #if SWIFT_PACKAGE
-  import NearWireCore
+  @_spi(NearWireInternal) import NearWireCore
 #endif
 
-public struct EventQueueStatistics: Equatable, Sendable {
+@_spi(NearWireInternal) public struct EventQueueStatistics: Equatable, Sendable {
   public internal(set) var enqueued: UInt64 = 0
   public internal(set) var dequeued: UInt64 = 0
   public internal(set) var overflowDropped: UInt64 = 0
@@ -14,14 +14,14 @@ public struct EventQueueStatistics: Equatable, Sendable {
   public internal(set) var clearedSessionEnded: UInt64 = 0
 }
 
-public struct EventPriorityCounts: Equatable, Sendable {
+@_spi(NearWireInternal) public struct EventPriorityCounts: Equatable, Sendable {
   public let low: Int
   public let normal: Int
   public let high: Int
   public let critical: Int
 }
 
-public struct EventQueueSnapshot: Equatable, Sendable {
+@_spi(NearWireInternal) public struct EventQueueSnapshot: Equatable, Sendable {
   public let eventCount: Int
   public let accountedByteCount: Int
   public let priorityCounts: EventPriorityCounts
@@ -30,7 +30,7 @@ public struct EventQueueSnapshot: Equatable, Sendable {
   public let statistics: EventQueueStatistics
 }
 
-public struct EventEnqueueResult: Equatable, Sendable {
+@_spi(NearWireInternal) public struct EventEnqueueResult: Equatable, Sendable {
   public let eventID: EventID
   public let isBuffered: Bool
   public let coalescedEventID: EventID?
@@ -38,7 +38,7 @@ public struct EventEnqueueResult: Equatable, Sendable {
   public let expiredEventIDs: [EventID]
 }
 
-public struct EventDequeueResult<Value: Sendable>: Sendable {
+@_spi(NearWireInternal) public struct EventDequeueResult<Value: Sendable>: Sendable {
   public let events: [PendingEvent<Value>]
   public let accountedByteCount: Int
   public let expiredEventIDs: [EventID]
@@ -46,12 +46,32 @@ public struct EventDequeueResult<Value: Sendable>: Sendable {
 
 extension EventDequeueResult: Equatable where Value: Equatable {}
 
-public enum EventQueueClearReason: Sendable {
+@_spi(NearWireInternal) public enum EventOfferDecision: Equatable, Sendable {
+  case remove
+  case stop
+}
+
+@_spi(NearWireInternal) public enum EventOfferPreflightDecision: Equatable, Sendable {
+  case eligible
+  case removeWithoutAccounting
+  case stop
+}
+
+@_spi(NearWireInternal) public struct EventOfferResult<Value: Sendable>: Sendable {
+  public let removedEvents: [PendingEvent<Value>]
+  public let accountedByteCount: Int
+  public let expiredEventIDs: [EventID]
+  public let stoppedOnCandidate: Bool
+}
+
+extension EventOfferResult: Equatable where Value: Equatable {}
+
+@_spi(NearWireInternal) public enum EventQueueClearReason: Sendable {
   case ownerRequested
   case sessionEnded
 }
 
-public struct EventQueueClearResult: Equatable, Sendable {
+@_spi(NearWireInternal) public struct EventQueueClearResult: Equatable, Sendable {
   public let reason: EventQueueClearReason
   public let removedEventIDs: [EventID]
 }
@@ -118,7 +138,7 @@ private struct DeadlineHeapNode: Comparable, Sendable {
   }
 }
 
-public struct BoundedEventQueue<Value: Sendable>: Sendable {
+@_spi(NearWireInternal) public struct BoundedEventQueue<Value: Sendable>: Sendable {
   public let limits: EventQueueLimits
   public private(set) var statistics = EventQueueStatistics()
 
@@ -318,9 +338,14 @@ public struct BoundedEventQueue<Value: Sendable>: Sendable {
     var events: [PendingEvent<Value>] = []
     var bytes = 0
 
-    while events.count < maximumCount, let candidate = nextFairCandidate() {
+    while events.count < maximumCount {
+      let creditsBeforeSelection = credits
+      guard let candidate = nextFairCandidate() else { break }
       let candidateTotal = bytes + candidate.event.accountedByteCount
-      if candidateTotal > maximumBytes { break }
+      if candidateTotal > maximumBytes {
+        credits = creditsBeforeSelection
+        break
+      }
       popPriorityNode(candidate.event.priority)
       credits.consume(candidate.event.priority)
       _ = removeStoredEvent(ordinal: candidate.ordinal)
@@ -334,6 +359,82 @@ public struct BoundedEventQueue<Value: Sendable>: Sendable {
       events: events,
       accountedByteCount: bytes,
       expiredEventIDs: expiredIDs
+    )
+  }
+
+  /// Offers fair candidates synchronously and removes only locally discarded or accepted work.
+  ///
+  /// All throwing validation occurs before the first callback. Returning `.stop` leaves the
+  /// candidate, its insertion ordinal, and scheduler credits unchanged. A preflight removal does
+  /// not consume the transport byte budget.
+  public mutating func offer(
+    maximumCount: Int,
+    maximumBytes: Int,
+    nowOnQueueClockNanoseconds now: UInt64,
+    preflight: (PendingEvent<Value>) -> EventOfferPreflightDecision = { _ in .eligible },
+    decision: (PendingEvent<Value>) -> EventOfferDecision
+  ) throws -> EventOfferResult<Value> {
+    guard maximumCount > 0, maximumBytes > 0 else {
+      throw FlowControlError(
+        code: .invalidBatchConfiguration,
+        path: "offer",
+        message: "Offer count and byte limits must be positive."
+      )
+    }
+    try validateObservation(now)
+
+    recordObservation(now)
+    let expiredIDs = expireInPlace(now: now)
+    var removed: [PendingEvent<Value>] = []
+    var bytes = 0
+    var stoppedOnCandidate = false
+
+    while removed.count < maximumCount {
+      let creditsBeforeSelection = credits
+      guard let candidate = nextFairCandidate() else { break }
+      switch preflight(candidate.event) {
+      case .removeWithoutAccounting:
+        popPriorityNode(candidate.event.priority)
+        credits.consume(candidate.event.priority)
+        _ = removeStoredEvent(ordinal: candidate.ordinal)
+        removed.append(candidate.event)
+        continue
+      case .stop:
+        credits = creditsBeforeSelection
+        stoppedOnCandidate = true
+        break
+      case .eligible:
+        break
+      }
+      if stoppedOnCandidate { break }
+
+      let (candidateTotal, overflow) = bytes.addingReportingOverflow(
+        candidate.event.accountedByteCount
+      )
+      if overflow || candidateTotal > maximumBytes {
+        credits = creditsBeforeSelection
+        stoppedOnCandidate = true
+        break
+      }
+      guard decision(candidate.event) == .remove else {
+        credits = creditsBeforeSelection
+        stoppedOnCandidate = true
+        break
+      }
+      popPriorityNode(candidate.event.priority)
+      credits.consume(candidate.event.priority)
+      _ = removeStoredEvent(ordinal: candidate.ordinal)
+      removed.append(candidate.event)
+      bytes = candidateTotal
+    }
+
+    statistics.dequeued.saturatingAdd(UInt64(removed.count))
+    compactHeapsIfNeeded()
+    return EventOfferResult(
+      removedEvents: removed,
+      accountedByteCount: bytes,
+      expiredEventIDs: expiredIDs,
+      stoppedOnCandidate: stoppedOnCandidate
     )
   }
 

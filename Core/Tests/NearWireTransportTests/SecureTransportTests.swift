@@ -2,7 +2,7 @@ import Network
 import Security
 import XCTest
 
-@testable import NearWireTransport
+@_spi(NearWireInternal) @testable import NearWireTransport
 
 final class SecureTransportTests: XCTestCase {
   func testDefaultLimitsAndFixedTLSPlan() throws {

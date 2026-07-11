@@ -1,11 +1,11 @@
 import Foundation
 
-public enum WireErrorDisposition: String, Codable, Sendable {
+@_spi(NearWireInternal) public enum WireErrorDisposition: String, Codable, Sendable {
   case operationRejected
   case connectionTerminal
 }
 
-public struct WireProtocolError: Error, Equatable, Sendable {
+@_spi(NearWireInternal) public struct WireProtocolError: Error, Equatable, Sendable {
   public enum Code: String, Codable, Sendable {
     case acknowledgementEscalation
     case arithmeticOverflow

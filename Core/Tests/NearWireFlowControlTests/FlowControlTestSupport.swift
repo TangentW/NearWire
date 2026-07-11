@@ -1,8 +1,8 @@
 import Foundation
 import XCTest
 
-@testable import NearWireCore
-@testable import NearWireFlowControl
+@_spi(NearWireInternal) @testable import NearWireCore
+@_spi(NearWireInternal) @testable import NearWireFlowControl
 
 func makeTestEvent(
   _ number: Int,

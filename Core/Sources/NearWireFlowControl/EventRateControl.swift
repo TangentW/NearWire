@@ -1,6 +1,6 @@
 import Foundation
 
-public struct EventRateLimit: Codable, Equatable, Hashable, Sendable {
+@_spi(NearWireInternal) public struct EventRateLimit: Codable, Equatable, Hashable, Sendable {
   public static let minimumPositiveEventsPerSecond = 0.000_000_001
   public static let maximumEventsPerSecond = 100_000.0
 
@@ -34,7 +34,7 @@ public struct EventRateLimit: Codable, Equatable, Hashable, Sendable {
   }
 }
 
-public struct DirectionalEventRates: Equatable, Sendable {
+@_spi(NearWireInternal) public struct DirectionalEventRates: Equatable, Sendable {
   public let appUplink: EventRateLimit
   public let appDownlink: EventRateLimit
 
@@ -64,7 +64,7 @@ public struct DirectionalEventRates: Equatable, Sendable {
   }
 }
 
-public struct EventTokenBucket: Equatable, Sendable {
+@_spi(NearWireInternal) public struct EventTokenBucket: Equatable, Sendable {
   public static let defaultBurstDurationSeconds = 2.0
 
   public private(set) var rate: EventRateLimit

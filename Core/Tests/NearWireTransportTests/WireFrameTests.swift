@@ -1,7 +1,7 @@
 import Foundation
 import XCTest
 
-@testable import NearWireTransport
+@_spi(NearWireInternal) @testable import NearWireTransport
 
 final class WireFrameTests: XCTestCase {
   func testExactBigEndianFrameAndRoundTrip() throws {

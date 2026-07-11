@@ -3,7 +3,7 @@ import Foundation
 import Network
 import Security
 
-public struct ViewerTransportIdentity: @unchecked Sendable {
+@_spi(NearWireInternal) public struct ViewerTransportIdentity: @unchecked Sendable {
   fileprivate let protocolIdentity: sec_identity_t
 
   public init(identity: SecIdentity) throws {
@@ -90,7 +90,7 @@ enum SecureNetworkParameters {
   }
 }
 
-public enum ConnectionLocalViewerTrust {
+@_spi(NearWireInternal) public enum ConnectionLocalViewerTrust {
   public static func evaluate(_ trust: SecTrust) -> Bool {
     evaluate(trust, security: .live)
   }

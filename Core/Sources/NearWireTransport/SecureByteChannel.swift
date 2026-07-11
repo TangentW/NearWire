@@ -1,7 +1,7 @@
 import Foundation
 import Network
 
-public enum SecureByteChannelEvent: Sendable {
+@_spi(NearWireInternal) public enum SecureByteChannelEvent: Sendable {
   case stateChanged(SecureTransportState)
   case received(Data)
   case sendCompleted(byteCount: Int)
@@ -25,28 +25,22 @@ protocol SecureConnectionDriving: AnyObject, Sendable {
   func cancel()
 }
 
-public actor SecureByteChannel {
+@_spi(NearWireInternal) public actor SecureByteChannel {
   public typealias EventHandler = @Sendable (SecureByteChannelEvent) -> Void
 
   public private(set) var state: SecureTransportState = .setup
   public let limits: SecureTransportLimits
 
   var retainedSendPayloadBytes: Int {
-    pendingSends.reduce(0) { partialResult, item in
-      partialResult + (item?.data.count ?? 0)
-    } + (inFlight?.data.count ?? 0)
+    sendMailbox.retainedPayloadBytes
   }
 
   private let driver: any SecureConnectionDriving
   private let eventHandler: EventHandler
-  private let callbackIngress = SecureCallbackIngress()
+  private nonisolated let callbackIngress = SecureCallbackIngress()
+  private nonisolated let sendMailbox: SecureSendMailbox
   private var activeReceiveToken: UInt64?
   private var nextReceiveToken: UInt64 = 0
-  private var pendingSends: [PendingSend?] = []
-  private var pendingSendHead = 0
-  private var pendingSendBytes = 0
-  private var inFlight: PendingSend?
-  private var nextSendToken: UInt64 = 0
   private var generation: UInt64 = 0
   private var didCancelDriver = false
 
@@ -59,6 +53,7 @@ public actor SecureByteChannel {
     driver = NWConnectionDriver(connection: connection, queue: queue)
     self.limits = limits
     self.eventHandler = eventHandler
+    sendMailbox = SecureSendMailbox(limits: limits)
   }
 
   init(
@@ -69,6 +64,7 @@ public actor SecureByteChannel {
     self.driver = driver
     self.limits = limits
     self.eventHandler = eventHandler
+    sendMailbox = SecureSendMailbox(limits: limits)
   }
 
   public func start() throws {
@@ -98,38 +94,18 @@ public actor SecureByteChannel {
         message: "Channel accepts sends only while preparing or ready."
       )
     }
-    guard !data.isEmpty, data.count <= limits.maximumSingleSendBytes else {
-      throw SecureTransportError(
-        code: .backpressure,
-        path: "data",
-        message: "Send bytes are empty or exceed the single-send limit."
-      )
-    }
-    let pendingCount = pendingSends.count - pendingSendHead + (inFlight == nil ? 0 : 1)
-    guard pendingCount < limits.maximumPendingSendCount else {
-      throw SecureTransportError(
-        code: .backpressure,
-        path: "pendingSends",
-        message: "Pending send bounds reject this operation."
-      )
-    }
-    let newByteCount = try SecureSendAdmission.addedByteCount(
-      current: pendingSendBytes,
-      adding: data.count,
-      maximum: limits.maximumPendingSendBytes
-    )
-    guard nextSendToken != UInt64.max else {
-      throw SecureTransportError(
-        code: .arithmeticOverflow,
-        path: "sendToken",
-        message: "Send token space is exhausted."
-      )
-    }
-    let item = PendingSend(token: nextSendToken, data: data)
-    nextSendToken += 1
-    pendingSendBytes = newByteCount
-    pendingSends.append(item)
+    try sendMailbox.admit(data)
     beginNextSendIfPossible()
+  }
+
+  /// Synchronously admits bytes into the channel's bounded mailbox.
+  ///
+  /// Success means the channel owns the bytes. It does not mean the peer received them.
+  public nonisolated func admitSend(_ data: Data) throws {
+    try sendMailbox.admit(data)
+    callbackIngress.submit { [weak self] in
+      await self?.beginNextSendIfPossible()
+    }
   }
 
   public func cancel() {
@@ -247,19 +223,7 @@ public actor SecureByteChannel {
   }
 
   private func beginNextSendIfPossible() {
-    guard state == .ready, inFlight == nil, pendingSendHead < pendingSends.count else { return }
-    guard let item = pendingSends[pendingSendHead] else {
-      fail(
-        code: .invalidState,
-        path: "pendingSends",
-        message: "Pending send storage is internally inconsistent."
-      )
-      return
-    }
-    pendingSends[pendingSendHead] = nil
-    pendingSendHead += 1
-    compactPendingSendsIfNeeded()
-    inFlight = item
+    guard state == .ready, let item = sendMailbox.takeNextIfAvailable() else { return }
     let callbackGeneration = generation
     driver.send(item.data) { [weak self] failed in
       guard let self else { return }
@@ -281,7 +245,7 @@ public actor SecureByteChannel {
     generation callbackGeneration: UInt64
   ) {
     guard callbackGeneration == generation, !isTerminal,
-      inFlight?.token == token
+      sendMailbox.inFlightToken == token
     else {
       return
     }
@@ -289,28 +253,22 @@ public actor SecureByteChannel {
       fail(code: .driverFailure, path: "send", message: "Network send failed.")
       return
     }
-    inFlight = nil
-    pendingSendBytes -= byteCount
-    clearConsumedSendStorageIfIdle()
+    guard sendMailbox.complete(token: token, byteCount: byteCount) else {
+      fail(
+        code: .invalidState,
+        path: "pendingSends",
+        message: "Send completion did not match the bounded mailbox."
+      )
+      return
+    }
     eventHandler(.sendCompleted(byteCount: byteCount))
     beginNextSendIfPossible()
   }
 
   private func transition(to newState: SecureTransportState) {
     state = newState
+    sendMailbox.setAccepting(newState == .preparing || newState == .ready)
     eventHandler(.stateChanged(newState))
-  }
-
-  private func compactPendingSendsIfNeeded() {
-    guard pendingSendHead >= 256, pendingSendHead * 2 >= pendingSends.count else { return }
-    pendingSends.removeFirst(pendingSendHead)
-    pendingSendHead = 0
-  }
-
-  private func clearConsumedSendStorageIfIdle() {
-    guard pendingSendHead == pendingSends.count else { return }
-    pendingSends.removeAll(keepingCapacity: false)
-    pendingSendHead = 0
   }
 
   private func fail(code: SecureTransportError.Code, path: String, message: String) {
@@ -329,10 +287,8 @@ public actor SecureByteChannel {
     guard !isTerminal else { return }
     generation += 1
     activeReceiveToken = nil
-    pendingSends.removeAll(keepingCapacity: false)
-    pendingSendHead = 0
-    inFlight = nil
-    pendingSendBytes = 0
+    sendMailbox.setAccepting(false)
+    sendMailbox.clear()
     transition(to: terminalState)
     if !didCancelDriver {
       didCancelDriver = true
@@ -341,13 +297,133 @@ public actor SecureByteChannel {
     eventHandler(.terminated(error))
   }
 
-  private struct PendingSend: Sendable {
+}
+
+private final class SecureSendMailbox: @unchecked Sendable {
+  struct Item: Sendable {
     let token: UInt64
     let data: Data
   }
+
+  private let lock = NSLock()
+  private let limits: SecureTransportLimits
+  private var accepting = false
+  private var pending: [Item?] = []
+  private var head = 0
+  private var inFlight: Item?
+  private var retainedBytes = 0
+  private var nextToken: UInt64 = 0
+
+  init(limits: SecureTransportLimits) {
+    self.limits = limits
+  }
+
+  var retainedPayloadBytes: Int {
+    lock.lock()
+    defer { lock.unlock() }
+    return retainedBytes
+  }
+
+  var inFlightToken: UInt64? {
+    lock.lock()
+    defer { lock.unlock() }
+    return inFlight?.token
+  }
+
+  func setAccepting(_ value: Bool) {
+    lock.lock()
+    accepting = value
+    lock.unlock()
+  }
+
+  func admit(_ data: Data) throws {
+    lock.lock()
+    defer { lock.unlock() }
+    guard accepting else {
+      throw SecureTransportError(
+        code: .invalidState,
+        path: "state",
+        message: "Channel accepts sends only while preparing or ready."
+      )
+    }
+    guard !data.isEmpty, data.count <= limits.maximumSingleSendBytes else {
+      throw SecureTransportError(
+        code: .backpressure,
+        path: "data",
+        message: "Send bytes are empty or exceed the single-send limit."
+      )
+    }
+    let pendingCount = pending.count - head + (inFlight == nil ? 0 : 1)
+    guard pendingCount < limits.maximumPendingSendCount else {
+      throw SecureTransportError(
+        code: .backpressure,
+        path: "pendingSends",
+        message: "Pending send bounds reject this operation."
+      )
+    }
+    let newByteCount = try SecureSendAdmission.addedByteCount(
+      current: retainedBytes,
+      adding: data.count,
+      maximum: limits.maximumPendingSendBytes
+    )
+    guard nextToken != UInt64.max else {
+      throw SecureTransportError(
+        code: .arithmeticOverflow,
+        path: "sendToken",
+        message: "Send token space is exhausted."
+      )
+    }
+    pending.append(Item(token: nextToken, data: data))
+    nextToken += 1
+    retainedBytes = newByteCount
+  }
+
+  func takeNextIfAvailable() -> Item? {
+    lock.lock()
+    defer { lock.unlock() }
+    guard inFlight == nil, head < pending.count, let item = pending[head] else { return nil }
+    pending[head] = nil
+    head += 1
+    inFlight = item
+    compactIfNeeded()
+    return item
+  }
+
+  func complete(token: UInt64, byteCount: Int) -> Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    guard let item = inFlight, item.token == token, item.data.count == byteCount else {
+      return false
+    }
+    inFlight = nil
+    retainedBytes -= byteCount
+    clearConsumedStorageIfIdle()
+    return true
+  }
+
+  func clear() {
+    lock.lock()
+    pending.removeAll(keepingCapacity: false)
+    head = 0
+    inFlight = nil
+    retainedBytes = 0
+    lock.unlock()
+  }
+
+  private func compactIfNeeded() {
+    guard head >= 256, head * 2 >= pending.count else { return }
+    pending.removeFirst(head)
+    head = 0
+  }
+
+  private func clearConsumedStorageIfIdle() {
+    guard head == pending.count else { return }
+    pending.removeAll(keepingCapacity: false)
+    head = 0
+  }
 }
 
-public enum SecureAppTransport {
+@_spi(NearWireInternal) public enum SecureAppTransport {
   public static func makeChannel(
     endpoint: NWEndpoint,
     connectionQueue: DispatchQueue,
@@ -369,14 +445,14 @@ public enum SecureAppTransport {
   }
 }
 
-public enum SecureViewerListenerEvent: Sendable {
+@_spi(NearWireInternal) public enum SecureViewerListenerEvent: Sendable {
   case ready(port: UInt16)
   case incoming(SecureViewerIncomingConnection)
   case failed(SecureTransportError)
   case cancelled
 }
 
-public enum SecureViewerTransport {
+@_spi(NearWireInternal) public enum SecureViewerTransport {
   public static func makeListener(
     identity: ViewerTransportIdentity,
     port: NWEndpoint.Port? = nil,
@@ -401,7 +477,7 @@ public enum SecureViewerTransport {
   }
 }
 
-public final class SecureViewerListener: @unchecked Sendable {
+@_spi(NearWireInternal) public final class SecureViewerListener: @unchecked Sendable {
   public typealias EventHandler = @Sendable (SecureViewerListenerEvent) -> Void
 
   private let listener: NWListener
@@ -547,7 +623,7 @@ public final class SecureViewerListener: @unchecked Sendable {
   }
 }
 
-public final class SecureViewerIncomingConnection: @unchecked Sendable {
+@_spi(NearWireInternal) public final class SecureViewerIncomingConnection: @unchecked Sendable {
   private let connection: NWConnection
   private let limits: SecureTransportLimits
   private let admissionGate: SecureViewerAdmissionGate

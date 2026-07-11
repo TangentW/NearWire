@@ -1,5 +1,5 @@
 import Dispatch
-import NearWireTransport
+@_spi(NearWireInternal) import NearWireTransport
 import Network
 
 let plaintextConnection = NWConnection(

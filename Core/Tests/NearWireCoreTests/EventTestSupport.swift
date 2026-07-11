@@ -1,7 +1,7 @@
 import Foundation
 import XCTest
 
-@testable import NearWireCore
+@_spi(NearWireInternal) @testable import NearWireCore
 
 func assertEventError(
   _ expectedCode: EventModelError.Code,

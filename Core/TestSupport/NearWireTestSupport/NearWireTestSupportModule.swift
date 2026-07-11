@@ -1,7 +1,7 @@
 #if SWIFT_PACKAGE
-  import NearWireCore
-  import NearWireFlowControl
-  import NearWireTransport
+  @_spi(NearWireInternal) import NearWireCore
+  @_spi(NearWireInternal) import NearWireFlowControl
+  @_spi(NearWireInternal) import NearWireTransport
 #endif
 
 enum NearWireTestSupportModule {

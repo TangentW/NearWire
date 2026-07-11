@@ -1,10 +1,10 @@
 import Foundation
 
 #if SWIFT_PACKAGE
-  import NearWireCore
+  @_spi(NearWireInternal) import NearWireCore
 #endif
 
-public struct WireHello: Equatable, Sendable, WireMessagePayload {
+@_spi(NearWireInternal) public struct WireHello: Equatable, Sendable, WireMessagePayload {
   public static let messageType = WireMessageType.hello
   public static let lane = WireLane.control
 
@@ -215,6 +215,7 @@ public struct WireHello: Equatable, Sendable, WireMessagePayload {
   }
 }
 
+@_spi(NearWireInternal)
 public struct WireHelloAcknowledgement: Equatable, Sendable, WireMessagePayload {
   public static let messageType = WireMessageType.helloAcknowledged
   public static let lane = WireLane.control
@@ -337,7 +338,7 @@ public struct WireHelloAcknowledgement: Equatable, Sendable, WireMessagePayload 
   }
 }
 
-public struct WireFlowPolicy: Equatable, Sendable {
+@_spi(NearWireInternal) public struct WireFlowPolicy: Equatable, Sendable {
   public let appUplinkEventsPerSecond: Double
   public let appDownlinkEventsPerSecond: Double
 
@@ -383,7 +384,7 @@ public struct WireFlowPolicy: Equatable, Sendable {
   }
 }
 
-public struct WireFlowPolicyOffer: Equatable, Sendable, WireMessagePayload {
+@_spi(NearWireInternal) public struct WireFlowPolicyOffer: Equatable, Sendable, WireMessagePayload {
   public static let messageType = WireMessageType.flowPolicyOffer
   public static let lane = WireLane.control
   public let policy: WireFlowPolicy
@@ -395,6 +396,7 @@ public struct WireFlowPolicyOffer: Equatable, Sendable, WireMessagePayload {
   public func bodyJSON(limits: WireProtocolLimits) throws -> JSONValue { policy.bodyJSON() }
 }
 
+@_spi(NearWireInternal)
 public struct WireFlowPolicyAccepted: Equatable, Sendable, WireMessagePayload {
   public static let messageType = WireMessageType.flowPolicyAccepted
   public static let lane = WireLane.control
@@ -407,7 +409,7 @@ public struct WireFlowPolicyAccepted: Equatable, Sendable, WireMessagePayload {
   public func bodyJSON(limits: WireProtocolLimits) throws -> JSONValue { policy.bodyJSON() }
 }
 
-public struct WireNoncePayload: Equatable, Sendable {
+@_spi(NearWireInternal) public struct WireNoncePayload: Equatable, Sendable {
   public let nonce: UInt64
   fileprivate init(nonce: UInt64) { self.nonce = nonce }
   fileprivate init(body: JSONValue) throws {
@@ -420,7 +422,7 @@ public struct WireNoncePayload: Equatable, Sendable {
   fileprivate func bodyJSON() -> JSONValue { .object(["nonce": nonce.wireJSONValue]) }
 }
 
-public struct WirePing: Equatable, Sendable, WireMessagePayload {
+@_spi(NearWireInternal) public struct WirePing: Equatable, Sendable, WireMessagePayload {
   public static let messageType = WireMessageType.ping
   public static let lane = WireLane.control
   public let nonce: UInt64
@@ -433,7 +435,7 @@ public struct WirePing: Equatable, Sendable, WireMessagePayload {
   }
 }
 
-public struct WirePong: Equatable, Sendable, WireMessagePayload {
+@_spi(NearWireInternal) public struct WirePong: Equatable, Sendable, WireMessagePayload {
   public static let messageType = WireMessageType.pong
   public static let lane = WireLane.control
   public let nonce: UInt64
@@ -446,6 +448,7 @@ public struct WirePong: Equatable, Sendable, WireMessagePayload {
   }
 }
 
+@_spi(NearWireInternal)
 public struct WireConnectionRejected: Equatable, Sendable, WireMessagePayload {
   public static let messageType = WireMessageType.connectionRejected
   public static let lane = WireLane.control
@@ -486,7 +489,7 @@ public struct WireConnectionRejected: Equatable, Sendable, WireMessagePayload {
   }
 }
 
-public struct WireDisconnect: Equatable, Sendable, WireMessagePayload {
+@_spi(NearWireInternal) public struct WireDisconnect: Equatable, Sendable, WireMessagePayload {
   public static let messageType = WireMessageType.disconnect
   public static let lane = WireLane.control
   public let code: String
@@ -526,7 +529,7 @@ public struct WireDisconnect: Equatable, Sendable, WireMessagePayload {
   }
 }
 
-public struct WireErrorPayload: Equatable, Sendable, WireMessagePayload {
+@_spi(NearWireInternal) public struct WireErrorPayload: Equatable, Sendable, WireMessagePayload {
   public static let messageType = WireMessageType.error
   public static let lane = WireLane.control
   public let code: String

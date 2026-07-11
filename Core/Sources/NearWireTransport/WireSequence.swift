@@ -1,10 +1,10 @@
 import Foundation
 
 #if SWIFT_PACKAGE
-  import NearWireCore
+  @_spi(NearWireInternal) import NearWireCore
 #endif
 
-public struct WireSequenceCounter: Equatable, Sendable {
+@_spi(NearWireInternal) public struct WireSequenceCounter: Equatable, Sendable {
   public let sessionEpoch: SessionEpoch
   public let direction: EventDirection
   public private(set) var nextRawValue: UInt64?
@@ -41,7 +41,7 @@ public struct WireSequenceCounter: Equatable, Sendable {
   }
 }
 
-public struct WireSequenceValidator: Equatable, Sendable {
+@_spi(NearWireInternal) public struct WireSequenceValidator: Equatable, Sendable {
   public let sessionEpoch: SessionEpoch
   public let direction: EventDirection
   public private(set) var nextExpectedRawValue: UInt64?

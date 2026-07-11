@@ -1,6 +1,6 @@
 import Foundation
 
-public struct EventValidationLimits: Equatable, Sendable {
+@_spi(NearWireInternal) public struct EventValidationLimits: Equatable, Sendable {
   public static let `default` = EventValidationLimits(
     unchecked: (
       maximumTypeBytes: 128,

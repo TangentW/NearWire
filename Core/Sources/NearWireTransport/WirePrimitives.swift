@@ -1,9 +1,10 @@
 import Foundation
 
 #if SWIFT_PACKAGE
-  import NearWireCore
+  @_spi(NearWireInternal) import NearWireCore
 #endif
 
+@_spi(NearWireInternal)
 public struct WireProtocolVersion: Codable, Equatable, Hashable, Comparable, Sendable {
   public static let v1 = WireProtocolVersion(unchecked: 1)
   public static let current = v1
@@ -41,7 +42,7 @@ public struct WireProtocolVersion: Codable, Equatable, Hashable, Comparable, Sen
   }
 }
 
-public struct WireVersionRange: Equatable, Hashable, Sendable {
+@_spi(NearWireInternal) public struct WireVersionRange: Equatable, Hashable, Sendable {
   public let minimum: WireProtocolVersion
   public let maximum: WireProtocolVersion
 
@@ -65,12 +66,12 @@ public struct WireVersionRange: Equatable, Hashable, Sendable {
   }
 }
 
-public enum WireLane: UInt8, Codable, Hashable, Sendable {
+@_spi(NearWireInternal) public enum WireLane: UInt8, Codable, Hashable, Sendable {
   case control = 0x01
   case event = 0x02
 }
 
-public struct WireMessageType: Codable, Equatable, Hashable, Sendable {
+@_spi(NearWireInternal) public struct WireMessageType: Codable, Equatable, Hashable, Sendable {
   public static let hello = WireMessageType(unchecked: "hello")
   public static let helloAcknowledged = WireMessageType(unchecked: "hello.acknowledged")
   public static let connectionRejected = WireMessageType(unchecked: "connection.rejected")
@@ -139,6 +140,7 @@ public struct WireMessageType: Codable, Equatable, Hashable, Sendable {
   }
 }
 
+@_spi(NearWireInternal)
 public struct WireCodecIdentifier: Codable, Equatable, Hashable, Comparable, Sendable {
   public static let json = WireCodecIdentifier(unchecked: "json")
 
@@ -171,6 +173,7 @@ public struct WireCodecIdentifier: Codable, Equatable, Hashable, Comparable, Sen
   }
 }
 
+@_spi(NearWireInternal)
 public struct WireCapability: Codable, Equatable, Hashable, Comparable, Sendable {
   public static let bidirectionalEvents = WireCapability(unchecked: "bidirectional-events")
   public static let normalQueue = WireCapability(unchecked: "normal-queue")
@@ -208,6 +211,7 @@ public struct WireCapability: Codable, Equatable, Hashable, Comparable, Sendable
   }
 }
 
+@_spi(NearWireInternal)
 public enum WireSendPolicy: String, Codable, CaseIterable, Comparable, Sendable {
   case normal
   case keepLatest = "keep-latest"
@@ -215,7 +219,7 @@ public enum WireSendPolicy: String, Codable, CaseIterable, Comparable, Sendable 
   public static func < (lhs: Self, rhs: Self) -> Bool { lhs.rawValue < rhs.rawValue }
 }
 
-public struct WireProductVersion: Codable, Equatable, Hashable, Sendable {
+@_spi(NearWireInternal) public struct WireProductVersion: Codable, Equatable, Hashable, Sendable {
   public let rawValue: String
 
   public init(_ rawValue: String) throws {
@@ -238,7 +242,7 @@ public struct WireProductVersion: Codable, Equatable, Hashable, Sendable {
   }
 }
 
-public struct WireFrameLimits: Equatable, Sendable {
+@_spi(NearWireInternal) public struct WireFrameLimits: Equatable, Sendable {
   public static let encodedFrameOverheadBytes = 5
   public static let hardMaximumPayloadBytes = 16 * 1_024 * 1_024
   public static let hardMaximumEncodedFrameBytes =
@@ -287,7 +291,7 @@ public struct WireFrameLimits: Equatable, Sendable {
   }
 }
 
-public struct WireProtocolLimits: Equatable, Sendable {
+@_spi(NearWireInternal) public struct WireProtocolLimits: Equatable, Sendable {
   public static let `default` = WireProtocolLimits(
     uncheckedFrame: .default,
     maximumEventBytes: 256 * 1_024,

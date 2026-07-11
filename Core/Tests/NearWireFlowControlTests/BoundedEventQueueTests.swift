@@ -1,7 +1,7 @@
 import XCTest
 
-@testable import NearWireCore
-@testable import NearWireFlowControl
+@_spi(NearWireInternal) @testable import NearWireCore
+@_spi(NearWireInternal) @testable import NearWireFlowControl
 
 final class BoundedEventQueueTests: XCTestCase {
   func testDefaultAndInvalidConfiguration() throws {
@@ -405,6 +405,234 @@ final class BoundedEventQueueTests: XCTestCase {
         .events.map(\.id),
       [second.id]
     )
+  }
+
+  func testOfferStopPreservesFIFOAndCandidateIdentity() throws {
+    var queue = BoundedEventQueue<String>()
+    let events = try (1...3).map { try makeTestEvent($0) }
+    for event in events {
+      _ = try queue.enqueue(event, nowOnQueueClockNanoseconds: 0)
+    }
+
+    var offered: [EventID] = []
+    let stopped = try queue.offer(
+      maximumCount: 3,
+      maximumBytes: 3,
+      nowOnQueueClockNanoseconds: 0
+    ) { event in
+      offered.append(event.id)
+      return .stop
+    }
+    let accepted = try queue.offer(
+      maximumCount: 3,
+      maximumBytes: 3,
+      nowOnQueueClockNanoseconds: 0
+    ) { _ in .remove }
+
+    XCTAssertEqual(offered, [events[0].id])
+    XCTAssertTrue(stopped.removedEvents.isEmpty)
+    XCTAssertTrue(stopped.stoppedOnCandidate)
+    XCTAssertEqual(accepted.removedEvents.map(\.id), events.map(\.id))
+  }
+
+  func testOfferRemovesAcceptedPrefixWithoutReorderingRejectedSuffix() throws {
+    var queue = BoundedEventQueue<String>()
+    let events = try (1...3).map { try makeTestEvent($0) }
+    for event in events {
+      _ = try queue.enqueue(event, nowOnQueueClockNanoseconds: 0)
+    }
+
+    let firstPass = try queue.offer(
+      maximumCount: 3,
+      maximumBytes: 3,
+      nowOnQueueClockNanoseconds: 0
+    ) { event in
+      event.id == events[0].id ? .remove : .stop
+    }
+    let secondPass = try queue.offer(
+      maximumCount: 3,
+      maximumBytes: 3,
+      nowOnQueueClockNanoseconds: 0
+    ) { _ in .remove }
+
+    XCTAssertEqual(firstPass.removedEvents.map(\.id), [events[0].id])
+    XCTAssertEqual(secondPass.removedEvents.map(\.id), [events[1].id, events[2].id])
+    XCTAssertEqual(queue.statistics.dequeued, 3)
+  }
+
+  func testOfferStopDoesNotConsumeWeightedSchedulerCredit() throws {
+    var stoppedQueue = BoundedEventQueue<String>()
+    var controlQueue = BoundedEventQueue<String>()
+    let priorities: [EventPriority] = [
+      .critical, .high, .normal, .low, .critical, .high, .normal, .critical,
+    ]
+    for (offset, priority) in priorities.enumerated() {
+      let event = try makeTestEvent(offset + 1, priority: priority)
+      _ = try stoppedQueue.enqueue(event, nowOnQueueClockNanoseconds: 0)
+      _ = try controlQueue.enqueue(event, nowOnQueueClockNanoseconds: 0)
+    }
+
+    _ = try stoppedQueue.offer(
+      maximumCount: 1,
+      maximumBytes: 1,
+      nowOnQueueClockNanoseconds: 0
+    ) { _ in .stop }
+    let afterStop = try stoppedQueue.dequeue(
+      maximumCount: priorities.count,
+      maximumBytes: priorities.count,
+      nowOnQueueClockNanoseconds: 0
+    )
+    let control = try controlQueue.dequeue(
+      maximumCount: priorities.count,
+      maximumBytes: priorities.count,
+      nowOnQueueClockNanoseconds: 0
+    )
+
+    XCTAssertEqual(afterStop.events.map(\.id), control.events.map(\.id))
+  }
+
+  func testOfferStopRestoresCreditsWhenSelectionWouldResetWeightedCycle() throws {
+    var stoppedQueue = BoundedEventQueue<String>()
+    var controlQueue = BoundedEventQueue<String>()
+    for number in 1...9 {
+      let event = try makeTestEvent(number, priority: .critical)
+      _ = try stoppedQueue.enqueue(event, nowOnQueueClockNanoseconds: 0)
+      _ = try controlQueue.enqueue(event, nowOnQueueClockNanoseconds: 0)
+    }
+    _ = try stoppedQueue.dequeue(
+      maximumCount: 8,
+      maximumBytes: 8,
+      nowOnQueueClockNanoseconds: 0
+    )
+    _ = try controlQueue.dequeue(
+      maximumCount: 8,
+      maximumBytes: 8,
+      nowOnQueueClockNanoseconds: 0
+    )
+
+    _ = try stoppedQueue.offer(
+      maximumCount: 1,
+      maximumBytes: 1,
+      nowOnQueueClockNanoseconds: 0
+    ) { _ in .stop }
+    let high = try makeTestEvent(10, priority: .high)
+    _ = try stoppedQueue.enqueue(high, nowOnQueueClockNanoseconds: 0)
+    _ = try controlQueue.enqueue(high, nowOnQueueClockNanoseconds: 0)
+
+    let afterStop = try stoppedQueue.dequeue(
+      maximumCount: 1,
+      maximumBytes: 1,
+      nowOnQueueClockNanoseconds: 0
+    )
+    let control = try controlQueue.dequeue(
+      maximumCount: 1,
+      maximumBytes: 1,
+      nowOnQueueClockNanoseconds: 0
+    )
+
+    XCTAssertEqual(afterStop.events.map(\.id), [high.id])
+    XCTAssertEqual(afterStop.events.map(\.id), control.events.map(\.id))
+  }
+
+  func testByteBoundRestoresCreditsWhenSelectionWouldResetWeightedCycle() throws {
+    var stoppedQueue = BoundedEventQueue<String>()
+    var controlQueue = BoundedEventQueue<String>()
+    for number in 1...9 {
+      let bytes = number == 9 ? 2 : 1
+      let event = try makeTestEvent(number, priority: .critical, bytes: bytes)
+      _ = try stoppedQueue.enqueue(event, nowOnQueueClockNanoseconds: 0)
+      _ = try controlQueue.enqueue(event, nowOnQueueClockNanoseconds: 0)
+    }
+    _ = try stoppedQueue.dequeue(
+      maximumCount: 8,
+      maximumBytes: 8,
+      nowOnQueueClockNanoseconds: 0
+    )
+    _ = try controlQueue.dequeue(
+      maximumCount: 8,
+      maximumBytes: 8,
+      nowOnQueueClockNanoseconds: 0
+    )
+
+    let stopped = try stoppedQueue.dequeue(
+      maximumCount: 1,
+      maximumBytes: 1,
+      nowOnQueueClockNanoseconds: 0
+    )
+    let high = try makeTestEvent(10, priority: .high)
+    _ = try stoppedQueue.enqueue(high, nowOnQueueClockNanoseconds: 0)
+    _ = try controlQueue.enqueue(high, nowOnQueueClockNanoseconds: 0)
+    let afterStop = try stoppedQueue.dequeue(
+      maximumCount: 1,
+      maximumBytes: 1,
+      nowOnQueueClockNanoseconds: 0
+    )
+    let control = try controlQueue.dequeue(
+      maximumCount: 1,
+      maximumBytes: 1,
+      nowOnQueueClockNanoseconds: 0
+    )
+
+    XCTAssertTrue(stopped.events.isEmpty)
+    XCTAssertEqual(afterStop.events.map(\.id), [high.id])
+    XCTAssertEqual(afterStop.events.map(\.id), control.events.map(\.id))
+  }
+
+  func testOfferValidationFailsBeforeCallingDecision() throws {
+    var queue = BoundedEventQueue<String>()
+    _ = try queue.enqueue(makeTestEvent(1), nowOnQueueClockNanoseconds: 10)
+    var decisionCount = 0
+
+    assertFlowError(.invalidBatchConfiguration) {
+      _ = try queue.offer(
+        maximumCount: 0,
+        maximumBytes: 1,
+        nowOnQueueClockNanoseconds: 10
+      ) { _ in
+        decisionCount += 1
+        return .remove
+      }
+    }
+    assertFlowError(.invalidClock) {
+      _ = try queue.offer(
+        maximumCount: 1,
+        maximumBytes: 1,
+        nowOnQueueClockNanoseconds: 9
+      ) { _ in
+        decisionCount += 1
+        return .remove
+      }
+    }
+
+    XCTAssertEqual(decisionCount, 0)
+    XCTAssertEqual(queue.eventCount, 1)
+  }
+
+  func testOfferPreflightCanRemoveOversizedLocalWorkWithoutChargingBatchBytes() throws {
+    var queue = BoundedEventQueue<String>()
+    let stale = try makeTestEvent(1, bytes: 100)
+    let eligible = try makeTestEvent(2, bytes: 1)
+    _ = try queue.enqueue(stale, nowOnQueueClockNanoseconds: 0)
+    _ = try queue.enqueue(eligible, nowOnQueueClockNanoseconds: 0)
+
+    var admitted: [EventID] = []
+    let result = try queue.offer(
+      maximumCount: 2,
+      maximumBytes: 1,
+      nowOnQueueClockNanoseconds: 0,
+      preflight: { event in
+        event.id == stale.id ? .removeWithoutAccounting : .eligible
+      },
+      decision: { event in
+        admitted.append(event.id)
+        return .remove
+      }
+    )
+
+    XCTAssertEqual(result.removedEvents.map(\.id), [stale.id, eligible.id])
+    XCTAssertEqual(result.accountedByteCount, 1)
+    XCTAssertEqual(admitted, [eligible.id])
+    XCTAssertEqual(queue.eventCount, 0)
   }
 
   func testKeepLatestPromotionAndDemotionPreserveOrdinalWithinNewLane() throws {

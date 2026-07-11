@@ -1,5 +1,5 @@
 import Dispatch
-import NearWireTransport
+@_spi(NearWireInternal) import NearWireTransport
 
 let plaintextParameters = SecureNetworkParameters.appClient(
   verificationQueue: .main

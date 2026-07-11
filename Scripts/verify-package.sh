@@ -52,7 +52,8 @@ swift format lint --recursive \
   Scripts/Fixtures/ForbiddenRawSecureChannel.swift \
   Scripts/Fixtures/ForbiddenSameModuleRawSecureChannel.swift \
   Scripts/Fixtures/WirePublicAPI.swift \
-  Scripts/Fixtures/ForbiddenWirePayload.swift
+  Scripts/Fixtures/ForbiddenWirePayload.swift \
+  Scripts/Fixtures/ForbiddenSDKImplementationType.swift
 
 xcode_version="$(xcodebuild -version)"
 xcode_major="$(awk '/Xcode/ { split($2, parts, "."); print parts[1]; exit }' <<< "$xcode_version")"
@@ -131,6 +132,44 @@ swift build \
   --sdk "$ios_sdk" \
   "${strict_concurrency_options[@]}"
 
+ios_module_path="$ROOT/.build/ios16/arm64-apple-ios/debug/Modules"
+if [[ ! -d "$ios_module_path" ]]; then
+  echo "iOS SDK module output is unavailable for consumer API checks." >&2
+  exit 1
+fi
+
+for fixture in SDK/Tests/PublicAPIConsumer/*.swift; do
+  xcrun swiftc \
+    -typecheck \
+    -swift-version 5 \
+    -strict-concurrency=complete \
+    -warnings-as-errors \
+    -target arm64-apple-ios16.0 \
+    -sdk "$ios_sdk" \
+    -I "$ios_module_path" \
+    "$fixture"
+done
+
+forbidden_sdk_spm="$package_harness/forbidden-sdk-spm.log"
+if xcrun swiftc \
+  -typecheck \
+  -swift-version 5 \
+  -target arm64-apple-ios16.0 \
+  -sdk "$ios_sdk" \
+  -I "$ios_module_path" \
+  Scripts/Fixtures/ForbiddenSDKImplementationType.swift \
+  >"$forbidden_sdk_spm" 2>&1; then
+  echo "Swift Package consumer unexpectedly accessed an implementation-only SDK type." >&2
+  exit 1
+fi
+if ! grep -Fq "cannot find 'JSONValue' in scope" "$forbidden_sdk_spm"; then
+  echo "Swift Package implementation-type boundary failed for an unexpected reason." >&2
+  cat "$forbidden_sdk_spm" >&2
+  exit 1
+fi
+
+echo "iOS Swift Package SDK consumer API passed."
+
 macos_sdk="$(xcrun --sdk macosx --show-sdk-path)"
 core_build_targets=()
 while IFS= read -r target; do
@@ -160,11 +199,138 @@ for target in "${core_build_targets[@]}"; do
     "${strict_concurrency_options[@]}"
 done
 
+swift build \
+  "${swift_cache_options[@]}" \
+  --disable-sandbox \
+  --scratch-path "$ROOT/.build/macos13" \
+  --triple arm64-apple-macosx13.0 \
+  --sdk "$macos_sdk" \
+  --target NearWire \
+  "${strict_concurrency_options[@]}"
+
 macos_module_path="$ROOT/.build/macos13/arm64-apple-macosx/debug/Modules"
 if [[ ! -d "$macos_module_path" ]]; then
   echo "macOS Core module output is unavailable for public API boundary checks." >&2
   exit 1
 fi
+
+xcrun swiftc \
+  -typecheck \
+  -swift-version 5 \
+  -strict-concurrency=complete \
+  -warnings-as-errors \
+  -target arm64-apple-macosx13.0 \
+  -sdk "$macos_sdk" \
+  -I "$macos_module_path" \
+  SDK/Tests/PublicAPIConsumer/NearWirePublicAPIConsumer.swift
+
+echo "Swift Package SDK consumer API passed."
+
+sdk_api_json="$package_harness/nearwire-sdk-api.json"
+xcrun swift-api-digester \
+  -dump-sdk \
+  -module NearWire \
+  -I "$ios_module_path" \
+  -target arm64-apple-ios16.0 \
+  -sdk "$ios_sdk" \
+  -o "$sdk_api_json"
+
+ruby -rjson -e '
+  document = JSON.parse(File.read(ARGV.fetch(0)))
+  root = document.fetch("ABIRoot")
+  root["children"] = root.fetch("children", []).reject { |child| child["kind"] == "Import" }
+  public_api = JSON.generate(root)
+  forbidden = %w[
+    NearWireCore NearWireFlowControl NearWireTransport JSONValue EventDraft
+    EventEnvelope BoundedEventQueue SecureByteChannel NWConnection NWListener
+    NWParameters SecIdentity
+  ]
+  violations = forbidden.select { |name| public_api.include?(name) }
+  abort "Supported SDK API exposes implementation-only types: #{violations.join(", ")}" unless violations.empty?
+' "$sdk_api_json"
+
+echo "SDK implementation-type API boundary passed."
+
+cocoapods_module_dir="$package_harness/CocoaPodsModule"
+mkdir -p "$cocoapods_module_dir"
+cocoapods_sources=()
+while IFS= read -r source; do
+  cocoapods_sources+=("$source")
+done < <(find Core/Sources SDK/Sources/NearWire -type f -name '*.swift' -print | sort)
+
+xcrun swiftc \
+  -parse-as-library \
+  -emit-module \
+  -module-name NearWire \
+  -emit-module-path "$cocoapods_module_dir/NearWire.swiftmodule" \
+  -swift-version 5 \
+  -strict-concurrency=complete \
+  -warnings-as-errors \
+  -target arm64-apple-ios16.0 \
+  -sdk "$ios_sdk" \
+  "${cocoapods_sources[@]}"
+
+for fixture in SDK/Tests/PublicAPIConsumer/*.swift; do
+  xcrun swiftc \
+    -typecheck \
+    -swift-version 5 \
+    -strict-concurrency=complete \
+    -warnings-as-errors \
+    -target arm64-apple-ios16.0 \
+    -sdk "$ios_sdk" \
+    -I "$cocoapods_module_dir" \
+    "$fixture"
+done
+
+forbidden_sdk_pod="$package_harness/forbidden-sdk-pod.log"
+if xcrun swiftc \
+  -typecheck \
+  -swift-version 5 \
+  -target arm64-apple-ios16.0 \
+  -sdk "$ios_sdk" \
+  -I "$cocoapods_module_dir" \
+  Scripts/Fixtures/ForbiddenSDKImplementationType.swift \
+  >"$forbidden_sdk_pod" 2>&1; then
+  echo "CocoaPods consumer unexpectedly accessed an implementation-only SDK type." >&2
+  exit 1
+fi
+if ! grep -Fq "cannot find 'JSONValue' in scope" "$forbidden_sdk_pod"; then
+  echo "CocoaPods implementation-type boundary failed for an unexpected reason." >&2
+  cat "$forbidden_sdk_pod" >&2
+  exit 1
+fi
+
+cocoapods_api_json="$package_harness/nearwire-cocoapods-api.json"
+xcrun swift-api-digester \
+  -dump-sdk \
+  -module NearWire \
+  -I "$cocoapods_module_dir" \
+  -target arm64-apple-ios16.0 \
+  -sdk "$ios_sdk" \
+  -o "$cocoapods_api_json"
+
+ruby -rjson -e '
+  def public_usrs(path)
+    root = JSON.parse(File.read(path)).fetch("ABIRoot")
+    root.fetch("children", []).reject { |child| child["kind"] == "Import" }
+      .flat_map { |node| collect(node) }.compact.sort.uniq
+  end
+
+  def collect(node)
+    return [] unless Array(node["spi_group_names"]).empty?
+    [node["usr"]] + node.fetch("children", []).flat_map { |child| collect(child) }
+  end
+
+  package_usrs = public_usrs(ARGV.fetch(0))
+  pod_usrs = public_usrs(ARGV.fetch(1))
+  missing = package_usrs - pod_usrs
+  extra = pod_usrs - package_usrs
+  unless missing.empty? && extra.empty?
+    abort "SwiftPM/CocoaPods public API mismatch. Missing: #{missing.inspect}; extra: #{extra.inspect}"
+  end
+' "$sdk_api_json" "$cocoapods_api_json"
+
+echo "iOS CocoaPods same-module SDK consumer and API parity passed."
 
 xcrun swiftc \
   -typecheck \

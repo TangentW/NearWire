@@ -1,10 +1,10 @@
 import Foundation
 
 #if SWIFT_PACKAGE
-  import NearWireCore
+  @_spi(NearWireInternal) import NearWireCore
 #endif
 
-public struct WireEventRecord: Equatable, Sendable {
+@_spi(NearWireInternal) public struct WireEventRecord: Equatable, Sendable {
   public let envelope: EventEnvelope
   public let remainingTTLNanoseconds: UInt64
 
@@ -272,7 +272,7 @@ public struct WireEventRecord: Equatable, Sendable {
   }
 }
 
-public struct WireReceivedEvent: Equatable, Sendable {
+@_spi(NearWireInternal) public struct WireReceivedEvent: Equatable, Sendable {
   public let envelope: EventEnvelope
   public let receivedAtNanoseconds: UInt64
   public let deadlineNanoseconds: UInt64
@@ -289,7 +289,7 @@ public struct WireReceivedEvent: Equatable, Sendable {
   }
 }
 
-public struct WireEventPayload: Equatable, Sendable, WireMessagePayload {
+@_spi(NearWireInternal) public struct WireEventPayload: Equatable, Sendable, WireMessagePayload {
   public static let messageType = WireMessageType.event
   public static let lane = WireLane.event
   public let record: WireEventRecord
@@ -328,7 +328,8 @@ public struct WireEventPayload: Equatable, Sendable, WireMessagePayload {
   }
 }
 
-public struct WireEventBatchPayload: Equatable, Sendable, WireMessagePayload {
+@_spi(NearWireInternal) public struct WireEventBatchPayload: Equatable, Sendable, WireMessagePayload
+{
   public static let messageType = WireMessageType.eventBatch
   public static let lane = WireLane.event
   public let records: [WireEventRecord]
@@ -438,6 +439,7 @@ public struct WireEventBatchPayload: Equatable, Sendable, WireMessagePayload {
   }
 }
 
+@_spi(NearWireInternal)
 public struct WireDropSummaryPayload: Equatable, Sendable, WireMessagePayload {
   public static let messageType = WireMessageType.eventDropSummary
   public static let lane = WireLane.event

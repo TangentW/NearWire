@@ -1,5 +1,5 @@
 #if SWIFT_PACKAGE
-  import NearWireCore
+  @_spi(NearWireInternal) import NearWireCore
 #endif
 
 enum NearWireFlowControlModule {

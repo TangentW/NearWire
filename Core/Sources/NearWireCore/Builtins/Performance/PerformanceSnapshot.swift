@@ -1,6 +1,6 @@
 import Foundation
 
-public enum PerformanceSnapshotSchema {
+@_spi(NearWireInternal) public enum PerformanceSnapshotSchema {
   public static let version: UInt16 = 1
   public static let eventTypeRawValue = "nearwire.performance.snapshot"
 
@@ -9,6 +9,7 @@ public enum PerformanceSnapshotSchema {
   }
 }
 
+@_spi(NearWireInternal)
 public struct ProcessPerformanceMetrics: Codable, Equatable, Hashable, Sendable {
   public let cpuPercent: Double?
   public let memoryFootprintBytes: UInt64?
@@ -36,6 +37,7 @@ public struct ProcessPerformanceMetrics: Codable, Equatable, Hashable, Sendable 
   }
 }
 
+@_spi(NearWireInternal)
 public struct DisplayPerformanceMetrics: Codable, Equatable, Hashable, Sendable {
   public let estimatedFramesPerSecond: Double?
   public let maximumFramesPerSecond: Double?
@@ -75,7 +77,7 @@ public struct DisplayPerformanceMetrics: Codable, Equatable, Hashable, Sendable 
   }
 }
 
-public enum BatteryState: String, Codable, Equatable, Hashable, Sendable {
+@_spi(NearWireInternal) public enum BatteryState: String, Codable, Equatable, Hashable, Sendable {
   case unknown
   case unplugged
   case charging
@@ -87,7 +89,7 @@ public enum BatteryState: String, Codable, Equatable, Hashable, Sendable {
   }
 }
 
-public enum ThermalState: String, Codable, Equatable, Hashable, Sendable {
+@_spi(NearWireInternal) public enum ThermalState: String, Codable, Equatable, Hashable, Sendable {
   case unknown
   case nominal
   case fair
@@ -100,6 +102,7 @@ public enum ThermalState: String, Codable, Equatable, Hashable, Sendable {
   }
 }
 
+@_spi(NearWireInternal)
 public struct DevicePerformanceMetrics: Codable, Equatable, Hashable, Sendable {
   public let batteryLevel: Double?
   public let batteryState: BatteryState?
@@ -135,6 +138,7 @@ public struct DevicePerformanceMetrics: Codable, Equatable, Hashable, Sendable {
   }
 }
 
+@_spi(NearWireInternal)
 public struct TransportPerformanceMetrics: Codable, Equatable, Hashable, Sendable {
   public let uplinkBytesPerSecond: UInt64?
   public let downlinkBytesPerSecond: UInt64?
@@ -183,6 +187,7 @@ public struct TransportPerformanceMetrics: Codable, Equatable, Hashable, Sendabl
   }
 }
 
+@_spi(NearWireInternal)
 public enum UnavailablePerformanceMetricReason: String, Codable, Equatable, Hashable, Sendable {
   case unsupported
   case disabled
@@ -190,6 +195,7 @@ public enum UnavailablePerformanceMetricReason: String, Codable, Equatable, Hash
   case temporarilyUnavailable
 }
 
+@_spi(NearWireInternal)
 public struct UnavailablePerformanceMetric: Codable, Equatable, Hashable, Sendable {
   public let metric: String
   public let reason: UnavailablePerformanceMetricReason
@@ -220,7 +226,7 @@ public struct UnavailablePerformanceMetric: Codable, Equatable, Hashable, Sendab
   }
 }
 
-public struct PerformanceSnapshot: Codable, Equatable, Hashable, Sendable {
+@_spi(NearWireInternal) public struct PerformanceSnapshot: Codable, Equatable, Hashable, Sendable {
   public let schemaVersion: UInt16
   public let sampledAt: Date
   public let sampleIntervalMilliseconds: UInt64

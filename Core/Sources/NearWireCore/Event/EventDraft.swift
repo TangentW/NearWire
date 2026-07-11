@@ -1,6 +1,6 @@
 import Foundation
 
-public struct EventDraft: Codable, Equatable, Hashable, Sendable {
+@_spi(NearWireInternal) public struct EventDraft: Codable, Equatable, Hashable, Sendable {
   public let type: EventType
   public let content: JSONValue
   public let priority: EventPriority

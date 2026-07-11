@@ -99,7 +99,10 @@ let package = Package(
     ),
     .testTarget(
       name: "NearWireTests",
-      dependencies: ["NearWire"],
+      dependencies: [
+        "NearWire",
+        "NearWireTransport",
+      ],
       path: "SDK/Tests/NearWireTests"
     ),
     .testTarget(

@@ -18,6 +18,8 @@ mkdir -p \
 
 ruby Scripts/check-swift-boundaries.rb
 
+ruby Scripts/check-core-spi-boundary.rb
+
 if rg -n \
   'SecureConnectionDriving|SecureByteChannel[[:space:]]*\(|NWConnection[[:space:]]*\(' \
   SDK/Sources; then
