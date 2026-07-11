@@ -42,7 +42,13 @@ if ! command -v xcrun >/dev/null 2>&1; then
   exit 1
 fi
 
-swift format lint --recursive Package.swift Core SDK Scripts/Fixtures/CorePackage.swift
+swift format lint --recursive \
+  Package.swift \
+  Core \
+  SDK \
+  Scripts/Fixtures/CorePackage.swift \
+  Scripts/Fixtures/WirePublicAPI.swift \
+  Scripts/Fixtures/ForbiddenWirePayload.swift
 
 xcode_version="$(xcodebuild -version)"
 xcode_major="$(awk '/Xcode/ { split($2, parts, "."); print parts[1]; exit }' <<< "$xcode_version")"
@@ -91,6 +97,12 @@ core_harness="$package_harness/CoreHarness"
 mkdir -p "$core_harness"
 cp Scripts/Fixtures/CorePackage.swift "$core_harness/Package.swift"
 ln -s "$ROOT/Core" "$core_harness/Core"
+ln -s "$ROOT/IntegrationTests" "$core_harness/IntegrationTests"
+
+if [[ ! -f "$core_harness/IntegrationTests/Fixtures/Protocol/v1/hello.json" ]]; then
+  echo "Core harness protocol fixtures are unavailable." >&2
+  exit 1
+fi
 
 core_package_json="$(swift package \
   --package-path "$core_harness" \
@@ -143,6 +155,35 @@ for target in "${core_build_targets[@]}"; do
     --target "$target" \
     "${strict_concurrency_options[@]}"
 done
+
+macos_module_path="$ROOT/.build/macos13/arm64-apple-macosx/debug/Modules"
+if [[ ! -d "$macos_module_path" ]]; then
+  echo "macOS Core module output is unavailable for public API boundary checks." >&2
+  exit 1
+fi
+
+xcrun swiftc \
+  -typecheck \
+  -I "$macos_module_path" \
+  Scripts/Fixtures/WirePublicAPI.swift
+
+forbidden_wire_diagnostics="$package_harness/forbidden-wire-payload.log"
+if xcrun swiftc \
+  -typecheck \
+  -I "$macos_module_path" \
+  Scripts/Fixtures/ForbiddenWirePayload.swift \
+  >"$forbidden_wire_diagnostics" 2>&1; then
+  echo "External code unexpectedly conformed to the sealed wire payload protocol." >&2
+  exit 1
+fi
+if ! grep -Fq "cannot find type 'WireMessagePayload' in scope" \
+  "$forbidden_wire_diagnostics"; then
+  echo "Sealed wire payload boundary failed for an unexpected compiler reason." >&2
+  cat "$forbidden_wire_diagnostics" >&2
+  exit 1
+fi
+
+echo "Wire payload public API sealing passed."
 
 read -r simulator_id simulator_initial_state <<< "$(xcrun simctl list devices available -j | ruby -rjson -e '
   data = JSON.parse(STDIN.read)

@@ -1,0 +1,30 @@
+COMMAND:
+ ./Scripts/verify-podspec.sh
+RUN_ID: 20260711T001821Z-99496
+GATE_ID: cocoapods
+STARTED_AT_UTC: 2026-07-11T00:19:06Z
+
+1.16.2
+
+ -> NearWire -> NearWire (0.1.0)
+    - WARN  | url: There was a problem validating the URL https://example.invalid/nearwire.
+    - NOTE  | [NearWire/Core, NearWire/SDK, NearWire/UI, and more...] xcodebuild:  note: Using codesigning identity override: -
+    - NOTE  | [NearWire/Core, NearWire/SDK, NearWire/UI, and more...] xcodebuild:  note: Building targets in dependency order
+    - NOTE  | [NearWire/Core, NearWire/SDK, NearWire/UI, and more...] xcodebuild:  note: Target dependency graph (3 targets)
+    - NOTE  | [iOS] xcodebuild:  2026-07-11 08:19:16.531 appintentsmetadataprocessor[5215:23017573] warning: Metadata extraction skipped. No AppIntents.framework dependency found.
+    - NOTE  | [NearWire/Core, NearWire/SDK, NearWire/UI, and more...] xcodebuild:  note: Signing static framework with --generate-pre-encrypt-hashes (in target 'Pods-App' from project 'Pods')
+    - NOTE  | [iOS] xcodebuild:  2026-07-11 08:19:18.460 appintentsmetadataprocessor[5267:23017951] warning: Metadata extraction skipped. No AppIntents.framework dependency found.
+    - NOTE  | [iOS] [NearWire/Core] xcodebuild:  2026-07-11 08:19:26.582 appintentsmetadataprocessor[5932:23019275] warning: Metadata extraction skipped. No AppIntents.framework dependency found.
+    - NOTE  | [iOS] [NearWire/Core] xcodebuild:  2026-07-11 08:19:28.129 appintentsmetadataprocessor[6071:23019609] warning: Metadata extraction skipped. No AppIntents.framework dependency found.
+    - NOTE  | [iOS] [NearWire/SDK] xcodebuild:  2026-07-11 08:19:36.410 appintentsmetadataprocessor[6349:23020442] warning: Metadata extraction skipped. No AppIntents.framework dependency found.
+    - NOTE  | [iOS] [NearWire/SDK] xcodebuild:  2026-07-11 08:19:38.381 appintentsmetadataprocessor[6521:23020773] warning: Metadata extraction skipped. No AppIntents.framework dependency found.
+    - NOTE  | [iOS] [NearWire/UI] xcodebuild:  2026-07-11 08:19:46.733 appintentsmetadataprocessor[7236:23022123] warning: Metadata extraction skipped. No AppIntents.framework dependency found.
+    - NOTE  | [iOS] [NearWire/UI] xcodebuild:  2026-07-11 08:19:48.317 appintentsmetadataprocessor[7282:23022333] warning: Metadata extraction skipped. No AppIntents.framework dependency found.
+    - NOTE  | [iOS] [NearWire/Performance] xcodebuild:  2026-07-11 08:19:56.376 appintentsmetadataprocessor[7421:23022890] warning: Metadata extraction skipped. No AppIntents.framework dependency found.
+    - NOTE  | [iOS] [NearWire/Performance] xcodebuild:  2026-07-11 08:19:57.975 appintentsmetadataprocessor[7486:23023123] warning: Metadata extraction skipped. No AppIntents.framework dependency found.
+
+NearWire passed validation.
+CocoaPods podspec verification passed.
+
+EXIT_STATUS: 0
+FINISHED_AT_UTC: 2026-07-11T00:19:58Z
