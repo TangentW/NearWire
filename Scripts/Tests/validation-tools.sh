@@ -67,6 +67,66 @@ ruby Scripts/check-swift-boundaries.rb \
 ruby Scripts/check-core-spi-boundary.rb \
   --core-root "$fixture_root/Core" \
   >/dev/null
+ruby Scripts/check-process-lease-structure.rb >/dev/null
+
+lease_source="SDK/Sources/NearWire/Session/ProcessConnectionLease.swift"
+lease_mutation_dir="$fixture_root/lease-mutations"
+mkdir -p "$lease_mutation_dir"
+
+ruby -e '
+  source = File.read(ARGV.fetch(0))
+  marker = "    guard enterStatus == synchronizationSucceeded else {"
+  source.sub!(marker, "    _ = runtime.associatedObject(anchor, key: monitorKey)\n#{marker}")
+  File.write(ARGV.fetch(1), source)
+' "$lease_source" "$lease_mutation_dir/pre-enter-access.swift"
+
+ruby -e '
+  source = File.read(ARGV.fetch(0))
+  marker = "    let claimed: Bool"
+  source.sub!(marker, "#{marker}\n    _ = ProcessConnectionLeaseError.runtimeUnavailable")
+  File.write(ARGV.fetch(1), source)
+' "$lease_source" "$lease_mutation_dir/pre-exit-outcome.swift"
+
+ruby -e '
+  source = File.read(ARGV.fetch(0))
+  marker = "    let exitStatus = runtime.exit(monitor)"
+  source.sub!(marker, "    withExtendedLifetime(token) {}\n#{marker}")
+  File.write(ARGV.fetch(1), source)
+' "$lease_source" "$lease_mutation_dir/pre-exit-cleanup.swift"
+
+ruby -e '
+  source = File.read(ARGV.fetch(0))
+  marker = "  private init(code: Code) {"
+  arbitrary = <<~SWIFT
+      init(code: Code, diagnostic: String) {
+        self.code = code
+        message = diagnostic
+      }
+
+  SWIFT
+  source.sub!(marker, "#{arbitrary}#{marker}")
+  File.write(ARGV.fetch(1), source)
+' "$lease_source" "$lease_mutation_dir/arbitrary-error-message.swift"
+
+ruby -e '
+  source = File.read(ARGV.fetch(0))
+  arbitrary = <<~SWIFT
+
+    extension ProcessConnectionLeaseError {
+      init(code: Code, diagnostic: String) {
+        self.code = code
+      }
+    }
+  SWIFT
+  File.write(ARGV.fetch(1), "#{source}#{arbitrary}")
+' "$lease_source" "$lease_mutation_dir/extension-error-initializer.swift"
+
+for mutation in "$lease_mutation_dir"/*.swift; do
+  if ruby Scripts/check-process-lease-structure.rb "$mutation" >/dev/null 2>&1; then
+    echo "Expected process lease structural mutation to fail: $mutation" >&2
+    exit 1
+  fi
+done
 
 printf '%s\n' 'public struct LeakedCoreType {}' > "$fixture_root/Core/Violation.swift"
 if ruby Scripts/check-core-spi-boundary.rb \

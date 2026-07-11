@@ -37,16 +37,16 @@ The NearWire module SHALL expose a non-supported `NearWireBuiltins` SPI that adm
 
 ### Requirement: Public API work does not start session features early
 
-NearWire construction and the supported public facade SHALL remain side-effect-free and source-compatible. This change MAY add repository-internal pairing and Bonjour discovery that starts only through an explicit internal `run()` operation. It SHALL NOT add public connect/disconnect APIs, open a TCP or TLS connection, manage TLS identity, acquire a process-wide lease, negotiate a session or rate, reconnect, observe background lifecycle, persist data, create UI, collect performance data, schedule retry timers, or start hidden asynchronous work from NearWire initialization.
+NearWire construction and the supported public facade SHALL remain side-effect-free and source-compatible. Repository-internal pairing, Bonjour discovery, and process connection ownership MAY begin only through their explicit internal operations. The process lease SHALL NOT be claimed by initialization or ordinary event APIs. This change SHALL NOT add public connect/disconnect or lease APIs, open TCP/TLS, manage TLS identity, negotiate a session or rate, reconnect, observe background lifecycle, persist data, create UI, collect performance data, schedule work, or transfer events.
 
 #### Scenario: Side-effect audit
 
-- **WHEN** a NearWire instance and an internal discovery value are constructed
-- **THEN** neither starts browsing, requests local-network permission, opens a connection, schedules a task or timer, accesses persistence, or changes global ownership
+- **WHEN** NearWire instances and internal lease-capable types are constructed
+- **THEN** no lease is claimed, browser starts, local-network permission is requested, connection opens, task or timer is scheduled, persistence is accessed, or global ownership changes
 
-#### Scenario: Explicit internal discovery run
+#### Scenario: Explicit internal lease claim
 
-- **WHEN** a later repository-owned session explicitly invokes discovery run
-- **THEN** only the bounded Bonjour browser lifecycle described by `sdk-bonjour-discovery` begins
+- **WHEN** a later repository-owned connection operation explicitly claims the process lease
+- **THEN** only constant-size synchronous ownership state changes
 - **AND** the supported application API inventory remains unchanged
 

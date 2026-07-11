@@ -53,7 +53,8 @@ swift format lint --recursive \
   Scripts/Fixtures/ForbiddenSameModuleRawSecureChannel.swift \
   Scripts/Fixtures/WirePublicAPI.swift \
   Scripts/Fixtures/ForbiddenWirePayload.swift \
-  Scripts/Fixtures/ForbiddenSDKImplementationType.swift
+  Scripts/Fixtures/ForbiddenSDKImplementationType.swift \
+  Scripts/Fixtures/ForbiddenProcessLeaseAPI.swift
 
 xcode_version="$(xcodebuild -version)"
 xcode_major="$(awk '/Xcode/ { split($2, parts, "."); print parts[1]; exit }' <<< "$xcode_version")"
@@ -61,6 +62,8 @@ if [[ -z "$xcode_major" || "$xcode_major" -lt 16 ]]; then
   echo "Xcode 16 or later is required." >&2
   exit 1
 fi
+
+"$ROOT/Scripts/verify-process-lease.sh"
 
 strict_concurrency_options=(
   -Xswiftc -strict-concurrency=complete
@@ -168,6 +171,33 @@ if ! grep -Fq "cannot find 'JSONValue' in scope" "$forbidden_sdk_spm"; then
   exit 1
 fi
 
+forbidden_lease_spm="$package_harness/forbidden-lease-spm.log"
+if xcrun swiftc \
+  -typecheck \
+  -swift-version 5 \
+  -target arm64-apple-ios16.0 \
+  -sdk "$ios_sdk" \
+  -I "$ios_module_path" \
+  Scripts/Fixtures/ForbiddenProcessLeaseAPI.swift \
+  >"$forbidden_lease_spm" 2>&1; then
+  echo "Swift Package consumer unexpectedly accessed the process lease." >&2
+  exit 1
+fi
+if ! grep -Fq "cannot find 'ProcessConnectionLeaseRegistry' in scope" \
+  "$forbidden_lease_spm"; then
+  echo "Swift Package process-lease boundary failed for an unexpected reason." >&2
+  cat "$forbidden_lease_spm" >&2
+  exit 1
+fi
+
+spm_sdk_symbols="$package_harness/spm-sdk-symbols.log"
+find "$ROOT/.build/ios16" -path '*/NearWire.build/*.o' -exec nm {} + \
+  >"$spm_sdk_symbols"
+if rg -n 'nearwire_lease_[ab]_' "$spm_sdk_symbols"; then
+  echo "Swift Package SDK objects unexpectedly export validation wrapper symbols." >&2
+  exit 1
+fi
+
 echo "iOS Swift Package SDK consumer API passed."
 
 macos_sdk="$(xcrun --sdk macosx --show-sdk-path)"
@@ -243,7 +273,7 @@ ruby -rjson -e '
   forbidden = %w[
     NearWireCore NearWireFlowControl NearWireTransport JSONValue EventDraft
     EventEnvelope BoundedEventQueue SecureByteChannel NWConnection NWListener
-    NWParameters SecIdentity
+    NWParameters SecIdentity ProcessConnectionLease
   ]
   violations = forbidden.select { |name| public_api.include?(name) }
   abort "Supported SDK API exposes implementation-only types: #{violations.join(", ")}" unless violations.empty?
@@ -258,17 +288,25 @@ while IFS= read -r source; do
   cocoapods_sources+=("$source")
 done < <(find Core/Sources SDK/Sources/NearWire -type f -name '*.swift' -print | sort)
 
-xcrun swiftc \
+SDKROOT="$ios_sdk" xcrun --sdk iphoneos swiftc \
   -parse-as-library \
-  -emit-module \
+  -emit-library \
   -module-name NearWire \
   -emit-module-path "$cocoapods_module_dir/NearWire.swiftmodule" \
+  -o "$cocoapods_module_dir/libNearWire.dylib" \
   -swift-version 5 \
   -strict-concurrency=complete \
   -warnings-as-errors \
   -target arm64-apple-ios16.0 \
   -sdk "$ios_sdk" \
   "${cocoapods_sources[@]}"
+
+cocoapods_sdk_symbols="$package_harness/cocoapods-sdk-symbols.log"
+nm -gU "$cocoapods_module_dir/libNearWire.dylib" > "$cocoapods_sdk_symbols"
+if rg -n 'nearwire_lease_[ab]_' "$cocoapods_sdk_symbols"; then
+  echo "CocoaPods SDK binary unexpectedly exports validation wrapper symbols." >&2
+  exit 1
+fi
 
 for fixture in SDK/Tests/PublicAPIConsumer/*.swift; do
   xcrun swiftc \
@@ -297,6 +335,25 @@ fi
 if ! grep -Fq "cannot find 'JSONValue' in scope" "$forbidden_sdk_pod"; then
   echo "CocoaPods implementation-type boundary failed for an unexpected reason." >&2
   cat "$forbidden_sdk_pod" >&2
+  exit 1
+fi
+
+forbidden_lease_pod="$package_harness/forbidden-lease-pod.log"
+if xcrun swiftc \
+  -typecheck \
+  -swift-version 5 \
+  -target arm64-apple-ios16.0 \
+  -sdk "$ios_sdk" \
+  -I "$cocoapods_module_dir" \
+  Scripts/Fixtures/ForbiddenProcessLeaseAPI.swift \
+  >"$forbidden_lease_pod" 2>&1; then
+  echo "CocoaPods consumer unexpectedly accessed the process lease." >&2
+  exit 1
+fi
+if ! grep -Fq "cannot find 'ProcessConnectionLeaseRegistry' in scope" \
+  "$forbidden_lease_pod"; then
+  echo "CocoaPods process-lease boundary failed for an unexpected reason." >&2
+  cat "$forbidden_lease_pod" >&2
   exit 1
 fi
 

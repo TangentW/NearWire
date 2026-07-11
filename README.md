@@ -4,7 +4,7 @@ NearWire is a local, bidirectional event platform for iOS applications and a nat
 
 The repository is under active development. The architecture is defined in [NearWire-Platform-Architecture.md](NearWire-Platform-Architecture.md), and every implementation change is specified through OpenSpec before code is applied.
 
-The current supported SDK event facade is documented in [Documentation/SDK-Public-API.md](Documentation/SDK-Public-API.md). Repository-internal pairing and Bonjour behavior is documented in [Documentation/SDK-Discovery.md](Documentation/SDK-Discovery.md). Public connection APIs remain scheduled for later roadmap changes.
+The current supported SDK event facade is documented in [Documentation/SDK-Public-API.md](Documentation/SDK-Public-API.md). Repository-internal pairing and Bonjour behavior is documented in [Documentation/SDK-Discovery.md](Documentation/SDK-Discovery.md), and the internal process ownership primitive is documented in [Documentation/SDK-Connection-Lease.md](Documentation/SDK-Connection-Lease.md). Public connection APIs remain scheduled for later roadmap changes.
 
 ## Repository Layout
 

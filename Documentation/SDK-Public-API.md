@@ -34,7 +34,7 @@ let nearWire = NearWire(configuration: configuration)
 
 The two directional rates are App-local maximums. A later session computes each effective rate as the minimum of this value and the Viewer request. Zero pauses that business-event direction. The default App-local caps are 100 uplink and 50 downlink events per second.
 
-Initialization allocates small in-memory state only. It does not start discovery, request local-network permission, open a connection, launch a task or timer, access disk or Keychain, or create UI. Multiple idle instances are independent. A later process-wide lease will reject a second active connection attempt, but it will not turn the SDK into a singleton.
+Initialization allocates small in-memory state only. It does not start discovery, request local-network permission, open a connection, claim process connection ownership, launch a task or timer, access disk or Keychain, or create UI. Multiple idle instances are independent. The internal process-wide lease is claimed only by a future explicit connection operation and will reject a second active connection attempt without turning the SDK into a singleton.
 
 ## Send Codable Events
 
