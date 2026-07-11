@@ -6,7 +6,7 @@ The primary SDK is the `NearWire` module. It supports iOS 16 or later, Xcode 16 
 
 The SDK uses Swift concurrency. It does not provide a singleton, delegate API, Combine publisher, NotificationCenter contract, or Objective-C compatibility layer.
 
-This implementation stage provides the event facade and offline memory behavior. `connect(code:)`, `disconnect()`, Bonjour discovery, TLS session coordination, rate negotiation, and reconnect behavior arrive in the `sdk-discovery-session` change. Construction does not start any of those operations early.
+This implementation stage provides the event facade and offline memory behavior. Repository-internal pairing and Bonjour discovery now exist for the later session owner, but `connect(code:)`, `disconnect()`, TLS session coordination, rate negotiation, and reconnect behavior remain absent from the supported API. Construction does not start any of those operations early.
 
 ## Create an Instance
 
@@ -144,7 +144,7 @@ for await state in nearWire.states {
 }
 ```
 
-State streams retain only the latest pending state because an intermediate UI snapshot is superseded by a newer one. Cancelling one subscription does not disconnect or shut down the instance. This implementation stage publicly drives only `idle` and `shutdown`; the discovery/session implementation will drive the connection phases.
+State streams retain only the latest pending state because an intermediate UI snapshot is superseded by a newer one. Cancelling one subscription does not disconnect or shut down the instance. This implementation stage publicly drives only `idle` and `shutdown`; later active-session and connection-lifecycle changes will drive the connection phases.
 
 ## Shutdown
 
@@ -164,4 +164,4 @@ The message is intended for engineering diagnostics, not as a localized user-int
 
 ## Explicit Non-Guarantees
 
-The SDK facade does not itself provide persistence, delivery acknowledgement, RPC semantics, request timeouts, retry, at-least-once delivery, exactly-once delivery, background execution, automatic enablement, or Viewer authentication. Session and discovery behavior remains absent until its dedicated change is implemented; persistence remains a Viewer concern.
+The SDK facade does not itself provide persistence, delivery acknowledgement, RPC semantics, request timeouts, retry, at-least-once delivery, exactly-once delivery, background execution, automatic enablement, or Viewer authentication. Pairing discovery remains repository-internal until the dedicated active-session and connection-lifecycle changes expose it through the supported facade; persistence remains a Viewer concern.

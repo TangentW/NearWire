@@ -28,43 +28,51 @@ Implement Network.framework transport building blocks, mandatory TLS configurati
 
 Implement the instance-based `NearWire` facade, configuration, Swift concurrency state and event streams, Codable send and decode APIs, offline memory buffering, replies, errors, lifecycle isolation, and equivalent SwiftPM/CocoaPods public API consumer compile fixtures.
 
-### 7. `sdk-discovery-session`
+### 7. `sdk-pairing-discovery`
 
-Implement pairing-code normalization, Bonjour browsing, peer-to-peer-enabled client connections, process-wide connection lease, handshake, flow-policy negotiation, reconnection, background transitions, and local-network diagnostics.
+Implement bounded pairing-code normalization, exact Bonjour identity, shared `vid` derivation, peer-to-peer-enabled browsing, deterministic one-shot selection, safe diagnostics, and host local-network integration documentation.
 
-### 8. `sdk-ui`
+### 8. `sdk-active-session`
+
+Implement the process-wide connection lease, peer-to-peer-enabled TLS connection, hello and admission handshake, active route ownership, and negotiated flow policy without reconnection or background lifecycle behavior.
+
+### 9. `sdk-connection-lifecycle`
+
+Implement explicit disconnect, transient-failure classification, bounded reconnection, background transitions, lease release, route replacement, and final public connection-state behavior.
+
+### 10. `sdk-ui`
 
 Implement the optional injected-instance NearWireUI connection-code, status, error, and disconnect components without hidden SDK ownership or persistence.
 
-### 9. `sdk-performance`
+### 11. `sdk-performance`
 
 Implement opt-in one-second performance snapshots, supported public collectors, resource-safe start and stop behavior, keep-latest delivery, unavailable metric semantics, and overhead benchmarks.
 
-### 10. `viewer-application-foundation`
+### 12. `viewer-application-foundation`
 
 Create the manually maintained NearWireViewer Xcode project and native SwiftUI application, automatic listener startup, TLS identity lifecycle, pairing-code display, default automatic admission, optional confirmation, and clean window shutdown.
 
-### 11. `viewer-multidevice-flow-control`
+### 13. `viewer-multidevice-flow-control`
 
 Implement multi-device sessions, device identity and nicknames, one-to-many connection management, requested and effective rates, Bundle-ID preferences, queue telemetry, and device isolation tests.
 
-### 12. `viewer-local-store-search`
+### 14. `viewer-local-store-search`
 
 Implement SQLite persistence, automatic sessions, 3 GiB and seven-day defaults, transactional cleanup, pinned-session protection, search indexing, JSON-path filters, pagination, and streaming JSON export.
 
-### 13. `viewer-event-explorer-control`
+### 15. `viewer-event-explorer-control`
 
 Implement the three-column event explorer, single and merged timelines, receive-time ordering, detail inspection, renderers, pause-without-data-loss, simple Viewer-to-App control composition, and session causality display.
 
-### 14. `viewer-performance-dashboard`
+### 16. `viewer-performance-dashboard`
 
 Implement performance projections, current metric cards, synchronized charts, gaps, unavailable metrics, time ranges, bucketed aggregation, and raw-event traceability.
 
-### 15. `demo-distribution-e2e`
+### 17. `demo-distribution-e2e`
 
 Create the manually maintained root Demo project, validate SPM and CocoaPods integration against one app implementation, exercise bidirectional events and performance collection, and run device-to-Viewer end-to-end suites.
 
-### 16. `release-hardening`
+### 18. `release-hardening`
 
 Complete protocol compatibility matrices, security and resource-exhaustion tests, multi-device performance targets, packaging verification, API documentation, operator documentation, signing and distribution readiness, and the final requirement-by-requirement completion audit.
 

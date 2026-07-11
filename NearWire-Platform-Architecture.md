@@ -178,6 +178,14 @@ TXT Record 只放发现所需的非敏感数据：
 | `state` | `accepting`、`paused` |
 | `cap` | 能力位，例如 bidirectional、normal、keep-latest |
 
+#### 4.2.1 Normative V1 `vid` derivation and browser use
+
+Core derives `vid` with `CryptoKit.SHA256` over the exact UTF-8 bytes of the validated Viewer installation ID, without case folding or normalization. The first eight digest bytes are encoded as exactly 16 lowercase hexadecimal ASCII characters. The value remains stable across pairing-code refreshes while the installation ID remains stable and is recomputed when that identity is reset.
+
+The 64-bit truncated value is public, locally linkable discovery metadata. Distinct installation IDs can theoretically collide, and an advertiser can copy or omit the value. The iOS browser therefore uses different valid `vid` values only to detect obvious ambiguity; it never treats `vid`, an exact instance-name match, or an unambiguous result as authentication or certificate binding.
+
+The initial SDK discovery implementation reads only `vid` from TXT data. It synchronously discards the raw record and every other key before asynchronous ingress. Future Viewer metadata fields may be added only when a separate capability specification defines their bounds and consumers.
+
 禁止放入：
 
 - 对频码之外的口令、认证信息或可验证哈希。对频码已经公开体现在实例名中，无需在 TXT Record 重复。
@@ -223,6 +231,8 @@ Mac 不能在第一台手机连接后停止发布，因为产品要求一个 Vie
 - `NSBonjourServices` 中的 `_nearwire._tcp`
 
 Swift Package 和 CocoaPods 都无法替宿主 App 正确填写业务语境下的隐私说明，所以 NearWire 应提供清晰的接入检查和示例文本。Apple 建议使用 `NWBrowser`、`NWListener` 和 Bonjour 处理本地设备发现。[Apple Local Network Privacy](https://developer.apple.com/documentation/technotes/tn3179-understanding-local-network-privacy)
+
+Network.framework Bonjour browsing does not require the direct multicast networking entitlement. The current discovery implementation declares no collected data and uses no required-reason API, so it adds no privacy manifest. Any future change to that review must package the same privacy resource through SwiftPM and CocoaPods.
 
 ## 5. 对频码、服务实例名与连接准入
 
