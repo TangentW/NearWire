@@ -76,6 +76,8 @@ Implemented: the optional monitor exposes only configuration, safe errors, lifec
 
 Create the manually maintained NearWireViewer Xcode project and native SwiftUI application, automatic listener startup, TLS identity lifecycle, pairing-code display, default automatic admission, optional confirmation, and clean window shutdown.
 
+Implemented: the single-window macOS 13 application automatically prepares separate persistent installation and TLS identities, publishes an exact memory-only pairing service, handles bounded collision-safe listener replacement, admits at most 32 peers through one continuous connection core and 10-second deadline, supports optional approval and pause, fails closed with fixed recovery, and packages the exact sandbox, local-network, and privacy metadata.
+
 ### 17. `viewer-multidevice-flow-control`
 
 Implement multi-device sessions, device identity and nicknames, one-to-many connection management, requested and effective rates, Bundle-ID preferences, queue telemetry, and device isolation tests.
@@ -99,6 +101,8 @@ Create the manually maintained root Demo project, validate SPM and CocoaPods int
 ### 22. `release-hardening`
 
 Complete protocol compatibility matrices, security and resource-exhaustion tests, multi-device performance targets, packaging verification, API documentation, operator documentation, signing and distribution readiness, and the final requirement-by-requirement completion audit.
+
+The final release gate must execute the Viewer A/unrelated/B stable-signer XCTest sequence documented in `Viewer-Foundation.md` with two valid, unrelated code-signing identities. Earlier changes preserve the executable gate and may record an environment deferral, but release hardening cannot complete while that cross-update Keychain evidence remains pending.
 
 ## Required Gate for Every Change
 

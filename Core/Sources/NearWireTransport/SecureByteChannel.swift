@@ -1,6 +1,10 @@
 import Foundation
 import Network
 
+#if SWIFT_PACKAGE
+  @_spi(NearWireInternal) import NearWireCore
+#endif
+
 @_spi(NearWireInternal) public enum SecureByteChannelEvent: Sendable {
   case stateChanged(SecureTransportState)
   case received(Data)
@@ -606,14 +610,42 @@ private final class SecureSendMailbox: @unchecked Sendable {
 
 @_spi(NearWireInternal) public enum SecureViewerListenerEvent: Sendable {
   case ready(port: UInt16)
+  case serviceRegistered(exact: Bool)
+  case serviceRemoved
   case incoming(SecureViewerIncomingConnection)
   case failed(SecureTransportError)
   case cancelled
 }
 
+@_spi(NearWireInternal) public struct SecureViewerServiceAdvertisement: Equatable, Sendable {
+  public let identity: NearWireBonjourServiceIdentity
+
+  public init(identity: NearWireBonjourServiceIdentity) {
+    self.identity = identity
+  }
+
+  var listenerService: NWListener.Service {
+    let txtRecord = NWTXTRecord([
+      NearWireBonjour.txtViewerIDKey: identity.viewerDiscriminator.rawValue
+    ])
+    return NWListener.Service(
+      name: identity.instanceName,
+      type: identity.type,
+      domain: identity.domain,
+      txtRecord: txtRecord.data
+    )
+  }
+
+  func exactlyMatches(_ endpoint: NWEndpoint) -> Bool {
+    guard case .service(let name, let type, let domain, _) = endpoint else { return false }
+    return name == identity.instanceName && type == identity.type && domain == identity.domain
+  }
+}
+
 @_spi(NearWireInternal) public enum SecureViewerTransport {
   public static func makeListener(
     identity: ViewerTransportIdentity,
+    advertisement: SecureViewerServiceAdvertisement? = nil,
     port: NWEndpoint.Port? = nil,
     limits: SecureTransportLimits = .default
   ) throws -> SecureViewerListener {
@@ -625,7 +657,20 @@ private final class SecureSendMailbox: @unchecked Sendable {
       } else {
         listener = try NWListener(using: parameters)
       }
-      return SecureViewerListener(listener: listener, limits: limits)
+      if let advertisement {
+        listener.service = advertisement.listenerService
+      }
+      return SecureViewerListener(
+        listener: listener,
+        limits: limits,
+        advertisement: advertisement
+      )
+    } catch let error as NWError where SecureViewerListener.isLocalNetworkPermissionFailure(error) {
+      throw SecureTransportError(
+        code: .localNetworkUnavailable,
+        path: "listener",
+        message: "Local network access is unavailable."
+      )
     } catch {
       throw SecureTransportError(
         code: .listenerCreationFailed,
@@ -641,6 +686,7 @@ private final class SecureSendMailbox: @unchecked Sendable {
 
   private let listener: NWListener
   private let limits: SecureTransportLimits
+  private let advertisement: SecureViewerServiceAdvertisement?
   private let admissionGate = SecureViewerAdmissionGate()
   private let lock = NSLock()
   private var started = false
@@ -648,9 +694,14 @@ private final class SecureSendMailbox: @unchecked Sendable {
   private var eventHandler: EventHandler?
   private var callbackQueue: DispatchQueue?
 
-  fileprivate init(listener: NWListener, limits: SecureTransportLimits) {
+  fileprivate init(
+    listener: NWListener,
+    limits: SecureTransportLimits,
+    advertisement: SecureViewerServiceAdvertisement?
+  ) {
     self.listener = listener
     self.limits = limits
+    self.advertisement = advertisement
   }
 
   public var port: UInt16? {
@@ -683,6 +734,9 @@ private final class SecureSendMailbox: @unchecked Sendable {
     listener.stateUpdateHandler = { [weak self] state in
       self?.handleState(state)
     }
+    listener.serviceRegistrationUpdateHandler = { [weak self] change in
+      self?.handleServiceRegistration(change)
+    }
     listener.start(queue: serializedQueue)
     lock.unlock()
   }
@@ -706,8 +760,12 @@ private final class SecureSendMailbox: @unchecked Sendable {
 
   private func handleState(_ state: NWListener.State) {
     switch state {
-    case .setup, .waiting:
+    case .setup:
       break
+    case .waiting(let error):
+      if Self.isLocalNetworkPermissionFailure(error) {
+        terminate(with: Self.listenerFailure(for: error))
+      }
     case .ready:
       guard let port = listener.port?.rawValue else {
         terminate(
@@ -721,15 +779,8 @@ private final class SecureSendMailbox: @unchecked Sendable {
         return
       }
       emit(.ready(port: port))
-    case .failed:
-      terminate(
-        with: SecureTransportError(
-          code: .driverFailure,
-          path: "listener.state",
-          message: "Secure Viewer listener failed.",
-          disposition: .connectionTerminal
-        )
-      )
+    case .failed(let error):
+      terminate(with: Self.listenerFailure(for: error))
     case .cancelled:
       cancel()
     @unknown default:
@@ -757,6 +808,52 @@ private final class SecureSendMailbox: @unchecked Sendable {
           admissionGate: admissionGate
         )
       )
+    )
+  }
+
+  private func handleServiceRegistration(_ change: NWListener.ServiceRegistrationChange) {
+    switch change {
+    case .add(let endpoint):
+      emit(.serviceRegistered(exact: advertisement?.exactlyMatches(endpoint) == true))
+    case .remove:
+      emit(.serviceRemoved)
+    @unknown default:
+      terminate(
+        with: SecureTransportError(
+          code: .driverFailure,
+          path: "listener.serviceRegistration",
+          message: "Secure Viewer service registration changed unexpectedly.",
+          disposition: .connectionTerminal
+        )
+      )
+    }
+  }
+
+  static func isLocalNetworkPermissionFailure(_ error: NWError) -> Bool {
+    if case .dns(let code) = error {
+      // DNS-SD reports local-network privacy denial as kDNSServiceErr_PolicyDenied.
+      return code == -65_570
+    }
+    if case .posix(let code) = error {
+      return code == .EACCES || code == .EPERM
+    }
+    return false
+  }
+
+  static func listenerFailure(for error: NWError) -> SecureTransportError {
+    if isLocalNetworkPermissionFailure(error) {
+      return SecureTransportError(
+        code: .localNetworkUnavailable,
+        path: "listener.state",
+        message: "Local network access is unavailable.",
+        disposition: .connectionTerminal
+      )
+    }
+    return SecureTransportError(
+      code: .driverFailure,
+      path: "listener.state",
+      message: "Secure Viewer listener failed.",
+      disposition: .connectionTerminal
     )
   }
 
@@ -839,6 +936,20 @@ private final class SecureSendMailbox: @unchecked Sendable {
     }
     lock.unlock()
     return channel
+  }
+
+  /// Rejects this wrapper without constructing a channel.
+  ///
+  /// This is used by the Viewer admission edge when its bounded capacity is full.
+  public func reject() {
+    lock.lock()
+    guard !claimed else {
+      lock.unlock()
+      return
+    }
+    claimed = true
+    lock.unlock()
+    connection.cancel()
   }
 }
 

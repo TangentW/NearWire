@@ -8,11 +8,11 @@ The wire frame codec remains transport-neutral. A frame is confidential only aft
 
 ## Viewer Identity Ownership
 
-The macOS Viewer supplies a Security `SecIdentity` containing its certificate and private key. Core adapts that value into Network.framework TLS options but does not generate, export, persist, rotate, back up, log, or delete the identity. The later Viewer foundation change owns Keychain lifecycle and recovery.
+The macOS Viewer supplies a Security `SecIdentity` containing its certificate and private key. Core adapts that value into Network.framework TLS options but does not generate, export, persist, rotate, back up, log, or delete the identity. The Viewer foundation owns Keychain lifecycle and recovery.
 
-Viewer parameter construction requires an adapted identity. There is no supported identity-free Viewer server configuration.
+Viewer parameter construction requires an adapted identity. There is no supported identity-free Viewer server configuration. The native Viewer owns a permanent nonextractable P-256 key, metadata-referenced self-signed certificate, profile and time validation, bounded renewal, and exact reset behavior in the per-user macOS login Keychain. See [Viewer-Foundation.md](Viewer-Foundation.md).
 
-`SecureViewerTransport` creates the supported Viewer listener. The wrapper hides the raw `NWListener`, reports its bound port, and delivers events through an internal serial queue targeted at the caller's queue. It exposes one-shot incoming connection wrappers, each of which can create exactly one bounded `SecureByteChannel`. Cancelling the listener closes admission before later or racing incoming wrappers can be claimed. Bonjour service metadata and pairing admission remain later responsibilities.
+`SecureViewerTransport` creates the supported Viewer listener. The wrapper hides the raw `NWListener`, reports its bound port, and delivers events through an internal serial queue targeted at the caller's queue. It accepts one validated Bonjour advertisement before start, reports safe exact-registration state, and exposes one-shot incoming connection wrappers, each of which can create exactly one bounded `SecureByteChannel`. Cancelling the listener closes admission before later or racing incoming wrappers can be claimed. Viewer application code owns pairing generation, listener replacement, approval policy, and admission limits without exposing raw Network.framework values.
 
 ## App Trust Behavior
 

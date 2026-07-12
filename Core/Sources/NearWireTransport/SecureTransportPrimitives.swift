@@ -32,6 +32,7 @@ import Foundation
     case invalidDelivery
     case invalidState
     case listenerCreationFailed
+    case localNetworkUnavailable
     case trustEvaluationFailed
     case unsupportedTLS
   }

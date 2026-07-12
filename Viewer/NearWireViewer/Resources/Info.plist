@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDisplayName</key>
+	<string>NearWire</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>NearWire</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>$(MARKETING_VERSION)</string>
+	<key>CFBundleVersion</key>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>$(MACOSX_DEPLOYMENT_TARGET)</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_nearwire._tcp</string>
+	</array>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>NearWire advertises a local service so your iPhone apps can connect to this Mac.</string>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
+	<key>NearWireSignerProbeBuildID</key>
+	<string>$(NEARWIRE_SIGNER_PROBE_BUILD_ID)</string>
+	<key>NearWireSignerProbePhase</key>
+	<string>$(NEARWIRE_SIGNER_PROBE_PHASE)</string>
+	<key>NearWireSignerProbeStateRoot</key>
+	<string>$(NEARWIRE_SIGNER_PROBE_STATE_ROOT)</string>
+	<key>NearWireSignerProbeToken</key>
+	<string>$(NEARWIRE_SIGNER_PROBE_TOKEN)</string>
+</dict>
+</plist>

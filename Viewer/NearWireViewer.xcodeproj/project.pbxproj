@@ -1,0 +1,193 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 60;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		100000000000000000000001 /* NearWireViewerApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000001 /* NearWireViewerApp.swift */; };
+		100000000000000000000002 /* ViewerApplicationModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000002 /* ViewerApplicationModel.swift */; };
+		100000000000000000000003 /* ViewerPresentationModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000003 /* ViewerPresentationModels.swift */; };
+		100000000000000000000004 /* ViewerPairingCodeGenerator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000004 /* ViewerPairingCodeGenerator.swift */; };
+		100000000000000000000005 /* ViewerRootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000005 /* ViewerRootView.swift */; };
+		100000000000000000000006 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000006 /* PrivacyInfo.xcprivacy */; };
+		100000000000000000000007 /* NearWireCore in Frameworks */ = {isa = PBXBuildFile; productRef = 900000000000000000000002 /* NearWireCore */; };
+		100000000000000000000008 /* ViewerFoundationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000009 /* ViewerFoundationTests.swift */; };
+		100000000000000000000009 /* ViewerCertificateBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000C /* ViewerCertificateBuilder.swift */; };
+		10000000000000000000000A /* ViewerIdentityStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000D /* ViewerIdentityStore.swift */; };
+		10000000000000000000000B /* ViewerAdmission.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000E /* ViewerAdmission.swift */; };
+		10000000000000000000000C /* ViewerRuntimeDependencies.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000F /* ViewerRuntimeDependencies.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		300000000000000000000001 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 700000000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 800000000000000000000001;
+			remoteInfo = NearWireViewer;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		200000000000000000000001 /* NearWireViewerApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NearWireViewerApp.swift; sourceTree = "<group>"; };
+		200000000000000000000002 /* ViewerApplicationModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewerApplicationModel.swift; sourceTree = "<group>"; };
+		200000000000000000000003 /* ViewerPresentationModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewerPresentationModels.swift; sourceTree = "<group>"; };
+		200000000000000000000004 /* ViewerPairingCodeGenerator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewerPairingCodeGenerator.swift; sourceTree = "<group>"; };
+		200000000000000000000005 /* ViewerRootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewerRootView.swift; sourceTree = "<group>"; };
+		200000000000000000000006 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		200000000000000000000007 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		200000000000000000000008 /* NearWireViewer.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = NearWireViewer.entitlements; sourceTree = "<group>"; };
+		200000000000000000000009 /* ViewerFoundationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewerFoundationTests.swift; sourceTree = "<group>"; };
+		20000000000000000000000A /* NearWire.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = NearWire.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		20000000000000000000000B /* NearWireViewerTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = NearWireViewerTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		20000000000000000000000C /* ViewerCertificateBuilder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewerCertificateBuilder.swift; sourceTree = "<group>"; };
+		20000000000000000000000D /* ViewerIdentityStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewerIdentityStore.swift; sourceTree = "<group>"; };
+		20000000000000000000000E /* ViewerAdmission.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewerAdmission.swift; sourceTree = "<group>"; };
+		20000000000000000000000F /* ViewerRuntimeDependencies.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewerRuntimeDependencies.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		400000000000000000000001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				100000000000000000000007 /* NearWireCore in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		400000000000000000000002 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		500000000000000000000001 = {
+			isa = PBXGroup;
+			children = (
+				500000000000000000000002 /* NearWireViewer */,
+				500000000000000000000008 /* NearWireViewerTests */,
+				500000000000000000000009 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		500000000000000000000002 /* NearWireViewer */ = {
+			isa = PBXGroup;
+			children = (
+				500000000000000000000003 /* App */,
+				50000000000000000000000A /* Admission */,
+				500000000000000000000004 /* Application */,
+				500000000000000000000005 /* Identity */,
+				500000000000000000000006 /* UI */,
+				500000000000000000000007 /* Resources */,
+			);
+			path = NearWireViewer;
+			sourceTree = "<group>";
+		};
+		500000000000000000000003 /* App */ = {isa = PBXGroup; children = (200000000000000000000001 /* NearWireViewerApp.swift */,); path = App; sourceTree = "<group>"; };
+		500000000000000000000004 /* Application */ = {isa = PBXGroup; children = (200000000000000000000002 /* ViewerApplicationModel.swift */, 200000000000000000000003 /* ViewerPresentationModels.swift */, 20000000000000000000000F /* ViewerRuntimeDependencies.swift */,); path = Application; sourceTree = "<group>"; };
+		500000000000000000000005 /* Identity */ = {isa = PBXGroup; children = (20000000000000000000000C /* ViewerCertificateBuilder.swift */, 20000000000000000000000D /* ViewerIdentityStore.swift */, 200000000000000000000004 /* ViewerPairingCodeGenerator.swift */,); path = Identity; sourceTree = "<group>"; };
+		500000000000000000000006 /* UI */ = {isa = PBXGroup; children = (200000000000000000000005 /* ViewerRootView.swift */,); path = UI; sourceTree = "<group>"; };
+		500000000000000000000007 /* Resources */ = {isa = PBXGroup; children = (200000000000000000000007 /* Info.plist */, 200000000000000000000008 /* NearWireViewer.entitlements */, 200000000000000000000006 /* PrivacyInfo.xcprivacy */,); path = Resources; sourceTree = "<group>"; };
+		500000000000000000000008 /* NearWireViewerTests */ = {isa = PBXGroup; children = (200000000000000000000009 /* ViewerFoundationTests.swift */,); path = NearWireViewerTests; sourceTree = "<group>"; };
+		500000000000000000000009 /* Products */ = {isa = PBXGroup; children = (20000000000000000000000A /* NearWire.app */, 20000000000000000000000B /* NearWireViewerTests.xctest */,); name = Products; sourceTree = "<group>"; };
+		50000000000000000000000A /* Admission */ = {isa = PBXGroup; children = (20000000000000000000000E /* ViewerAdmission.swift */,); path = Admission; sourceTree = "<group>"; };
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		800000000000000000000001 /* NearWireViewer */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 600000000000000000000002 /* Build configuration list */;
+			buildPhases = (400000000000000000000003 /* Sources */, 400000000000000000000001 /* Frameworks */, 400000000000000000000005 /* Resources */,);
+			buildRules = ();
+			dependencies = ();
+			name = NearWireViewer;
+			packageProductDependencies = (900000000000000000000002 /* NearWireCore */,);
+			productName = NearWire;
+			productReference = 20000000000000000000000A /* NearWire.app */;
+			productType = "com.apple.product-type.application";
+		};
+		800000000000000000000002 /* NearWireViewerTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 600000000000000000000003 /* Build configuration list */;
+			buildPhases = (400000000000000000000004 /* Sources */, 400000000000000000000002 /* Frameworks */, 400000000000000000000006 /* Resources */,);
+			buildRules = ();
+			dependencies = (300000000000000000000002 /* PBXTargetDependency */,);
+			name = NearWireViewerTests;
+			productName = NearWireViewerTests;
+			productReference = 20000000000000000000000B /* NearWireViewerTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		700000000000000000000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1600;
+				LastUpgradeCheck = 1600;
+				TargetAttributes = {
+					800000000000000000000001 = {CreatedOnToolsVersion = 16.0;};
+					800000000000000000000002 = {CreatedOnToolsVersion = 16.0; TestTargetID = 800000000000000000000001;};
+				};
+			};
+			buildConfigurationList = 600000000000000000000001 /* Build configuration list */;
+			compatibilityVersion = "Xcode 15.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (en, Base,);
+			mainGroup = 500000000000000000000001;
+			packageReferences = (900000000000000000000001 /* XCLocalSwiftPackageReference ".." */,);
+			productRefGroup = 500000000000000000000009 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (800000000000000000000001 /* NearWireViewer */, 800000000000000000000002 /* NearWireViewerTests */,);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		400000000000000000000005 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (100000000000000000000006 /* PrivacyInfo.xcprivacy in Resources */,); runOnlyForDeploymentPostprocessing = 0; };
+		400000000000000000000006 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		400000000000000000000003 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (100000000000000000000001, 100000000000000000000002, 100000000000000000000003, 100000000000000000000004, 100000000000000000000005, 100000000000000000000009, 10000000000000000000000A, 10000000000000000000000B, 10000000000000000000000C,); runOnlyForDeploymentPostprocessing = 0; };
+		400000000000000000000004 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (100000000000000000000008,); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		300000000000000000000002 /* PBXTargetDependency */ = {isa = PBXTargetDependency; target = 800000000000000000000001 /* NearWireViewer */; targetProxy = 300000000000000000000001 /* PBXContainerItemProxy */; };
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		A00000000000000000000001 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {CLANG_ENABLE_MODULES = YES; MACOSX_DEPLOYMENT_TARGET = 13.0; SDKROOT = macosx; SWIFT_VERSION = 5.0;}; name = Debug; };
+		A00000000000000000000002 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {CLANG_ENABLE_MODULES = YES; MACOSX_DEPLOYMENT_TARGET = 13.0; SDKROOT = macosx; SWIFT_VERSION = 5.0;}; name = Release; };
+		A00000000000000000000003 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_ENTITLEMENTS = NearWireViewer/Resources/NearWireViewer.entitlements; CODE_SIGN_IDENTITY = "Apple Development"; CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 1; ENABLE_APP_SANDBOX = YES; ENABLE_HARDENED_RUNTIME = YES; ENABLE_TESTABILITY = YES; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = NearWireViewer/Resources/Info.plist; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks"; MARKETING_VERSION = 0.1.0; PRODUCT_BUNDLE_IDENTIFIER = com.nearwire.viewer; PRODUCT_MODULE_NAME = NearWireViewer; PRODUCT_NAME = NearWire; SWIFT_EMIT_LOC_STRINGS = YES; SWIFT_OPTIMIZATION_LEVEL = "-Onone"; SWIFT_STRICT_CONCURRENCY = complete;}; name = Debug; };
+		A00000000000000000000004 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_ENTITLEMENTS = NearWireViewer/Resources/NearWireViewer.entitlements; CODE_SIGN_IDENTITY = "Apple Development"; CODE_SIGN_INJECT_BASE_ENTITLEMENTS = NO; CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 1; ENABLE_APP_SANDBOX = YES; ENABLE_HARDENED_RUNTIME = YES; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = NearWireViewer/Resources/Info.plist; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks"; MARKETING_VERSION = 0.1.0; PRODUCT_BUNDLE_IDENTIFIER = com.nearwire.viewer; PRODUCT_MODULE_NAME = NearWireViewer; PRODUCT_NAME = NearWire; SWIFT_COMPILATION_MODE = wholemodule; SWIFT_EMIT_LOC_STRINGS = YES; SWIFT_STRICT_CONCURRENCY = complete;}; name = Release; };
+		A00000000000000000000005 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {BUNDLE_LOADER = "$(TEST_HOST)"; GENERATE_INFOPLIST_FILE = YES; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @loader_path/../Frameworks @executable_path/../Frameworks"; PRODUCT_BUNDLE_IDENTIFIER = com.nearwire.viewer.tests; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_OPTIMIZATION_LEVEL = "-Onone"; SWIFT_STRICT_CONCURRENCY = complete; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/NearWire.app/Contents/MacOS/NearWire";}; name = Debug; };
+		A00000000000000000000006 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {BUNDLE_LOADER = "$(TEST_HOST)"; GENERATE_INFOPLIST_FILE = YES; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @loader_path/../Frameworks @executable_path/../Frameworks"; PRODUCT_BUNDLE_IDENTIFIER = com.nearwire.viewer.tests; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_STRICT_CONCURRENCY = complete; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/NearWire.app/Contents/MacOS/NearWire";}; name = Release; };
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		600000000000000000000001 /* Build configuration list */ = {isa = XCConfigurationList; buildConfigurations = (A00000000000000000000001, A00000000000000000000002,); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		600000000000000000000002 /* Build configuration list */ = {isa = XCConfigurationList; buildConfigurations = (A00000000000000000000003, A00000000000000000000004,); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		600000000000000000000003 /* Build configuration list */ = {isa = XCConfigurationList; buildConfigurations = (A00000000000000000000005, A00000000000000000000006,); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		900000000000000000000001 /* XCLocalSwiftPackageReference ".." */ = {isa = XCLocalSwiftPackageReference; relativePath = ".."; };
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		900000000000000000000002 /* NearWireCore */ = {isa = XCSwiftPackageProductDependency; package = 900000000000000000000001 /* XCLocalSwiftPackageReference ".." */; productName = NearWireCore; };
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = 700000000000000000000001 /* Project object */;
+}

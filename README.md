@@ -6,6 +6,8 @@ The repository is under active development. The architecture is defined in [Near
 
 The supported SDK event and explicit connection facade is documented in [Documentation/SDK-Public-API.md](Documentation/SDK-Public-API.md). The optional injected SwiftUI panel is documented in [Documentation/SDK-UI.md](Documentation/SDK-UI.md), and the optional performance monitor in [Documentation/SDK-Performance.md](Documentation/SDK-Performance.md). Pairing and Bonjour behavior is documented in [Documentation/SDK-Discovery.md](Documentation/SDK-Discovery.md), process ownership in [Documentation/SDK-Connection-Lease.md](Documentation/SDK-Connection-Lease.md), the secure hello and approval sequence in [Documentation/SDK-Session-Admission.md](Documentation/SDK-Session-Admission.md), and bidirectional transfer in [Documentation/SDK-Active-Event-Pump.md](Documentation/SDK-Active-Event-Pump.md).
 
+The native macOS listener, persistent Viewer identity, pairing-code publication, bounded new-device admission, sandbox, and recovery behavior are documented in [Documentation/Viewer-Foundation.md](Documentation/Viewer-Foundation.md).
+
 ```swift
 let nearWire = NearWire()
 try await nearWire.connect(code: "ABC234")

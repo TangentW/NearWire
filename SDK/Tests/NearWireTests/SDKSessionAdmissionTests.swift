@@ -3786,6 +3786,8 @@ final class SDKSessionAdmissionTests: XCTestCase {
           listenerReady.fulfill()
           viewerReady.fulfill()
           appHelloReceived.fulfill()
+        case .serviceRegistered, .serviceRemoved:
+          break
         case .cancelled:
           break
         }
@@ -3973,6 +3975,8 @@ final class SDKSessionAdmissionTests: XCTestCase {
           listenerReady.fulfill()
           viewerReady.fulfill()
           appHelloReceived.fulfill()
+        case .serviceRegistered, .serviceRemoved:
+          break
         case .cancelled:
           break
         }

@@ -1,3 +1,4 @@
+@_spi(NearWireInternal) import NearWireCore
 import Network
 import Security
 import XCTest
@@ -120,6 +121,64 @@ final class SecureTransportTests: XCTestCase {
     listener.cancel()
     listener.cancel()
     await fulfillment(of: [cancelled], timeout: 1)
+  }
+
+  func testViewerAdvertisementMapsOnlyValidatedBonjourIdentity() throws {
+    let viewerID = try EndpointID(rawValue: "viewer-installation")
+    let discriminator = ViewerDiscoveryDiscriminator(viewerInstallationID: viewerID)
+    let serviceIdentity = try XCTUnwrap(
+      NearWireBonjourServiceIdentity(
+        instanceName: "NearWire-ABCDEF",
+        type: NearWireBonjour.serviceType,
+        domain: NearWireBonjour.localDomain,
+        viewerDiscriminator: discriminator
+      )
+    )
+    let advertisement = SecureViewerServiceAdvertisement(identity: serviceIdentity)
+    let service = advertisement.listenerService
+
+    XCTAssertEqual(service.name, "NearWire-ABCDEF")
+    XCTAssertEqual(service.type, "_nearwire._tcp")
+    XCTAssertEqual(service.domain, "local.")
+    XCTAssertEqual(
+      NWTXTRecord(try XCTUnwrap(service.txtRecord)).dictionary,
+      [NearWireBonjour.txtViewerIDKey: discriminator.rawValue]
+    )
+    XCTAssertTrue(
+      advertisement.exactlyMatches(
+        .service(
+          name: "NearWire-ABCDEF",
+          type: "_nearwire._tcp",
+          domain: "local.",
+          interface: nil
+        )
+      )
+    )
+    XCTAssertFalse(
+      advertisement.exactlyMatches(
+        .service(
+          name: "NearWire-ABCDEF (2)",
+          type: "_nearwire._tcp",
+          domain: "local.",
+          interface: nil
+        )
+      )
+    )
+  }
+
+  func testViewerListenerMapsOnlyPermissionFailuresToLocalNetworkCategory() {
+    XCTAssertTrue(SecureViewerListener.isLocalNetworkPermissionFailure(.dns(-65_570)))
+    XCTAssertTrue(SecureViewerListener.isLocalNetworkPermissionFailure(.posix(.EACCES)))
+    XCTAssertTrue(SecureViewerListener.isLocalNetworkPermissionFailure(.posix(.EPERM)))
+    XCTAssertFalse(SecureViewerListener.isLocalNetworkPermissionFailure(.posix(.ECONNRESET)))
+    XCTAssertEqual(
+      SecureViewerListener.listenerFailure(for: .dns(-65_570)).code,
+      .localNetworkUnavailable
+    )
+    XCTAssertEqual(
+      SecureViewerListener.listenerFailure(for: .posix(.ECONNRESET)).code,
+      .driverFailure
+    )
   }
 
   func testViewerAdmissionClaimIsAtomicWithClose() async throws {
@@ -291,6 +350,8 @@ final class SecureTransportTests: XCTestCase {
         }
       case .failed(let error):
         recorder.recordFailure(error.code)
+      case .serviceRegistered, .serviceRemoved:
+        break
       case .cancelled:
         break
       }
@@ -363,6 +424,8 @@ final class SecureTransportTests: XCTestCase {
       case .failed(let error):
         recorder.setListenerFailure(error.code)
         if recorder.recordChannelRejection(error.code) { channelRejected.fulfill() }
+      case .serviceRegistered, .serviceRemoved:
+        break
       case .cancelled:
         break
       }
@@ -439,6 +502,8 @@ final class SecureTransportTests: XCTestCase {
       case .failed(let error):
         recorder.setListenerFailure(error.code)
         if recorder.recordChannelRejection(error.code) { channelRejected.fulfill() }
+      case .serviceRegistered, .serviceRemoved:
+        break
       case .cancelled:
         break
       }
