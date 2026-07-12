@@ -214,7 +214,11 @@ def validate_attributes(attributes, root_name, name, short_name, repository_root
   abort "External dependency in #{name}: #{external.join(", ")}" unless external.empty?
 
   frameworks = Array(attributes["frameworks"])
-  expected_frameworks = short_name == "SDK" ? ["Security"] : []
+  expected_frameworks = case short_name
+                        when "SDK" then ["Security"]
+                        when "Performance" then %w[QuartzCore UIKit]
+                        else []
+                        end
   abort "Unsupported Apple framework set in #{name}: #{frameworks.join(", ")}" unless frameworks == expected_frameworks
 
   FORBIDDEN_VENDOR_KEYS.each do |key|

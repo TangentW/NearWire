@@ -1,0 +1,39 @@
+{
+  "body": {
+    "causality": {
+      "correlationID": null,
+      "replyTo": null
+    },
+    "content": {
+      "process": {
+        "cpuPercent": 0,
+        "memoryFootprintBytes": 0
+      },
+      "sampledAt": "2026-07-12T00:00:00.000Z",
+      "sampleIntervalMilliseconds": 1000,
+      "schemaVersion": 1,
+      "unavailable": []
+    },
+    "createdAt": "2026-07-12T00:00:00.000Z",
+    "direction": "appToViewer",
+    "id": "123e4567-e89b-42d3-a456-000000000001",
+    "monotonicTimestampNanoseconds": "1000000000",
+    "priority": "normal",
+    "remainingTTLNanoseconds": "30000000000",
+    "schemaVersion": 1,
+    "sequence": "0",
+    "sessionEpoch": "123e4567-e89b-42d3-a456-426614174000",
+    "source": {
+      "id": "123e4567-e89b-42d3-a456-426614174001",
+      "role": "app"
+    },
+    "target": {
+      "id": "123e4567-e89b-42d3-a456-426614174002",
+      "role": "viewer"
+    },
+    "ttlMilliseconds": "30000",
+    "type": "nearwire.performance.snapshot"
+  },
+  "type": "event",
+  "version": 1
+}

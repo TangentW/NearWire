@@ -42,6 +42,9 @@ Pod::Spec.new do |spec|
     sdk.dependency "NearWire/Core"
     sdk.source_files = "SDK/Sources/NearWire/**/*.swift"
     sdk.frameworks = ["Security"]
+    sdk.resource_bundles = {
+      "NearWireSDKPrivacy" => ["SDK/Sources/NearWire/PrivacyInfo.xcprivacy"]
+    }
   end
 
   spec.subspec "UI" do |ui|
@@ -52,6 +55,12 @@ Pod::Spec.new do |spec|
   spec.subspec "Performance" do |performance|
     performance.dependency "NearWire/SDK"
     performance.source_files = "SDK/Sources/NearWirePerformance/**/*.swift"
+    performance.frameworks = ["QuartzCore", "UIKit"]
+    performance.resource_bundles = {
+      "NearWirePerformancePrivacy" => [
+        "SDK/Sources/NearWirePerformance/PrivacyInfo.xcprivacy"
+      ]
+    }
   end
 
   spec.test_spec "PublicAPI" do |test|

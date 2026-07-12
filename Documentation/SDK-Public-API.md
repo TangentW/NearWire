@@ -8,6 +8,8 @@ The SDK uses Swift concurrency. It does not provide a singleton, delegate API, C
 
 The optional `NearWireUI` product adds only an injected connection panel and a value-driven status view. It does not create a facade, take host lifecycle ownership, or make UI implementation types public. See [SDK-UI.md](SDK-UI.md).
 
+The optional `NearWirePerformance` product adds an explicit-lifecycle monitor that sends internal aggregate snapshots through the same queue. It does not expose snapshot models, create a connection, or start during construction. See [SDK-Performance.md](SDK-Performance.md).
+
 The supported facade includes explicit connect and disconnect, host-controlled suspension and resumption, default-disabled bounded recovery, and latest-value lifecycle status. Construction does not start connection work early, and NearWire never subscribes to application lifecycle or reachability notifications.
 
 ## Create an Instance

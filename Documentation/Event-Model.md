@@ -84,7 +84,7 @@ Optional metric groups are:
 | Group | Fields and units |
 | --- | --- |
 | Process | `cpuPercent` is finite and non-negative and may exceed 100 on multi-core devices. `memoryFootprintBytes` is a byte count. |
-| Display | `estimatedFramesPerSecond` and `maximumFramesPerSecond` are finite and positive when present. Estimated FPS is observed display cadence, not GPU utilization. |
+| Display | `estimatedFramesPerSecond` and `maximumFramesPerSecond` are finite and positive when present. Estimated FPS is observed display-link callback cadence, not rendered throughput or GPU utilization. The current V1 SDK collector marks maximum FPS unsupported because it has no view/window screen context. |
 | Device | `batteryLevel` is a finite fraction from 0 through 1. Battery state is unknown, unplugged, charging, or full. Thermal state is unknown, nominal, fair, serious, or critical. Thermal state is categorical and does not imply Celsius. |
 | Transport | Uplink and downlink rates are bytes per second. Queue depths and dropped-event values are event counts. |
 
@@ -94,4 +94,4 @@ An absent optional field means that the metric was not collected or is unavailab
 
 Unknown battery or thermal strings decode as `unknown`. Unknown object fields are ignored by typed V1 decoding while the enclosing event's raw `JSONValue` remains available to preserve them.
 
-V1 deliberately defines no numeric whole-device GPU utilization, power watts, or Celsius temperature. Collectors added by `NearWirePerformance` must use approved public interfaces and omit or explicitly mark metrics that cannot be obtained reliably.
+V1 deliberately defines no numeric whole-device GPU utilization, power watts, or Celsius temperature. The current collector also marks byte rates and downlink queue depth unsupported. `droppedEventCount` contains only overflow, expiration, and route-affinity terminal removals; coalescing, explicit clear, and retained transport-admission rejection are excluded. Collectors added by `NearWirePerformance` must use approved public interfaces and omit or explicitly mark metrics that cannot be obtained reliably.

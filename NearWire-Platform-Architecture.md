@@ -1093,6 +1093,8 @@ send policy: .keepLatest(key: "nearwire.performance.snapshot")
 default sample interval: 1 second
 ```
 
+Implementation note: this aggregate is the repository-owned Core wire schema, not a public App-facing `NearWirePerformance` value. The supported App API samples and sends it; Viewer decodes it through Core.
+
 建议模型：
 
 ```swift
@@ -1106,6 +1108,8 @@ struct NearWirePerformanceSnapshot: Codable, Sendable {
     let transport: NearWireTransportMetrics?
 }
 ```
+
+The example shows the complete schema shape. The current iOS collector emits estimated display cadence and uplink queue diagnostics but marks maximum FPS, byte rates, downlink queue depth, whole-device GPU, watts, and Celsius temperature unavailable instead of guessing them.
 
 各指标字段同样使用可选值；字段缺失表示当前 SDK、设备或采集配置没有提供该指标。数值 0 只能表示真实测得的 0，不能拿来代表不支持。
 
@@ -1156,7 +1160,7 @@ let monitor = NearWirePerformanceMonitor(
     configuration: .init(sampleInterval: .seconds(1))
 )
 
-await monitor.start()
+try await monitor.start()
 // 不再需要时
 await monitor.stop()
 ```
@@ -1168,6 +1172,8 @@ await monitor.stop()
 - 性能事件仍经过普通 NearWire 限速和内存队列，不走隐藏旁路。
 - 使用 `.keepLatest`，断线时只保留最新快照，不补发一长串已经过时的实时样本。
 - 快照事件的必需字段和单位由 schema version 固定；新增字段保持向后兼容，Viewer 遇到未知字段应忽略并保留原始 JSON。
+- `UIDevice.isBatteryMonitoringEnabled` has no ownership token. Module-managed mode is best-effort; a host that also owns this switch selects unmanaged mode and keeps it enabled itself.
+- The base SDK privacy manifest declares the persistent installation UUID as linked Device ID data. The optional Performance manifest adds linked Performance Data because snapshots travel in the installation-correlated session. Tracking remains disabled.
 
 ## 13. Mac Viewer 设计
 

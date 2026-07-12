@@ -27,7 +27,7 @@ module NearWireDistributionContract
     "NearWireTestSupportTests" => ["test", "Core/Tests/NearWireTestSupportTests", ["NearWireTestSupport"]],
     "NearWireTests" => ["test", "SDK/Tests/NearWireTests", %w[NearWire NearWireTransport]],
     "NearWireUITests" => ["test", "SDK/Tests/NearWireUITests", %w[NearWireUI NearWire]],
-    "NearWirePerformanceTests" => ["test", "SDK/Tests/NearWirePerformanceTests", ["NearWirePerformance"]],
+    "NearWirePerformanceTests" => ["test", "SDK/Tests/NearWirePerformanceTests", %w[NearWirePerformance NearWire NearWireCore]],
   }.freeze
 
   EXPECTED_POD_SUBSPECS = {
@@ -43,6 +43,9 @@ module NearWireDistributionContract
     "SDK" => {
       "dependencies" => ["NearWire/Core"],
       "frameworks" => ["Security"],
+      "resource_bundles" => {
+        "NearWireSDKPrivacy" => ["SDK/Sources/NearWire/PrivacyInfo.xcprivacy"],
+      },
       "source_files" => ["SDK/Sources/NearWire/**/*.swift"],
     },
     "UI" => {
@@ -52,7 +55,10 @@ module NearWireDistributionContract
     },
     "Performance" => {
       "dependencies" => ["NearWire/SDK"],
-      "frameworks" => [],
+      "frameworks" => %w[QuartzCore UIKit],
+      "resource_bundles" => {
+        "NearWirePerformancePrivacy" => ["SDK/Sources/NearWirePerformance/PrivacyInfo.xcprivacy"],
+      },
       "source_files" => ["SDK/Sources/NearWirePerformance/**/*.swift"],
     },
   }.freeze
@@ -99,7 +105,12 @@ module NearWireDistributionContract
           "name" => name,
           "packageAccess" => true,
           "path" => path,
-          "resources" => [],
+          "resources" => case name
+                         when "NearWire", "NearWirePerformance"
+                           [{ "path" => "PrivacyInfo.xcprivacy", "rule" => { "process" => {} } }]
+                         else
+                           []
+                         end,
           "settings" => name == "NearWire" ? [
             {
               "kind" => { "linkedFramework" => { "_0" => "Security" } },
@@ -160,6 +171,7 @@ module NearWireDistributionContract
       normalized["name"] = name
       normalized["dependencies"] = normalized.fetch("dependencies", {})
       normalized["frameworks"] = Array(normalized["frameworks"])
+      normalized["resource_bundles"] = normalized.fetch("resource_bundles", {})
       normalized["source_files"] = Array(normalized["source_files"])
       [name, normalized]
     end
@@ -168,6 +180,7 @@ module NearWireDistributionContract
         "name" => name,
         "dependencies" => details.fetch("dependencies").to_h { |dependency| [dependency, []] },
         "frameworks" => details.fetch("frameworks"),
+        "resource_bundles" => details.fetch("resource_bundles", {}),
         "source_files" => details.fetch("source_files"),
       }
       [name, normalized]
@@ -225,6 +238,7 @@ module NearWireDistributionContract
           "name" => name,
           "dependencies" => details.fetch("dependencies").to_h { |dependency| [dependency, []] },
           "frameworks" => details.fetch("frameworks"),
+          "resource_bundles" => details.fetch("resource_bundles", {}),
           "source_files" => details.fetch("source_files"),
         }
       end,

@@ -54,6 +54,9 @@ let package = Package(
         "NearWireFlowControl",
       ],
       path: "SDK/Sources/NearWire",
+      resources: [
+        .process("PrivacyInfo.xcprivacy")
+      ],
       linkerSettings: [
         .linkedFramework("Security")
       ]
@@ -69,7 +72,10 @@ let package = Package(
         "NearWire",
         "NearWireCore",
       ],
-      path: "SDK/Sources/NearWirePerformance"
+      path: "SDK/Sources/NearWirePerformance",
+      resources: [
+        .process("PrivacyInfo.xcprivacy")
+      ]
     ),
     .target(
       name: "NearWireTestSupport",
@@ -115,7 +121,7 @@ let package = Package(
     ),
     .testTarget(
       name: "NearWirePerformanceTests",
-      dependencies: ["NearWirePerformance"],
+      dependencies: ["NearWirePerformance", "NearWire", "NearWireCore"],
       path: "SDK/Tests/NearWirePerformanceTests"
     ),
   ],

@@ -70,6 +70,8 @@ Implemented: the two-view public surface injects an existing instance, bounds pa
 
 Implement opt-in one-second performance snapshots, supported public collectors, resource-safe start and stop behavior, keep-latest delivery, unavailable metric semantics, and overhead benchmarks.
 
+Implemented: the optional monitor exposes only configuration, safe errors, lifecycle state, and explicit start/stop; public iOS collectors project conservative process/display/device/buffer metrics into the internal V1 schema; unavailable values and battery ownership are total; ordinary keep-latest delivery, two-component privacy manifests, exact cleanup barriers, packaging consumers, and deterministic overhead gates are covered.
+
 ### 16. `viewer-application-foundation`
 
 Create the manually maintained NearWireViewer Xcode project and native SwiftUI application, automatic listener startup, TLS identity lifecycle, pairing-code display, default automatic admission, optional confirmation, and clean window shutdown.
@@ -92,7 +94,7 @@ Implement performance projections, current metric cards, synchronized charts, ga
 
 ### 21. `demo-distribution-e2e`
 
-Create the manually maintained root Demo project, validate SPM and CocoaPods integration against one app implementation, exercise bidirectional events and performance collection, and run device-to-Viewer end-to-end suites.
+Create the manually maintained root Demo project, validate SPM and CocoaPods integration against one app implementation, generate the aggregate Xcode App privacy report, exercise bidirectional events and performance collection, and run device-to-Viewer end-to-end suites.
 
 ### 22. `release-hardening`
 

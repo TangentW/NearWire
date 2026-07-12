@@ -1,7 +1,6 @@
 #!/usr/bin/env ruby
 
 require "optparse"
-require "open3"
 require "pathname"
 
 options = {
@@ -27,6 +26,7 @@ end
 def swift_identifier_tokens(source)
   tokens = []
   index = 0
+  line = 1
 
   while index < source.length
     if source[index, 2] == "//"
@@ -43,6 +43,7 @@ def swift_identifier_tokens(source)
           depth -= 1
           index += 2
         else
+          line += 1 if source[index] == "\n"
           index += 1
         end
       end
@@ -60,6 +61,7 @@ def swift_identifier_tokens(source)
       terminator = "#{quote}#{"#" * hash_count}"
       index = hash_end + quote.length
       closing = source.index(terminator, index)
+      line += source[index...(closing || source.length)].count("\n")
       index = closing ? closing + terminator.length : source.length
     elsif source[index] == '"'
       triple = source[index, 3] == '"""'
@@ -72,15 +74,17 @@ def swift_identifier_tokens(source)
           index += terminator.length
           break
         else
+          line += 1 if source[index] == "\n"
           index += 1
         end
       end
     elsif source[index].match?(/[A-Za-z_]/)
       ending = index + 1
       ending += 1 while ending < source.length && source[ending].match?(/[A-Za-z0-9_]/)
-      tokens << source[index...ending]
+      tokens << { value: source[index...ending], line: line }
       index = ending
     else
+      line += 1 if source[index] == "\n"
       index += 1
     end
   end
@@ -88,41 +92,31 @@ def swift_identifier_tokens(source)
   tokens
 end
 
-def public_import?(path, line, column)
-  lines = path.readlines
-  prefix = lines.first(line - 1).join
-  prefix += lines.fetch(line - 1)[0...(column - 1)]
-  swift_identifier_tokens(prefix).last == "public"
-end
-
 def imports_in(root)
   swift_files(root).flat_map do |path|
-    output, diagnostics, status = Open3.capture3(
-      "xcrun",
-      "swiftc",
-      "-frontend",
-      "-dump-parse",
-      path.to_s
-    )
-    abort "Unable to parse #{path}: #{diagnostics}" unless status.success?
+    tokens = swift_identifier_tokens(path.read)
+    tokens.each_index.each_with_object([]) do |index, imports|
+      token = tokens.fetch(index)
+      next unless token.fetch(:value) == "import"
 
-    output.lines.map do |line|
-      next unless line.include?("(import_decl")
+      module_index = index + 1
+      if %w[class enum func let protocol struct typealias var].include?(
+        tokens.fetch(module_index, {}).fetch(:value, nil)
+      )
+        module_index += 1
+      end
+      module_token = tokens[module_index]
+      next unless module_token
 
-      module_match = line.match(/module="([^"]+)"/)
-      next unless module_match
-
-      location = line.match(/range=\[[^:]+:(\d+):(\d+)/)
-      source_line = location&.[](1)
-      source_column = location&.[](2)
-      {
+      modifiers = tokens[[index - 4, 0].max...index].map { |value| value.fetch(:value) }
+      imports << {
         path: path,
-        line: source_line || "?",
-        module_name: module_match[1].split(".").first,
-        exported: line.match?(/\bexported\b/),
-        public: location ? public_import?(path, source_line.to_i, source_column.to_i) : false,
+        line: token.fetch(:line),
+        module_name: module_token.fetch(:value),
+        exported: modifiers.include?("_exported"),
+        public: modifiers.last == "public",
       }
-    end.compact
+    end
   end
 end
 

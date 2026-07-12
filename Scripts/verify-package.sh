@@ -51,6 +51,9 @@ swift format lint --recursive \
   SDK/Tests/NearWireUIConsumer/ForbiddenSDKOnlyUIConsumer.swift \
   SDK/Tests/NearWireUIConsumer/ForbiddenInternalUIConsumer.swift \
   SDK/Tests/NearWireUIConsumer/ForbiddenInternalCocoaPodsUIConsumer.swift \
+  SDK/Tests/NearWirePerformanceConsumer/SwiftPMPerformanceConsumer.swift \
+  SDK/Tests/NearWirePerformanceConsumer/CocoaPodsPerformanceConsumer.swift \
+  SDK/Tests/NearWirePerformanceConsumer/ForbiddenSDKOnlyPerformanceConsumer.swift \
   Scripts/Fixtures/CorePackage.swift \
   Scripts/Fixtures/SecureTransportPublicAPI.swift \
   Scripts/Fixtures/ForbiddenPlaintextTransport.swift \
@@ -135,6 +138,10 @@ ruby Scripts/check-core-package-parity.rb \
   "$core_package_json_path"
 
 ios_sdk="$(xcrun --sdk iphoneos --show-sdk-path)"
+swift package "${swift_cache_options[@]}" --disable-sandbox \
+  --scratch-path "$ROOT/.build/ios16" clean
+swift package "${swift_cache_options[@]}" --disable-sandbox \
+  --scratch-path "$ROOT/.build/ios16-tests" clean
 swift build \
   "${swift_cache_options[@]}" \
   --disable-sandbox \
@@ -155,6 +162,15 @@ swift build \
 swift build \
   "${swift_cache_options[@]}" \
   --disable-sandbox \
+  --scratch-path "$ROOT/.build/ios16" \
+  --triple arm64-apple-ios16.0 \
+  --sdk "$ios_sdk" \
+  --target NearWirePerformance \
+  "${strict_concurrency_options[@]}"
+
+swift build \
+  "${swift_cache_options[@]}" \
+  --disable-sandbox \
   --scratch-path "$ROOT/.build/ios16-tests" \
   --triple arm64-apple-ios16.0 \
   --sdk "$ios_sdk" \
@@ -162,6 +178,18 @@ swift build \
   "${strict_concurrency_options[@]}"
 
 echo "iOS 16 Swift Package test sources compiled."
+
+base_privacy_manifest="$ROOT/.build/ios16/arm64-apple-ios/debug/NearWire_NearWire.bundle/PrivacyInfo.xcprivacy"
+performance_privacy_manifest="$ROOT/.build/ios16/arm64-apple-ios/debug/NearWire_NearWirePerformance.bundle/PrivacyInfo.xcprivacy"
+if [[ ! -f "$base_privacy_manifest" || ! -f "$performance_privacy_manifest" ]]; then
+  echo "Swift Package privacy resources are missing from built artifacts." >&2
+  exit 1
+fi
+cmp -s SDK/Sources/NearWire/PrivacyInfo.xcprivacy "$base_privacy_manifest"
+cmp -s SDK/Sources/NearWirePerformance/PrivacyInfo.xcprivacy "$performance_privacy_manifest"
+plutil -lint "$base_privacy_manifest" "$performance_privacy_manifest"
+
+echo "Swift Package privacy resources passed."
 
 ios_module_path="$ROOT/.build/ios16/arm64-apple-ios/debug/Modules"
 if [[ ! -d "$ios_module_path" ]]; then
@@ -277,6 +305,18 @@ fi
 
 echo "Swift Package NearWireUI consumer and internal boundary passed."
 
+xcrun swiftc \
+  -typecheck \
+  -swift-version 5 \
+  -strict-concurrency=complete \
+  -warnings-as-errors \
+  -target arm64-apple-ios16.0 \
+  -sdk "$ios_sdk" \
+  -I "$ios_module_path" \
+  SDK/Tests/NearWirePerformanceConsumer/SwiftPMPerformanceConsumer.swift
+
+echo "Swift Package NearWirePerformance consumer passed."
+
 macos_sdk="$(xcrun --sdk macosx --show-sdk-path)"
 core_build_targets=()
 while IFS= read -r target; do
@@ -322,6 +362,15 @@ swift build \
   --triple arm64-apple-macosx13.0 \
   --sdk "$macos_sdk" \
   --target NearWireUI \
+  "${strict_concurrency_options[@]}"
+
+swift build \
+  "${swift_cache_options[@]}" \
+  --disable-sandbox \
+  --scratch-path "$ROOT/.build/macos13" \
+  --triple arm64-apple-macosx13.0 \
+  --sdk "$macos_sdk" \
+  --target NearWirePerformance \
   "${strict_concurrency_options[@]}"
 
 macos_module_path="$ROOT/.build/macos13/arm64-apple-macosx/debug/Modules"
@@ -494,6 +543,27 @@ ruby -rjson -e '
 ' "$sdk_api_json" "$cocoapods_api_json"
 
 echo "iOS CocoaPods same-module SDK consumer and API parity passed."
+
+forbidden_performance_pod="$package_harness/forbidden-sdk-only-performance-pod.log"
+if xcrun swiftc \
+  -typecheck \
+  -swift-version 5 \
+  -target arm64-apple-ios16.0 \
+  -sdk "$ios_sdk" \
+  -I "$cocoapods_module_dir" \
+  SDK/Tests/NearWirePerformanceConsumer/ForbiddenSDKOnlyPerformanceConsumer.swift \
+  >"$forbidden_performance_pod" 2>&1; then
+  echo "CocoaPods SDK-only consumer unexpectedly accessed NearWirePerformance." >&2
+  exit 1
+fi
+if ! grep -Fq "cannot find 'NearWirePerformanceMonitor' in scope" \
+  "$forbidden_performance_pod"; then
+  echo "CocoaPods SDK-only Performance boundary failed for an unexpected reason." >&2
+  cat "$forbidden_performance_pod" >&2
+  exit 1
+fi
+
+echo "CocoaPods SDK-only Performance boundary passed."
 
 forbidden_ui_pod="$package_harness/forbidden-sdk-only-ui-pod.log"
 if xcrun swiftc \
@@ -691,6 +761,39 @@ ruby -rjson -e '
 ' "$cocoapods_api_json" "$cocoapods_ui_api_json" "$spm_ui_api_json"
 
 echo "CocoaPods UI consumer, SwiftPM aggregate inventory, and internal boundary passed."
+
+cocoapods_performance_module_dir="$package_harness/CocoaPodsPerformanceModule"
+mkdir -p "$cocoapods_performance_module_dir"
+cocoapods_performance_sources=()
+while IFS= read -r source; do
+  cocoapods_performance_sources+=("$source")
+done < <(find Core/Sources SDK/Sources/NearWire SDK/Sources/NearWirePerformance \
+  -type f -name '*.swift' -print | sort)
+
+SDKROOT="$ios_sdk" xcrun --sdk iphoneos swiftc \
+  -parse-as-library \
+  -emit-library \
+  -module-name NearWire \
+  -emit-module-path "$cocoapods_performance_module_dir/NearWire.swiftmodule" \
+  -o "$cocoapods_performance_module_dir/libNearWire.dylib" \
+  -swift-version 5 \
+  -strict-concurrency=complete \
+  -warnings-as-errors \
+  -target arm64-apple-ios16.0 \
+  -sdk "$ios_sdk" \
+  "${cocoapods_performance_sources[@]}"
+
+xcrun swiftc \
+  -typecheck \
+  -swift-version 5 \
+  -strict-concurrency=complete \
+  -warnings-as-errors \
+  -target arm64-apple-ios16.0 \
+  -sdk "$ios_sdk" \
+  -I "$cocoapods_performance_module_dir" \
+  SDK/Tests/NearWirePerformanceConsumer/CocoaPodsPerformanceConsumer.swift
+
+echo "CocoaPods Performance consumer passed."
 
 xcrun swiftc \
   -typecheck \
