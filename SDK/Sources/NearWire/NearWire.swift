@@ -45,9 +45,25 @@ private enum SDKEventNamespace {
 
 private final class SDKPublicConnectionToken: @unchecked Sendable {}
 
+private enum SDKConnectionAttemptOrigin: Equatable {
+  case explicit
+  case recovery(generation: UInt64, attempt: Int)
+}
+
 private enum SDKPublicConnectionSlot {
-  case attempt(SDKPublicConnectionToken, SDKSessionTransitionGate)
-  case active(SDKPublicConnectionToken, SDKPublicConnectedOwner)
+  case attempt(
+    SDKPublicConnectionToken,
+    SDKSessionTransitionGate,
+    SDKCleanupReceipt,
+    SDKLifecycleIntentToken,
+    SDKConnectionAttemptOrigin
+  )
+  case active(
+    SDKPublicConnectionToken,
+    SDKPublicConnectedOwner,
+    SDKCleanupReceipt,
+    SDKLifecycleIntentToken
+  )
 }
 
 struct SDKRuntimeDependencies: Sendable {
@@ -79,19 +95,47 @@ public actor NearWire {
     eventHub.makeStream()
   }
 
-  public var currentState: NearWireState { state }
+  public nonisolated var connectionStatuses: AsyncStream<NearWireConnectionStatus> {
+    connectionStatusHub.makeStream()
+  }
 
-  internal nonisolated var streamSubscriberCounts: (states: Int, events: Int) {
-    (stateHub.subscriberCount, eventHub.subscriberCount)
+  public var currentState: NearWireState { state }
+  public var connectionStatus: NearWireConnectionStatus { status }
+
+  internal nonisolated var streamSubscriberCounts: (states: Int, statuses: Int, events: Int) {
+    (stateHub.subscriberCount, connectionStatusHub.subscriberCount, eventHub.subscriberCount)
+  }
+
+  internal var lifecycleSnapshot: SDKLifecycleSnapshot {
+    SDKLifecycleSnapshot(
+      hasIntent: connectionIntent != nil,
+      intentIsPending: connectionIntent?.phase == .pending,
+      attemptsUsed: connectionIntent?.attemptsUsed ?? 0,
+      hasRecoveryTask: recoveryTask != nil,
+      hasCleanupReceipt: currentCleanupReceipt != nil,
+      isSuspended: isConnectionSuspended,
+      resumeAfterCleanup: resumeAfterSuspendedCleanup
+    )
   }
 
   private nonisolated let stateHub: StateStreamHub
+  private nonisolated let connectionStatusHub: ConnectionStatusStreamHub
   private nonisolated let eventHub: EventStreamHub
   private nonisolated let dependencies: SDKRuntimeDependencies
   private nonisolated let connectionDependencies: SDKPublicConnectionDependencies
   private let instanceIdentifier: UUID
   private var state: NearWireState = .idle
+  private var status = NearWireConnectionStatus(state: .idle)
   private var connectionSlot: SDKPublicConnectionSlot?
+  private var lifecycleGeneration: UInt64 = 0
+  private var connectionIntent: SDKLifecycleIntent?
+  private var isConnectionSuspended = false
+  private var resumeAfterSuspendedCleanup = false
+  private var lifecycleCleanupCommand: SDKLifecycleCommandToken?
+  private var spontaneousTerminalCleanup:
+    (token: SDKPublicConnectionToken, receipt: SDKCleanupReceipt)?
+  private var recoveryTask: (token: SDKRecoveryTaskToken, task: Task<Void, Never>)?
+  private var detachedAttemptReceipt: (token: SDKPublicConnectionToken, receipt: SDKCleanupReceipt)?
   private var queue: BoundedEventQueue<SDKQueuedEvent>
   private var liveEventIDs = Set<EventID>()
   private var submittedCount: UInt64 = 0
@@ -103,6 +147,9 @@ public actor NearWire {
   public init(configuration: NearWireConfiguration = .default) {
     self.configuration = configuration
     stateHub = StateStreamHub(initial: .idle)
+    connectionStatusHub = ConnectionStatusStreamHub(
+      initial: NearWireConnectionStatus(state: .idle)
+    )
     eventHub = EventStreamHub(capacity: configuration.eventStreamBufferCapacity)
     dependencies = .live
     connectionDependencies = .live
@@ -118,6 +165,9 @@ public actor NearWire {
   ) {
     self.configuration = configuration
     stateHub = StateStreamHub(initial: .idle)
+    connectionStatusHub = ConnectionStatusStreamHub(
+      initial: NearWireConnectionStatus(state: .idle)
+    )
     eventHub = EventStreamHub(capacity: configuration.eventStreamBufferCapacity)
     self.dependencies = dependencies
     self.connectionDependencies = connectionDependencies
@@ -126,7 +176,9 @@ public actor NearWire {
   }
 
   deinit {
+    recoveryTask?.task.cancel()
     stateHub.finishWithoutChangingState()
+    connectionStatusHub.finishWithoutChangingStatus()
     eventHub.finish()
   }
 
@@ -137,32 +189,65 @@ public actor NearWire {
   public func connect(code: String) async throws {
     let transitionGate = connectionDependencies.makeTransitionGate()
     try await withTaskCancellationHandler {
-      try await performPublicConnect(code: code, transitionGate: transitionGate)
+      try await performPublicConnect(
+        rawCode: code,
+        transitionGate: transitionGate,
+        origin: .explicit
+      )
     } onCancel: {
       transitionGate.requestCancellation(.task)
     }
   }
 
   private func performPublicConnect(
-    code: String,
-    transitionGate: SDKSessionTransitionGate
+    rawCode: String?,
+    transitionGate: SDKSessionTransitionGate,
+    origin: SDKConnectionAttemptOrigin
   ) async throws {
     guard state != .shutdown else { throw NearWireError.shutdown }
-    guard !Task.isCancelled else { throw NearWireError.connectionCancelled }
-    if let connectionSlot {
-      switch connectionSlot {
-      case .attempt:
-        throw SDKPublicConnectionErrorMapping.connectionInProgress()
-      case .active:
-        throw SDKPublicConnectionErrorMapping.alreadyConnected()
+    let pairingCode: PairingCode
+    let intentToken: SDKLifecycleIntentToken
+    switch origin {
+    case .explicit:
+      guard !Task.isCancelled else { throw NearWireError.connectionCancelled }
+      guard !isConnectionSuspended else {
+        throw SDKPublicConnectionErrorMapping.connectionSuspended()
       }
-    }
-
-    let pairingTransfer: SDKPairingCodeTransfer
-    do {
-      pairingTransfer = try SDKPairingCodeTransfer(rawValue: code)
-    } catch {
-      throw SDKPublicConnectionErrorMapping.invalidPairingCode()
+      guard lifecycleCleanupCommand == nil, spontaneousTerminalCleanup == nil,
+        recoveryTask == nil
+      else {
+        throw SDKPublicConnectionErrorMapping.connectionInProgress()
+      }
+      if let connectionSlot {
+        switch connectionSlot {
+        case .attempt:
+          throw SDKPublicConnectionErrorMapping.connectionInProgress()
+        case .active:
+          throw SDKPublicConnectionErrorMapping.alreadyConnected()
+        }
+      }
+      guard connectionIntent == nil else {
+        throw SDKPublicConnectionErrorMapping.connectionIntentExists()
+      }
+      do {
+        pairingCode = try PairingCode(rawCode ?? "")
+      } catch {
+        throw SDKPublicConnectionErrorMapping.invalidPairingCode()
+      }
+      intentToken = SDKLifecycleIntentToken()
+    case .recovery(let generation, let attempt):
+      guard
+        !isConnectionSuspended,
+        connectionSlot == nil,
+        var intent = connectionIntent,
+        intent.generation == generation,
+        intent.phase == .active,
+        attempt > 0
+      else { throw NearWireError.connectionCancelled }
+      pairingCode = intent.pairingCode
+      intent.attemptsUsed = max(intent.attemptsUsed, attempt)
+      connectionIntent = intent
+      intentToken = intent.token
     }
 
     let plan: SDKPublicConnectionLimitPlan
@@ -177,24 +262,36 @@ public actor NearWire {
     }
 
     let token = SDKPublicConnectionToken()
+    if case .explicit = origin {
+      lifecycleGeneration &+= 1
+      connectionIntent = SDKLifecycleIntent(
+        token: intentToken,
+        pairingCode: pairingCode,
+        generation: lifecycleGeneration,
+        phase: .pending,
+        attemptsUsed: 0
+      )
+    }
+    let pairingTransfer = SDKPairingCodeTransfer(pairingCode: pairingCode)
+    let cleanupReceipt = SDKCleanupReceipt()
     let priorState = state
-    connectionSlot = .attempt(token, transitionGate)
+    connectionSlot = .attempt(token, transitionGate, cleanupReceipt, intentToken, origin)
     connectionDependencies.hooks.reachSynchronous(.beforeLeaseClaim)
     if let failure = transitionGate.currentFailure() {
-      connectionSlot = nil
+      clearPublicAttemptReservation(token: token, settleReceipt: true)
       throw publicConnectionError(gateFailure: failure, fallback: nil)
     }
     let claimedLease: SDKPublicConnectionLease
     do {
       claimedLease = try connectionDependencies.claimLease()
     } catch let error as ProcessConnectionLeaseError {
-      connectionSlot = nil
+      clearPublicAttemptReservation(token: token, settleReceipt: true)
       throw publicConnectionError(
         gateFailure: transitionGate.currentFailure(),
         fallback: SDKPublicConnectionErrorMapping.map(error)
       )
     } catch {
-      connectionSlot = nil
+      clearPublicAttemptReservation(token: token, settleReceipt: true)
       throw publicConnectionError(
         gateFailure: transitionGate.currentFailure(),
         fallback: NearWireError(
@@ -319,7 +416,14 @@ public actor NearWire {
       )
     }
     didBeginDiscovery = true
-    updateSessionState(.discovering)
+    if origin == .explicit {
+      setConnectionPresentation(
+        state: .discovering,
+        lastError: nil,
+        reconnectAttempt: nil,
+        isSuspended: false
+      )
+    }
 
     await connectionDependencies.hooks.reach(.beforeAdmissionTarget)
     let admissionTarget = SDKSessionTransitionTarget()
@@ -357,7 +461,7 @@ public actor NearWire {
         lease: lease,
         priorState: priorState,
         didBeginDiscovery: didBeginDiscovery,
-        fallback: SDKPublicConnectionErrorMapping.map(error.code)
+        fallback: connectionAttemptFailure(for: error.code, origin: origin)
       )
     } catch {
       transitionGate.removeTarget(token: admissionTarget)
@@ -405,8 +509,18 @@ public actor NearWire {
         lifetime: admitted.lifetime,
         lease: retainedLease,
         hooks: connectionDependencies.hooks,
+        cleanupStarted: { [weak self] in
+          await self?.beginPublicTerminalCleanup(
+            token: token,
+            receipt: cleanupReceipt
+          )
+        },
         delivery: { [weak self] code in
-          await self?.receivePublicTerminal(token: token, code: code)
+          await self?.receivePublicTerminal(
+            token: token,
+            receipt: cleanupReceipt,
+            code: code
+          )
         }
       )
     } catch {
@@ -450,7 +564,7 @@ public actor NearWire {
       try finishPublicAttemptWithLifetime(
         token: token,
         didBeginDiscovery: didBeginDiscovery,
-        fallback: SDKPublicConnectionErrorMapping.map(error.code)
+        fallback: connectionAttemptFailure(for: error.code, origin: origin)
       )
     } catch {
       transitionGate.removeTarget(token: admittedTarget)
@@ -495,7 +609,7 @@ public actor NearWire {
       try finishPublicAttemptWithLifetime(
         token: token,
         didBeginDiscovery: didBeginDiscovery,
-        fallback: SDKPublicConnectionErrorMapping.map(error.code)
+        fallback: connectionAttemptFailure(for: error.code, origin: origin)
       )
     } catch {
       transitionGate.removeTarget(token: attachmentTarget)
@@ -675,8 +789,69 @@ public actor NearWire {
   }
 
   private func isCurrentPublicAttempt(_ token: SDKPublicConnectionToken) -> Bool {
-    guard case .attempt(let current, _) = connectionSlot else { return false }
+    guard case .attempt(let current, _, _, _, _) = connectionSlot else { return false }
     return current === token
+  }
+
+  private func clearPublicAttemptReservation(
+    token: SDKPublicConnectionToken,
+    settleReceipt: Bool
+  ) {
+    guard
+      case .attempt(
+        let current,
+        _,
+        let receipt,
+        let intentToken,
+        let origin
+      ) = connectionSlot,
+      current === token
+    else { return }
+    if settleReceipt { receipt.settle() }
+    connectionSlot = nil
+    if case .explicit = origin, connectionIntent?.token === intentToken {
+      connectionIntent = nil
+    }
+  }
+
+  private func cleanupReceipt(for token: SDKPublicConnectionToken) -> SDKCleanupReceipt? {
+    if case .attempt(let current, _, let receipt, _, _) = connectionSlot, current === token {
+      return receipt
+    }
+    if detachedAttemptReceipt?.token === token {
+      return detachedAttemptReceipt?.receipt
+    }
+    return nil
+  }
+
+  private func settleCleanupReceipt(for token: SDKPublicConnectionToken) {
+    cleanupReceipt(for: token)?.settle()
+    if detachedAttemptReceipt?.token === token { detachedAttemptReceipt = nil }
+  }
+
+  private var currentCleanupReceipt: SDKCleanupReceipt? {
+    switch connectionSlot {
+    case .attempt(_, _, let receipt, _, _), .active(_, _, let receipt, _): return receipt
+    case nil: return nil
+    }
+  }
+
+  private func currentAttemptOrigin(
+    for token: SDKPublicConnectionToken
+  ) -> SDKConnectionAttemptOrigin? {
+    guard case .attempt(let current, _, _, _, let origin) = connectionSlot,
+      current === token
+    else { return nil }
+    return origin
+  }
+
+  private func clearPendingIntentIfExplicitAttempt(_ token: SDKPublicConnectionToken) {
+    guard case .attempt(let current, _, _, let intentToken, let origin) = connectionSlot,
+      current === token,
+      case .explicit = origin,
+      connectionIntent?.token === intentToken
+    else { return }
+    connectionIntent = nil
   }
 
   private func makePublicAdmission(
@@ -706,7 +881,14 @@ public actor NearWire {
     guard state != .shutdown, isCurrentPublicAttempt(token), gate.isAuthorized() else {
       return .cancelled
     }
-    updateSessionState(.connecting)
+    if currentAttemptOrigin(for: token) == .explicit {
+      setConnectionPresentation(
+        state: .connecting,
+        lastError: nil,
+        reconnectAttempt: nil,
+        isSuspended: false
+      )
+    }
     return .authorized
   }
 
@@ -716,21 +898,24 @@ public actor NearWire {
     lease: SDKPublicConnectionLease?,
     priorState: NearWireState,
     didBeginDiscovery: Bool,
-    fallback: NearWireError
+    fallback: Error
   ) async throws -> Never {
+    let origin = currentAttemptOrigin(for: token)
     await connectionDependencies.hooks.reach(.beforeRelease)
     lease?.release()
     await connectionDependencies.hooks.reach(.afterRelease)
+    settleCleanupReceipt(for: token)
 
-    let error = publicConnectionError(
+    let error = connectionAttemptFailure(
       gateFailure: transitionGate.currentFailure(),
-      fallback: fallback
+      fallback: fallback,
+      origin: origin
     )
     if state != .shutdown, isCurrentPublicAttempt(token) {
-      connectionSlot = nil
-      if didBeginDiscovery {
+      clearPublicAttemptReservation(token: token, settleReceipt: true)
+      if didBeginDiscovery, origin == .explicit {
         updateSessionState(.disconnected)
-      } else if state != priorState {
+      } else if origin == .explicit, state != priorState {
         updateSessionState(priorState)
       }
     }
@@ -742,23 +927,61 @@ public actor NearWire {
     didBeginDiscovery: Bool,
     failure: SDKSessionTransitionFailure
   ) throws -> Never {
+    let origin = currentAttemptOrigin(for: token)
     try finishPublicAttemptWithLifetime(
       token: token,
       didBeginDiscovery: didBeginDiscovery,
-      fallback: publicConnectionError(gateFailure: failure, fallback: nil)
+      fallback: connectionAttemptFailure(
+        gateFailure: failure,
+        fallback: NearWireError(
+          code: .connectionInternalFailure,
+          message: "NearWire could not complete its internal connection transition."
+        ),
+        origin: origin
+      )
     )
   }
 
   private func finishPublicAttemptWithLifetime(
     token: SDKPublicConnectionToken,
     didBeginDiscovery: Bool,
-    fallback: NearWireError
+    fallback: Error
   ) throws -> Never {
     if state != .shutdown, isCurrentPublicAttempt(token) {
-      connectionSlot = nil
-      if didBeginDiscovery { updateSessionState(.disconnected) }
+      let origin = currentAttemptOrigin(for: token)
+      clearPendingIntentIfExplicitAttempt(token)
+      if didBeginDiscovery, origin == .explicit { updateSessionState(.disconnected) }
     }
     throw state == .shutdown ? NearWireError.shutdown : fallback
+  }
+
+  private func connectionAttemptFailure(
+    for code: SDKSessionAdmissionError.Code,
+    origin: SDKConnectionAttemptOrigin
+  ) -> Error {
+    switch origin {
+    case .explicit:
+      return SDKPublicConnectionErrorMapping.map(code)
+    case .recovery:
+      return SDKLifecycleRecoveryFailure(code: code, phase: .recoveryAttempt)
+    }
+  }
+
+  private func connectionAttemptFailure(
+    gateFailure: SDKSessionTransitionFailure?,
+    fallback: Error,
+    origin: SDKConnectionAttemptOrigin?
+  ) -> Error {
+    if case .terminal(let code) = gateFailure,
+      let origin,
+      case .recovery = origin
+    {
+      return SDKLifecycleRecoveryFailure(code: code, phase: .recoveryAttempt)
+    }
+    if let gateFailure {
+      return publicConnectionError(gateFailure: gateFailure, fallback: nil)
+    }
+    return fallback
   }
 
   private func publicConnectionError(
@@ -792,25 +1015,442 @@ public actor NearWire {
     owner: SDKPublicConnectedOwner
   ) throws {
     guard state != .shutdown else { throw NearWireError.shutdown }
-    guard isCurrentPublicAttempt(token) else {
-      throw SDKSessionTransitionFailure.invalidState
-    }
     switch gate.claimConnectedCommit() {
     case .failure(let failure):
       throw failure
     case .success:
-      connectionSlot = .active(token, owner)
-      updateSessionState(.connected)
+      break
+    }
+    guard
+      case .attempt(
+        let current,
+        _,
+        let receipt,
+        let intentToken,
+        _
+      ) = connectionSlot,
+      current === token,
+      connectionIntent?.token === intentToken
+    else {
+      throw SDKSessionTransitionFailure.invalidState
+    }
+    connectionIntent?.phase = .active
+    connectionSlot = .active(token, owner, receipt, intentToken)
+    setConnectionPresentation(
+      state: .connected,
+      lastError: nil,
+      reconnectAttempt: nil,
+      isSuspended: isConnectionSuspended
+    )
+  }
+
+  private func beginPublicTerminalCleanup(
+    token: SDKPublicConnectionToken,
+    receipt: SDKCleanupReceipt
+  ) {
+    switch connectionSlot {
+    case .attempt(let current, _, let currentReceipt, _, _)
+    where current === token && currentReceipt === receipt:
+      spontaneousTerminalCleanup = (token, receipt)
+    case .active(let current, _, let currentReceipt, _)
+    where current === token && currentReceipt === receipt:
+      spontaneousTerminalCleanup = (token, receipt)
+    default:
+      break
     }
   }
 
   private func receivePublicTerminal(
     token: SDKPublicConnectionToken,
-    code _: SDKSessionAdmissionError.Code
+    receipt: SDKCleanupReceipt,
+    code: SDKSessionAdmissionError.Code
   ) {
-    guard case .active(let current, _) = connectionSlot, current === token else { return }
-    connectionSlot = nil
-    if state != .shutdown { updateSessionState(.disconnected) }
+    receipt.settle()
+    if spontaneousTerminalCleanup?.token === token,
+      spontaneousTerminalCleanup?.receipt === receipt
+    {
+      spontaneousTerminalCleanup = nil
+    }
+    if detachedAttemptReceipt?.token === token,
+      detachedAttemptReceipt?.receipt === receipt
+    {
+      detachedAttemptReceipt = nil
+    }
+    switch connectionSlot {
+    case .attempt(
+      let current,
+      _,
+      let currentReceipt,
+      let intentToken,
+      let origin
+    ) where current === token && currentReceipt === receipt:
+      connectionSlot = nil
+      if case .explicit = origin, connectionIntent?.token === intentToken {
+        connectionIntent = nil
+      }
+      if case .explicit = origin, state != .shutdown {
+        updateSessionState(.disconnected)
+      }
+    case .active(let current, _, let currentReceipt, _)
+    where
+      current === token && currentReceipt === receipt:
+      connectionSlot = nil
+      handleActiveTerminal(code)
+    default:
+      return
+    }
+  }
+
+  private func handleActiveTerminal(_ code: SDKSessionAdmissionError.Code) {
+    guard state != .shutdown else { return }
+    if connectionIntent == nil {
+      setConnectionPresentation(
+        state: .disconnected,
+        lastError: nil,
+        reconnectAttempt: nil,
+        isSuspended: isConnectionSuspended
+      )
+      return
+    }
+    if lifecycleCleanupCommand != nil || isConnectionSuspended {
+      setConnectionPresentation(
+        state: .disconnected,
+        lastError: nil,
+        reconnectAttempt: nil,
+        isSuspended: isConnectionSuspended
+      )
+      return
+    }
+
+    let error = SDKPublicConnectionErrorMapping.map(code)
+    switch SDKLifecycleRecoveryMapping.disposition(for: code, phase: .activeTerminal) {
+    case .transient where configuration.reconnectionPolicy.isEnabled:
+      scheduleRecovery(lastError: error, resetBudget: false, immediateWhenDisabled: false)
+    case .transient:
+      setConnectionPresentation(
+        state: .disconnected,
+        lastError: error,
+        reconnectAttempt: nil,
+        isSuspended: false
+      )
+    case .permanent, .lifecycleCancellation:
+      connectionIntent = nil
+      setConnectionPresentation(
+        state: .disconnected,
+        lastError: error,
+        reconnectAttempt: nil,
+        isSuspended: false
+      )
+    }
+  }
+
+  private func scheduleRecovery(
+    lastError: NearWireError? = nil,
+    resetBudget: Bool,
+    immediateWhenDisabled: Bool
+  ) {
+    guard state != .shutdown, !isConnectionSuspended, connectionSlot == nil,
+      recoveryTask == nil, var intent = connectionIntent, intent.phase == .active
+    else { return }
+
+    if resetBudget {
+      lifecycleGeneration &+= 1
+      intent.generation = lifecycleGeneration
+      intent.attemptsUsed = 0
+    }
+    let policy = configuration.reconnectionPolicy
+    let attempt: Int
+    let delay: Duration
+    if policy.isEnabled {
+      attempt = intent.attemptsUsed + 1
+      guard attempt <= policy.maximumAttempts,
+        let configuredDelay = SDKValidation.reconnectionDelay(
+          policy: policy,
+          attempt: attempt
+        )
+      else {
+        connectionIntent = nil
+        setConnectionPresentation(
+          state: .disconnected,
+          lastError: lastError ?? status.lastError,
+          reconnectAttempt: nil,
+          isSuspended: false
+        )
+        return
+      }
+      delay = configuredDelay
+    } else {
+      guard immediateWhenDisabled else {
+        setConnectionPresentation(
+          state: .disconnected,
+          lastError: lastError ?? status.lastError,
+          reconnectAttempt: nil,
+          isSuspended: false
+        )
+        return
+      }
+      attempt = 1
+      delay = .zero
+    }
+
+    intent.attemptsUsed = attempt
+    connectionIntent = intent
+    let generation = intent.generation
+    let taskToken = SDKRecoveryTaskToken()
+    let sleep = connectionDependencies.sleep
+    setConnectionPresentation(
+      state: .reconnecting,
+      lastError: lastError ?? status.lastError,
+      reconnectAttempt: attempt,
+      isSuspended: false
+    )
+    let task = Task { [weak self] in
+      do {
+        if delay > .zero { try await sleep(delay) }
+      } catch {
+        guard let self else { return }
+        await self.recoveryDelayFailed(
+          token: taskToken,
+          generation: generation
+        )
+        return
+      }
+      guard let self else { return }
+      await self.runScheduledRecovery(
+        token: taskToken,
+        generation: generation,
+        attempt: attempt
+      )
+    }
+    recoveryTask = (taskToken, task)
+  }
+
+  private func recoveryDelayFailed(
+    token: SDKRecoveryTaskToken,
+    generation: UInt64
+  ) {
+    guard recoveryTask?.token === token else { return }
+    recoveryTask = nil
+    guard state != .shutdown, !isConnectionSuspended,
+      connectionIntent?.generation == generation
+    else { return }
+    connectionIntent = nil
+    setConnectionPresentation(
+      state: .disconnected,
+      lastError: NearWireError(
+        code: .connectionInternalFailure,
+        message: "NearWire could not schedule its bounded recovery delay."
+      ),
+      reconnectAttempt: nil,
+      isSuspended: false
+    )
+  }
+
+  private func runScheduledRecovery(
+    token: SDKRecoveryTaskToken,
+    generation: UInt64,
+    attempt: Int
+  ) async {
+    guard recoveryTask?.token === token else { return }
+    recoveryTask = nil
+    guard state != .shutdown, !isConnectionSuspended, connectionSlot == nil,
+      connectionIntent?.generation == generation,
+      connectionIntent?.phase == .active
+    else { return }
+
+    let gate = connectionDependencies.makeTransitionGate()
+    do {
+      try await performPublicConnect(
+        rawCode: nil,
+        transitionGate: gate,
+        origin: .recovery(generation: generation, attempt: attempt)
+      )
+    } catch let failure as SDKLifecycleRecoveryFailure {
+      let receipt = currentCleanupReceipt
+      if let receipt { await receipt.completion.value }
+      guard state != .shutdown, !isConnectionSuspended,
+        connectionIntent?.generation == generation,
+        connectionIntent?.phase == .active
+      else { return }
+      handleRecoveryAttemptFailure(
+        failure.publicError,
+        disposition: failure.disposition
+      )
+    } catch let error as NearWireError {
+      let receipt = currentCleanupReceipt
+      if let receipt { await receipt.completion.value }
+      guard state != .shutdown, !isConnectionSuspended,
+        connectionIntent?.generation == generation,
+        connectionIntent?.phase == .active
+      else { return }
+      handleRecoveryAttemptFailure(error)
+    } catch {
+      let receipt = currentCleanupReceipt
+      if let receipt { await receipt.completion.value }
+      guard state != .shutdown, connectionIntent?.generation == generation else { return }
+      handleRecoveryAttemptFailure(
+        NearWireError(
+          code: .connectionInternalFailure,
+          message: "NearWire could not complete its internal recovery transition."
+        )
+      )
+    }
+  }
+
+  private func handleRecoveryAttemptFailure(
+    _ error: NearWireError,
+    disposition: SDKLifecycleRecoveryDisposition? = nil
+  ) {
+    switch disposition ?? recoveryDisposition(for: error.code) {
+    case .transient where configuration.reconnectionPolicy.isEnabled:
+      scheduleRecovery(lastError: error, resetBudget: false, immediateWhenDisabled: false)
+    case .transient:
+      setConnectionPresentation(
+        state: .disconnected,
+        lastError: error,
+        reconnectAttempt: nil,
+        isSuspended: false
+      )
+    case .permanent, .lifecycleCancellation:
+      connectionIntent = nil
+      setConnectionPresentation(
+        state: .disconnected,
+        lastError: error,
+        reconnectAttempt: nil,
+        isSuspended: false
+      )
+    }
+  }
+
+  private func recoveryDisposition(
+    for code: NearWireError.Code
+  ) -> SDKLifecycleRecoveryDisposition {
+    switch code {
+    case .discoveryTimedOut, .discoveryUnavailable, .connectionTimedOut, .connectionClosed:
+      return .transient
+    case .connectionCancelled, .shutdown:
+      return .lifecycleCancellation
+    case .invalidConfiguration, .invalidEventType, .invalidContent,
+      .contentEncodingFailed, .contentDecodingFailed, .invalidEventOptions, .invalidReply,
+      .identifierGenerationFailed, .eventTooLarge, .bufferOperationFailed, .streamOverflow,
+      .invalidPairingCode, .connectionInProgress, .alreadyConnected, .connectionSuspended,
+      .connectionIntentExists, .anotherConnectionIsActive, .connectionOwnershipUnavailable,
+      .localNetworkDenied, .discoveryAmbiguous, .secureConnectionFailed,
+      .incompatibleViewer, .viewerIdentityMismatch, .viewerRejected,
+      .connectionInternalFailure:
+      return .permanent
+    }
+  }
+
+  /// Clears connection intent and waits for the exact current cleanup release boundary.
+  public func disconnect() async {
+    guard state != .shutdown else { return }
+    let command = SDKLifecycleCommandToken()
+    lifecycleCleanupCommand = command
+    lifecycleGeneration &+= 1
+    connectionIntent = nil
+    isConnectionSuspended = false
+    resumeAfterSuspendedCleanup = false
+    let delayedRecovery = recoveryTask
+    delayedRecovery?.task.cancel()
+    let receipt = currentCleanupReceipt
+    requestCurrentLifecycleCancellation(.disconnect)
+    setConnectionPresentation(
+      state: state,
+      lastError: nil,
+      reconnectAttempt: nil,
+      isSuspended: false
+    )
+    if let receipt { await receipt.completion.value }
+    if let delayedRecovery { await delayedRecovery.task.value }
+    if let delayedRecovery, recoveryTask?.token === delayedRecovery.token {
+      recoveryTask = nil
+    }
+    guard state != .shutdown, lifecycleCleanupCommand === command else { return }
+    lifecycleCleanupCommand = nil
+    setConnectionPresentation(
+      state: .disconnected,
+      lastError: nil,
+      reconnectAttempt: nil,
+      isSuspended: false
+    )
+  }
+
+  /// Suspends connection work according to host-owned application lifecycle policy.
+  public func suspendConnection() async {
+    guard state != .shutdown else { return }
+    let command = SDKLifecycleCommandToken()
+    lifecycleCleanupCommand = command
+    isConnectionSuspended = true
+    resumeAfterSuspendedCleanup = false
+    if connectionIntent?.phase == .pending { connectionIntent = nil }
+    lifecycleGeneration &+= 1
+    connectionIntent?.generation = lifecycleGeneration
+    let delayedRecovery = recoveryTask
+    delayedRecovery?.task.cancel()
+    let receipt = currentCleanupReceipt
+    requestCurrentLifecycleCancellation(.suspension)
+    setConnectionPresentation(
+      state: state,
+      lastError: nil,
+      reconnectAttempt: nil,
+      isSuspended: true
+    )
+    if let receipt { await receipt.completion.value }
+    if let delayedRecovery { await delayedRecovery.task.value }
+    if let delayedRecovery, recoveryTask?.token === delayedRecovery.token {
+      recoveryTask = nil
+    }
+    guard state != .shutdown, lifecycleCleanupCommand === command else { return }
+    lifecycleCleanupCommand = nil
+    let finalState: NearWireState =
+      receipt == nil && delayedRecovery == nil
+      ? state : .disconnected
+    setConnectionPresentation(
+      state: finalState,
+      lastError: nil,
+      reconnectAttempt: nil,
+      isSuspended: isConnectionSuspended
+    )
+    if resumeAfterSuspendedCleanup, !isConnectionSuspended {
+      resumeAfterSuspendedCleanup = false
+      scheduleRecovery(resetBudget: true, immediateWhenDisabled: true)
+    }
+  }
+
+  /// Resumes host-authorized connection policy without blocking for discovery.
+  public func resumeConnection() {
+    guard state != .shutdown else { return }
+    let wasSuspended = isConnectionSuspended
+    isConnectionSuspended = false
+    setConnectionPresentation(
+      state: state,
+      lastError: status.lastError,
+      reconnectAttempt: status.reconnectAttempt,
+      isSuspended: false
+    )
+    guard connectionIntent?.phase == .active else { return }
+    if wasSuspended, lifecycleCleanupCommand != nil {
+      resumeAfterSuspendedCleanup = true
+      return
+    }
+    guard connectionSlot == nil, recoveryTask == nil else { return }
+    let disabledTransient =
+      !configuration.reconnectionPolicy.isEnabled
+      && state == .disconnected && status.lastError != nil
+    guard wasSuspended || disabledTransient else { return }
+    scheduleRecovery(resetBudget: true, immediateWhenDisabled: true)
+  }
+
+  private func requestCurrentLifecycleCancellation(_ reason: SDKSessionCancellationReason) {
+    switch connectionSlot {
+    case .attempt(_, let gate, _, _, _):
+      gate.requestCancellation(reason)
+    case .active(_, let owner, _, _):
+      owner.cancel()
+    case nil:
+      break
+    }
   }
 
   /// Permanently ends this instance and releases its in-memory work and observers.
@@ -818,18 +1458,29 @@ public actor NearWire {
     guard state != .shutdown else { return }
     if let connectionSlot {
       switch connectionSlot {
-      case .attempt(_, let gate):
+      case .attempt(let token, let gate, let receipt, _, _):
+        detachedAttemptReceipt = (token, receipt)
         gate.requestCancellation(.shutdown)
-      case .active(_, let owner):
+      case .active(_, let owner, _, _):
         owner.cancel()
       }
       self.connectionSlot = nil
     }
+    recoveryTask?.task.cancel()
+    recoveryTask = nil
+    lifecycleCleanupCommand = nil
+    spontaneousTerminalCleanup = nil
+    lifecycleGeneration &+= 1
+    connectionIntent = nil
+    isConnectionSuspended = false
+    resumeAfterSuspendedCleanup = false
     _ = queue.clear(reason: .ownerRequested)
     liveEventIDs.removeAll(keepingCapacity: false)
     state = .shutdown
+    status = NearWireConnectionStatus(state: .shutdown)
     signalOutboundWork()
     stateHub.finish(with: .shutdown)
+    connectionStatusHub.finish(with: status)
     eventHub.finish()
   }
 
@@ -1384,9 +2035,33 @@ extension NearWire {
   }
 
   func updateSessionState(_ newState: NearWireState) {
-    guard state != .shutdown, newState != .shutdown, newState != state else { return }
+    guard state != .shutdown, newState != .shutdown else { return }
+    setConnectionPresentation(
+      state: newState,
+      lastError: status.lastError,
+      reconnectAttempt: status.reconnectAttempt,
+      isSuspended: status.isSuspended
+    )
+  }
+
+  private func setConnectionPresentation(
+    state newState: NearWireState,
+    lastError: NearWireError?,
+    reconnectAttempt: Int?,
+    isSuspended: Bool
+  ) {
+    guard state != .shutdown, newState != .shutdown else { return }
+    let priorState = state
+    let newStatus = NearWireConnectionStatus(
+      state: newState,
+      lastError: lastError,
+      reconnectAttempt: reconnectAttempt,
+      isSuspended: isSuspended
+    )
     state = newState
-    stateHub.publish(newState)
+    status = newStatus
+    if priorState != newState { stateHub.publish(newState) }
+    connectionStatusHub.publish(newStatus)
   }
 
   @discardableResult

@@ -17,6 +17,8 @@ public struct NearWireError: Error, Equatable, Sendable {
     case invalidPairingCode
     case connectionInProgress
     case alreadyConnected
+    case connectionSuspended
+    case connectionIntentExists
     case anotherConnectionIsActive
     case connectionOwnershipUnavailable
     case connectionCancelled

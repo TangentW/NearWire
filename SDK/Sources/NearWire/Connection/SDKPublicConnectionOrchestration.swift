@@ -120,6 +120,41 @@ struct SDKPublicConnectionDependencies: Sendable {
     @Sendable (SDKSessionPumpAttachment, NearWire, SDKActiveEventPumpLimits)
       -> SDKActiveEventPump
   let hooks: SDKPublicConnectionHooks
+  let sleep: @Sendable (Duration) async throws -> Void
+
+  init(
+    makeTransitionGate: @escaping @Sendable () -> SDKSessionTransitionGate,
+    claimLease: @escaping @Sendable () throws -> SDKPublicConnectionLease,
+    loadInstallationIdentity: @escaping @Sendable () async throws -> String,
+    bundleMetadata: @escaping @Sendable () -> SDKBundleMetadataInput,
+    makeAdmission:
+      @escaping @Sendable (
+        PairingCode,
+        WireHello,
+        SDKPublicConnectionLimitPlan,
+        SDKSessionTransitionGate,
+        @escaping @Sendable () async -> SDKSessionPhaseAuthorization
+      ) -> SDKSessionAdmission,
+    makePump:
+      @escaping @Sendable (
+        SDKSessionPumpAttachment,
+        NearWire,
+        SDKActiveEventPumpLimits
+      ) -> SDKActiveEventPump,
+    hooks: SDKPublicConnectionHooks,
+    sleep: @escaping @Sendable (Duration) async throws -> Void = {
+      try await ContinuousClock().sleep(for: $0)
+    }
+  ) {
+    self.makeTransitionGate = makeTransitionGate
+    self.claimLease = claimLease
+    self.loadInstallationIdentity = loadInstallationIdentity
+    self.bundleMetadata = bundleMetadata
+    self.makeAdmission = makeAdmission
+    self.makePump = makePump
+    self.hooks = hooks
+    self.sleep = sleep
+  }
 
   static let live = SDKPublicConnectionDependencies(
     makeTransitionGate: { SDKSessionTransitionGate() },
@@ -159,11 +194,12 @@ final class SDKPublicTerminalCoordinator: @unchecked Sendable {
     lifetime: SDKSessionLifetime,
     lease: SDKPublicConnectionLease,
     hooks: SDKPublicConnectionHooks,
+    cleanupStarted: @escaping @Sendable () async -> Void = {},
     delivery: @escaping @Sendable (SDKSessionAdmissionError.Code) async -> Void
   ) throws {
     let registration = try lifetime.termination.registerWait()
     self.lease = lease
-    start(hooks: hooks, delivery: delivery) {
+    start(hooks: hooks, cleanupStarted: cleanupStarted, delivery: delivery) {
       try await registration.wait()
     }
   }
@@ -172,14 +208,21 @@ final class SDKPublicTerminalCoordinator: @unchecked Sendable {
     lease: SDKPublicConnectionLease,
     hooks: SDKPublicConnectionHooks,
     wait: @escaping @Sendable () async throws -> SDKSessionAdmissionError.Code,
+    cleanupStarted: @escaping @Sendable () async -> Void = {},
     delivery: @escaping @Sendable (SDKSessionAdmissionError.Code) async -> Void
   ) {
     self.lease = lease
-    start(hooks: hooks, delivery: delivery, wait: wait)
+    start(
+      hooks: hooks,
+      cleanupStarted: cleanupStarted,
+      delivery: delivery,
+      wait: wait
+    )
   }
 
   private func start(
     hooks: SDKPublicConnectionHooks,
+    cleanupStarted: @escaping @Sendable () async -> Void,
     delivery: @escaping @Sendable (SDKSessionAdmissionError.Code) async -> Void,
     wait: @escaping @Sendable () async throws -> SDKSessionAdmissionError.Code
   ) {
@@ -192,6 +235,7 @@ final class SDKPublicTerminalCoordinator: @unchecked Sendable {
         clearTask()
         return
       }
+      await cleanupStarted()
       await hooks.reach(.beforeRelease)
       releaseLease()
       await hooks.reach(.afterRelease)

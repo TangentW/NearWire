@@ -642,6 +642,11 @@ final class SDKPublicConnectionOrchestrationTests: XCTestCase {
     XCTAssertEqual(probe.snapshot.releases, 0)
     let stateBeforeRelease = await owner.currentState
     XCTAssertEqual(stateBeforeRelease, .connected)
+    await assertConnectError(.connectionInProgress) {
+      try await owner.connect(code: "bad")
+    }
+    XCTAssertEqual(probe.snapshot.claims, 1)
+    XCTAssertEqual(probe.snapshot.identities, 1)
     releaseBarrier.resume()
     await sdkWaitUntil { probe.snapshot.releases == 1 }
     let deliveredState = await states.next()
@@ -675,6 +680,10 @@ final class SDKPublicConnectionOrchestrationTests: XCTestCase {
     let disconnected = await states.next()
     XCTAssertEqual(disconnected, .disconnected)
 
+    await assertConnectError(.connectionIntentExists) {
+      try await owner.connect(code: "ABC234")
+    }
+    await owner.disconnect()
     await assertConnectError(.anotherConnectionIsActive) {
       try await owner.connect(code: "ABC234")
     }
@@ -739,6 +748,666 @@ final class SDKPublicConnectionOrchestrationTests: XCTestCase {
     XCTAssertNil(objc_getAssociatedObject(monitor, ProcessConnectionLeaseNamespace.ownerKey))
   }
 
+  func testDisconnectWaitsForReleaseAndClearsLifecycleIntent() async throws {
+    let probe = SDKPublicConnectionProbe()
+    let session = SDKPublicSessionController()
+    let release = SDKPublicVoidBarrier()
+    let owner = makeSessionOwner(
+      probe: probe,
+      session: session,
+      hooks: SDKPublicConnectionHooks(
+        reachSynchronous: { _ in },
+        reach: { point in
+          if point == .beforeRelease { await release.run() }
+        }
+      )
+    )
+    let connect = Task { try await owner.connect(code: "ABC234") }
+    try await driveConnection(session: session, connect: connect)
+
+    let disconnect = Task { await owner.disconnect() }
+    await release.waitUntilReached()
+    let stateBeforeRelease = await owner.currentState
+    XCTAssertEqual(stateBeforeRelease, .connected)
+    XCTAssertEqual(probe.snapshot.releases, 0)
+    release.resume()
+    await disconnect.value
+
+    let finalState = await owner.currentState
+    let finalLifecycle = await owner.lifecycleSnapshot
+    XCTAssertEqual(finalState, .disconnected)
+    XCTAssertFalse(finalLifecycle.hasIntent)
+    XCTAssertEqual(probe.snapshot.releases, 1)
+    XCTAssertEqual(session.driver.cancelCount, 1)
+  }
+
+  func testSuspendAndExplicitResumeUseFreshRouteWithDisabledPolicy() async throws {
+    let probe = SDKPublicConnectionProbe()
+    let first = SDKPublicSessionController()
+    let second = SDKPublicSessionController()
+    let owner = makeSequenceOwner(
+      probe: probe,
+      sessions: [first, second]
+    )
+    let connect = Task { try await owner.connect(code: "ABC234") }
+    try await driveConnection(session: first, connect: connect)
+
+    await owner.suspendConnection()
+    let suspended = await owner.connectionStatus
+    XCTAssertEqual(suspended.state, .disconnected)
+    XCTAssertTrue(suspended.isSuspended)
+    let suspendedLifecycle = await owner.lifecycleSnapshot
+    XCTAssertTrue(suspendedLifecycle.hasIntent)
+
+    await owner.resumeConnection()
+    await second.driver.waitUntilStarted()
+    try await driveAdmission(session: second)
+    try await sendInitialPolicy(session: second)
+    await waitUntilState(.connected, owner: owner)
+
+    XCTAssertEqual(probe.snapshot.claims, 2)
+    XCTAssertEqual(probe.snapshot.releases, 1)
+    let resumedStatus = await owner.connectionStatus
+    XCTAssertFalse(resumedStatus.isSuspended)
+  }
+
+  func testEnabledRecoveryUsesConfiguredDelayAndFreshRoute() async throws {
+    let probe = SDKPublicConnectionProbe()
+    let first = SDKPublicSessionController()
+    let second = SDKPublicSessionController()
+    let sleeps = SDKLockedCapture<Duration>()
+    let policy = try NearWireReconnectionPolicy(
+      maximumAttempts: 2,
+      initialDelay: .milliseconds(100),
+      maximumDelay: .milliseconds(200)
+    )
+    let owner = makeSequenceOwner(
+      probe: probe,
+      sessions: [first, second],
+      configuration: try NearWireConfiguration(reconnectionPolicy: policy),
+      sleep: { sleeps.append($0) }
+    )
+    let connect = Task { try await owner.connect(code: "ABC234") }
+    try await driveConnection(session: first, connect: connect)
+    let initialSendCount = first.driver.sentData.count
+    _ = try await owner.send(type: "lifecycle.accepted", content: ["value": 1])
+    await sdkWaitUntil { first.driver.sentData.count > initialSendCount }
+
+    first.driver.emitState(.failed)
+    await second.driver.waitUntilStarted()
+    try await driveAdmission(session: second)
+    try await sendInitialPolicy(session: second)
+    await waitUntilState(.connected, owner: owner)
+
+    XCTAssertEqual(sleeps.snapshot, [.milliseconds(100)])
+    XCTAssertEqual(probe.snapshot.claims, 2)
+    XCTAssertEqual(probe.snapshot.releases, 1)
+    let recoveredLifecycle = await owner.lifecycleSnapshot
+    XCTAssertEqual(recoveredLifecycle.attemptsUsed, 1)
+    XCTAssertEqual(second.driver.sentData.count, 2)
+  }
+
+  func testIntentWideBudgetDoesNotResetAfterBriefRecoverySuccess() async throws {
+    let probe = SDKPublicConnectionProbe()
+    let sessions = (0..<3).map { _ in SDKPublicSessionController() }
+    let sleeps = SDKLockedCapture<Duration>()
+    let policy = try NearWireReconnectionPolicy(
+      maximumAttempts: 2,
+      initialDelay: .milliseconds(100),
+      maximumDelay: .milliseconds(200)
+    )
+    let owner = makeSequenceOwner(
+      probe: probe,
+      sessions: sessions,
+      configuration: try NearWireConfiguration(reconnectionPolicy: policy),
+      sleep: { sleeps.append($0) }
+    )
+    let connect = Task { try await owner.connect(code: "ABC234") }
+    try await driveConnection(session: sessions[0], connect: connect)
+
+    sessions[0].driver.emitState(.failed)
+    await sessions[1].driver.waitUntilStarted()
+    try await driveAdmission(session: sessions[1])
+    try await sendInitialPolicy(session: sessions[1])
+    await waitUntilState(.connected, owner: owner)
+
+    sessions[1].driver.emitState(.failed)
+    await sessions[2].driver.waitUntilStarted()
+    try await driveAdmission(session: sessions[2])
+    try await sendInitialPolicy(session: sessions[2])
+    await waitUntilState(.connected, owner: owner)
+
+    sessions[2].driver.emitState(.failed)
+    await waitUntilState(.disconnected, owner: owner)
+    let snapshot = await owner.lifecycleSnapshot
+    XCTAssertFalse(snapshot.hasIntent)
+    XCTAssertFalse(snapshot.hasRecoveryTask)
+    XCTAssertEqual(probe.snapshot.claims, 3)
+    XCTAssertEqual(sleeps.snapshot, [.milliseconds(100), .milliseconds(200)])
+  }
+
+  func testResumeWhileConnectedIsInert() async throws {
+    let probe = SDKPublicConnectionProbe()
+    let session = SDKPublicSessionController()
+    let owner = makeSessionOwner(probe: probe, session: session)
+    let connect = Task { try await owner.connect(code: "ABC234") }
+    try await driveConnection(session: session, connect: connect)
+
+    await owner.resumeConnection()
+    let snapshot = await owner.lifecycleSnapshot
+    let connectedState = await owner.currentState
+    XCTAssertEqual(connectedState, .connected)
+    XCTAssertEqual(snapshot.attemptsUsed, 0)
+    XCTAssertFalse(snapshot.hasRecoveryTask)
+    XCTAssertEqual(probe.snapshot.claims, 1)
+  }
+
+  func testRecoveryDispositionIsExhaustiveAndPhaseAware() {
+    for code in SDKSessionAdmissionError.Code.allCases {
+      _ = SDKLifecycleRecoveryMapping.disposition(for: code, phase: .activeTerminal)
+      _ = SDKLifecycleRecoveryMapping.disposition(for: code, phase: .recoveryAttempt)
+      let productionFailure = SDKLifecycleRecoveryFailure(
+        code: code,
+        phase: .recoveryAttempt
+      )
+      XCTAssertEqual(
+        productionFailure.disposition,
+        SDKLifecycleRecoveryMapping.disposition(for: code, phase: .recoveryAttempt)
+      )
+      XCTAssertEqual(
+        productionFailure.publicError.code,
+        SDKPublicConnectionErrorMapping.map(code).code
+      )
+    }
+    XCTAssertEqual(
+      SDKLifecycleRecoveryMapping.disposition(for: .transportFailed, phase: .activeTerminal),
+      .transient
+    )
+    XCTAssertEqual(
+      SDKLifecycleRecoveryMapping.disposition(for: .transportFailed, phase: .recoveryAttempt),
+      .permanent
+    )
+    XCTAssertEqual(
+      SDKLifecycleRecoveryMapping.disposition(for: .remoteClosed, phase: .recoveryAttempt),
+      .transient
+    )
+    XCTAssertEqual(
+      SDKLifecycleRecoveryMapping.disposition(for: .clockFailed, phase: .activeTerminal),
+      .permanent
+    )
+  }
+
+  func testSuspendDuringInitialIdentityClearsPendingIntent() async {
+    let probe = SDKPublicConnectionProbe()
+    let identity = SDKPublicIdentityBarrier()
+    let owner = makeOwner(probe: probe) { try await identity.run() }
+    let connect = Task { try await owner.connect(code: "ABC234") }
+    await identity.waitUntilReached()
+
+    let suspend = Task { await owner.suspendConnection() }
+    await waitUntilSuspended(owner: owner)
+    identity.resume(returning: "00000000-0000-4000-8000-000000000001")
+    await assertTaskError(.connectionCancelled, task: connect)
+    await suspend.value
+
+    let snapshot = await owner.lifecycleSnapshot
+    XCTAssertFalse(snapshot.hasIntent)
+    XCTAssertTrue(snapshot.isSuspended)
+    await assertConnectError(.connectionSuspended) {
+      try await owner.connect(code: "bad")
+    }
+    await owner.resumeConnection()
+    XCTAssertEqual(probe.snapshot.claims, 1)
+  }
+
+  func testCancelledDisconnectCallerStillWaitsForSharedReceipt() async throws {
+    let probe = SDKPublicConnectionProbe()
+    let session = SDKPublicSessionController()
+    let release = SDKPublicVoidBarrier()
+    let completion = SDKLockedCapture<Void>()
+    let owner = makeSessionOwner(
+      probe: probe,
+      session: session,
+      hooks: SDKPublicConnectionHooks(
+        reachSynchronous: { _ in },
+        reach: { point in
+          if point == .beforeRelease { await release.run() }
+        }
+      )
+    )
+    let connect = Task { try await owner.connect(code: "ABC234") }
+    try await driveConnection(session: session, connect: connect)
+
+    let first = Task {
+      await owner.disconnect()
+      completion.append(())
+    }
+    let second = Task { await owner.disconnect() }
+    await release.waitUntilReached()
+    first.cancel()
+    await Task.yield()
+    XCTAssertTrue(completion.snapshot.isEmpty)
+    let heldSnapshot = await owner.lifecycleSnapshot
+    XCTAssertTrue(heldSnapshot.hasCleanupReceipt)
+
+    release.resume()
+    await first.value
+    await second.value
+    XCTAssertEqual(completion.snapshot.count, 1)
+    XCTAssertEqual(probe.snapshot.releases, 1)
+  }
+
+  func testDisconnectCancelsHeldRecoveryDelayBeforeAnotherClaim() async throws {
+    let probe = SDKPublicConnectionProbe()
+    let session = SDKPublicSessionController()
+    let sleep = SDKPublicSleepBarrier()
+    let policy = try NearWireReconnectionPolicy(
+      maximumAttempts: 2,
+      initialDelay: .milliseconds(100),
+      maximumDelay: .milliseconds(200)
+    )
+    let owner = makeSequenceOwner(
+      probe: probe,
+      sessions: [session],
+      configuration: try NearWireConfiguration(reconnectionPolicy: policy),
+      sleep: { duration in try await sleep.run(duration) }
+    )
+    let connect = Task { try await owner.connect(code: "ABC234") }
+    try await driveConnection(session: session, connect: connect)
+
+    session.driver.emitState(.failed)
+    await sleep.waitUntilReached()
+    let disconnect = Task { await owner.disconnect() }
+    await Task.yield()
+    XCTAssertEqual(probe.snapshot.claims, 1)
+    let delayedSnapshot = await owner.lifecycleSnapshot
+    XCTAssertTrue(delayedSnapshot.hasRecoveryTask)
+
+    sleep.resume()
+    await disconnect.value
+    let snapshot = await owner.lifecycleSnapshot
+    XCTAssertFalse(snapshot.hasIntent)
+    XCTAssertFalse(snapshot.hasRecoveryTask)
+    XCTAssertEqual(probe.snapshot.claims, 1)
+  }
+
+  func testExplicitConnectReportsInProgressDuringRecoveryDelay() async throws {
+    let probe = SDKPublicConnectionProbe()
+    let session = SDKPublicSessionController()
+    let sleep = SDKPublicSleepBarrier()
+    let policy = try NearWireReconnectionPolicy(
+      maximumAttempts: 1,
+      initialDelay: .milliseconds(100),
+      maximumDelay: .milliseconds(100)
+    )
+    let owner = makeSequenceOwner(
+      probe: probe,
+      sessions: [session],
+      configuration: try NearWireConfiguration(reconnectionPolicy: policy),
+      sleep: { duration in try await sleep.run(duration) }
+    )
+    let connect = Task { try await owner.connect(code: "ABC234") }
+    try await driveConnection(session: session, connect: connect)
+
+    session.driver.emitState(.failed)
+    await sleep.waitUntilReached()
+    await assertConnectError(.connectionInProgress) {
+      try await owner.connect(code: "bad")
+    }
+    XCTAssertEqual(probe.snapshot.claims, 1)
+    XCTAssertEqual(probe.snapshot.identities, 1)
+
+    let disconnect = Task { await owner.disconnect() }
+    sleep.resume()
+    await disconnect.value
+  }
+
+  func testExplicitConnectReportsInProgressDuringDisconnectCleanup() async throws {
+    let probe = SDKPublicConnectionProbe()
+    let session = SDKPublicSessionController()
+    let release = SDKPublicVoidBarrier()
+    let owner = makeSessionOwner(
+      probe: probe,
+      session: session,
+      hooks: SDKPublicConnectionHooks(
+        reachSynchronous: { _ in },
+        reach: { point in
+          if point == .beforeRelease { await release.run() }
+        }
+      )
+    )
+    let connect = Task { try await owner.connect(code: "ABC234") }
+    try await driveConnection(session: session, connect: connect)
+
+    let disconnect = Task { await owner.disconnect() }
+    await release.waitUntilReached()
+    await assertConnectError(.connectionInProgress) {
+      try await owner.connect(code: "bad")
+    }
+    XCTAssertEqual(probe.snapshot.claims, 1)
+    XCTAssertEqual(probe.snapshot.identities, 1)
+
+    release.resume()
+    await disconnect.value
+  }
+
+  func testResumeDuringActiveRouteCleanupHasOneAuthorizedSuccessor() async throws {
+    let probe = SDKPublicConnectionProbe()
+    let first = SDKPublicSessionController()
+    let second = SDKPublicSessionController()
+    let release = SDKPublicVoidBarrier()
+    let sleep = SDKPublicSleepBarrier()
+    let policy = try NearWireReconnectionPolicy(
+      maximumAttempts: 1,
+      initialDelay: .milliseconds(100),
+      maximumDelay: .milliseconds(100)
+    )
+    let owner = makeSequenceOwner(
+      probe: probe,
+      sessions: [first, second],
+      configuration: try NearWireConfiguration(reconnectionPolicy: policy),
+      hooks: SDKPublicConnectionHooks(
+        reachSynchronous: { _ in },
+        reach: { point in
+          if point == .beforeRelease { await release.run() }
+        }
+      ),
+      sleep: { duration in try await sleep.run(duration) }
+    )
+    let connect = Task { try await owner.connect(code: "ABC234") }
+    try await driveConnection(session: first, connect: connect)
+
+    let suspend = Task { await owner.suspendConnection() }
+    await release.waitUntilReached()
+    await owner.resumeConnection()
+    XCTAssertEqual(probe.snapshot.claims, 1)
+    release.resume()
+    await suspend.value
+    await sleep.waitUntilReached()
+
+    let heldStatus = await owner.connectionStatus
+    XCTAssertEqual(heldStatus.state, .reconnecting)
+    XCTAssertEqual(heldStatus.reconnectAttempt, 1)
+    XCTAssertFalse(heldStatus.isSuspended)
+    XCTAssertEqual(probe.snapshot.claims, 1)
+
+    sleep.resume()
+    await second.driver.waitUntilStarted()
+    try await driveAdmission(session: second)
+    try await sendInitialPolicy(session: second)
+    await waitUntilState(.connected, owner: owner)
+    XCTAssertEqual(probe.snapshot.claims, 2)
+  }
+
+  func testResumeDuringHeldRecoveryDelayInvalidatesOldCampaign() async throws {
+    let probe = SDKPublicConnectionProbe()
+    let first = SDKPublicSessionController()
+    let second = SDKPublicSessionController()
+    let staleSleep = SDKPublicSleepBarrier()
+    let resumedSleep = SDKPublicSleepBarrier()
+    let sleeps = SDKPublicSleepSequence([staleSleep, resumedSleep])
+    let policy = try NearWireReconnectionPolicy(
+      maximumAttempts: 2,
+      initialDelay: .milliseconds(100),
+      maximumDelay: .milliseconds(200)
+    )
+    let owner = makeSequenceOwner(
+      probe: probe,
+      sessions: [first, second],
+      configuration: try NearWireConfiguration(reconnectionPolicy: policy),
+      sleep: { duration in try await sleeps.run(duration) }
+    )
+    let connect = Task { try await owner.connect(code: "ABC234") }
+    try await driveConnection(session: first, connect: connect)
+
+    first.driver.emitState(.failed)
+    await staleSleep.waitUntilReached()
+    let suspend = Task { await owner.suspendConnection() }
+    await waitUntilSuspended(owner: owner)
+    await owner.resumeConnection()
+    await assertConnectError(.connectionInProgress) {
+      try await owner.connect(code: "bad")
+    }
+    XCTAssertEqual(probe.snapshot.claims, 1)
+
+    staleSleep.resume()
+    await suspend.value
+    await resumedSleep.waitUntilReached()
+    XCTAssertEqual(probe.snapshot.claims, 1)
+    let restartedStatus = await owner.connectionStatus
+    XCTAssertEqual(restartedStatus.state, .reconnecting)
+    XCTAssertEqual(restartedStatus.reconnectAttempt, 1)
+
+    resumedSleep.resume()
+    await second.driver.waitUntilStarted()
+    try await driveAdmission(session: second)
+    try await sendInitialPolicy(session: second)
+    await waitUntilState(.connected, owner: owner)
+    XCTAssertEqual(probe.snapshot.claims, 2)
+  }
+
+  func testResumeDuringRecoveryAttemptPreservesIntentForOneSuccessor() async throws {
+    let probe = SDKPublicConnectionProbe()
+    let sessions = (0..<3).map { _ in SDKPublicSessionController() }
+    let secondRelease = SDKNthPublicVoidBarrier(ordinal: 2)
+    let policy = try NearWireReconnectionPolicy(
+      maximumAttempts: 2,
+      initialDelay: .milliseconds(100),
+      maximumDelay: .milliseconds(200)
+    )
+    let owner = makeSequenceOwner(
+      probe: probe,
+      sessions: sessions,
+      configuration: try NearWireConfiguration(reconnectionPolicy: policy),
+      hooks: SDKPublicConnectionHooks(
+        reachSynchronous: { _ in },
+        reach: { point in
+          if point == .beforeRelease { await secondRelease.reach() }
+        }
+      )
+    )
+    let connect = Task { try await owner.connect(code: "ABC234") }
+    try await driveConnection(session: sessions[0], connect: connect)
+
+    sessions[0].driver.emitState(.failed)
+    await sessions[1].driver.waitUntilStarted()
+    XCTAssertEqual(probe.snapshot.claims, 2)
+    let suspend = Task { await owner.suspendConnection() }
+    await secondRelease.waitUntilReached()
+    await owner.resumeConnection()
+    XCTAssertEqual(probe.snapshot.claims, 2)
+
+    secondRelease.resume()
+    await suspend.value
+    await sessions[2].driver.waitUntilStarted()
+    try await driveAdmission(session: sessions[2])
+    try await sendInitialPolicy(session: sessions[2])
+    await waitUntilState(.connected, owner: owner)
+
+    let snapshot = await owner.lifecycleSnapshot
+    let recoveredStatus = await owner.connectionStatus
+    XCTAssertTrue(snapshot.hasIntent)
+    XCTAssertEqual(snapshot.attemptsUsed, 1)
+    XCTAssertEqual(probe.snapshot.claims, 3)
+    XCTAssertNil(recoveredStatus.lastError)
+  }
+
+  func testNewExplicitAttemptClearsPreviousTerminalErrorFromInitialPhases() async throws {
+    let probe = SDKPublicConnectionProbe()
+    let sessions = (0..<3).map { _ in SDKPublicSessionController() }
+    let thirdAdmission = SDKNthPublicVoidBarrier(ordinal: 3)
+    let policy = try NearWireReconnectionPolicy(
+      maximumAttempts: 1,
+      initialDelay: .milliseconds(100),
+      maximumDelay: .milliseconds(100)
+    )
+    let owner = makeSequenceOwner(
+      probe: probe,
+      sessions: sessions,
+      configuration: try NearWireConfiguration(reconnectionPolicy: policy),
+      hooks: SDKPublicConnectionHooks(
+        reachSynchronous: { _ in },
+        reach: { point in
+          if point == .beforeAdmissionTarget { await thirdAdmission.reach() }
+        }
+      )
+    )
+    let firstConnect = Task { try await owner.connect(code: "ABC234") }
+    try await driveConnection(session: sessions[0], connect: firstConnect)
+    sessions[0].driver.emitState(.failed)
+    await sessions[1].driver.waitUntilStarted()
+    sessions[1].driver.emitState(.failed)
+    await waitUntilState(.disconnected, owner: owner)
+    let terminalStatus = await owner.connectionStatus
+    XCTAssertNotNil(terminalStatus.lastError)
+
+    let nextConnect = Task { try await owner.connect(code: "ABC234") }
+    await thirdAdmission.waitUntilReached()
+    let discovering = await owner.connectionStatus
+    XCTAssertEqual(discovering.state, .discovering)
+    XCTAssertNil(discovering.lastError)
+    XCTAssertNil(discovering.reconnectAttempt)
+    var lateStatuses = owner.connectionStatuses.makeAsyncIterator()
+    let lateDiscovering = await lateStatuses.next()
+    XCTAssertEqual(lateDiscovering, discovering)
+
+    thirdAdmission.resume()
+    await sessions[2].driver.waitUntilStarted()
+    sessions[2].driver.emitState(.ready)
+    await waitUntilState(.connecting, owner: owner)
+    let connecting = await owner.connectionStatus
+    XCTAssertNil(connecting.lastError)
+    XCTAssertNil(connecting.reconnectAttempt)
+    await sessions[2].driver.waitForReceive()
+    sessions[2].driver.completeReceive(
+      try WirePreHandshakeCodec(limits: sessions[2].wireLimits).encode(sessions[2].viewerHello)
+    )
+    await sessions[2].driver.waitForReceive()
+    sessions[2].driver.completeReceive(
+      try sessions[2].codec.encode(
+        sessions[2].acknowledgement,
+        phase: .awaitingApproval
+      )
+    )
+    try await sendInitialPolicy(session: sessions[2])
+    try await nextConnect.value
+  }
+
+  func testPreActiveTransportFailureStopsProductionRecoveryCampaign() async throws {
+    let probe = SDKPublicConnectionProbe()
+    let sessions = (0..<3).map { _ in SDKPublicSessionController() }
+    let policy = try NearWireReconnectionPolicy(
+      maximumAttempts: 2,
+      initialDelay: .milliseconds(100),
+      maximumDelay: .milliseconds(200)
+    )
+    let owner = makeSequenceOwner(
+      probe: probe,
+      sessions: sessions,
+      configuration: try NearWireConfiguration(reconnectionPolicy: policy)
+    )
+    let connect = Task { try await owner.connect(code: "ABC234") }
+    try await driveConnection(session: sessions[0], connect: connect)
+
+    sessions[0].driver.emitState(.failed)
+    await sessions[1].driver.waitUntilStarted()
+    sessions[1].driver.emitState(.failed)
+    await waitUntilState(.disconnected, owner: owner)
+
+    let snapshot = await owner.lifecycleSnapshot
+    let terminalStatus = await owner.connectionStatus
+    XCTAssertFalse(snapshot.hasIntent)
+    XCTAssertFalse(snapshot.hasRecoveryTask)
+    XCTAssertEqual(probe.snapshot.claims, 2)
+    XCTAssertEqual(probe.snapshot.releases, 2)
+    XCTAssertEqual(terminalStatus.lastError?.code, .secureConnectionFailed)
+  }
+
+  func testDisconnectThenSuspendNeverRegressesLatestSuspensionStatus() async throws {
+    let probe = SDKPublicConnectionProbe()
+    let session = SDKPublicSessionController()
+    let release = SDKPublicVoidBarrier()
+    let owner = makeSessionOwner(
+      probe: probe,
+      session: session,
+      hooks: SDKPublicConnectionHooks(
+        reachSynchronous: { _ in },
+        reach: { point in
+          if point == .beforeRelease { await release.run() }
+        }
+      )
+    )
+    let connect = Task { try await owner.connect(code: "ABC234") }
+    try await driveConnection(session: session, connect: connect)
+    let observed = Task {
+      var iterator = owner.connectionStatuses.makeAsyncIterator()
+      var values: [NearWireConnectionStatus] = []
+      while values.count < 3, let value = await iterator.next() {
+        values.append(value)
+      }
+      return values
+    }
+    await sdkWaitUntil { owner.streamSubscriberCounts.statuses == 1 }
+
+    let disconnect = Task { await owner.disconnect() }
+    await release.waitUntilReached()
+    let suspend = Task { await owner.suspendConnection() }
+    await waitUntilSuspended(owner: owner)
+    release.resume()
+
+    let values = await observed.value
+    await disconnect.value
+    await suspend.value
+    let finalStatus = await owner.connectionStatus
+    XCTAssertEqual(values.map(\.state), [.connected, .connected, .disconnected])
+    XCTAssertEqual(values.map(\.isSuspended), [false, true, true])
+    XCTAssertTrue(finalStatus.isSuspended)
+  }
+
+  func testSuspendThenDisconnectNeverRegressesLatestSuspensionStatus() async throws {
+    let probe = SDKPublicConnectionProbe()
+    let session = SDKPublicSessionController()
+    let release = SDKPublicVoidBarrier()
+    let owner = makeSessionOwner(
+      probe: probe,
+      session: session,
+      hooks: SDKPublicConnectionHooks(
+        reachSynchronous: { _ in },
+        reach: { point in
+          if point == .beforeRelease { await release.run() }
+        }
+      )
+    )
+    let connect = Task { try await owner.connect(code: "ABC234") }
+    try await driveConnection(session: session, connect: connect)
+    let observed = Task {
+      var iterator = owner.connectionStatuses.makeAsyncIterator()
+      var values: [NearWireConnectionStatus] = []
+      while values.count < 4, let value = await iterator.next() {
+        values.append(value)
+      }
+      return values
+    }
+    await sdkWaitUntil { owner.streamSubscriberCounts.statuses == 1 }
+
+    let suspend = Task { await owner.suspendConnection() }
+    await release.waitUntilReached()
+    let disconnect = Task { await owner.disconnect() }
+    await waitUntilNotSuspended(owner: owner)
+    release.resume()
+
+    let values = await observed.value
+    await suspend.value
+    await disconnect.value
+    let finalStatus = await owner.connectionStatus
+    XCTAssertEqual(
+      values.map(\.state),
+      [.connected, .connected, .connected, .disconnected]
+    )
+    XCTAssertEqual(values.map(\.isSuspended), [false, true, false, false])
+    XCTAssertFalse(finalStatus.isSuspended)
+  }
+
   private func makeSessionOwner(
     probe: SDKPublicConnectionProbe,
     session: SDKPublicSessionController,
@@ -782,6 +1451,97 @@ final class SDKPublicConnectionOrchestrationTests: XCTestCase {
         hooks: hooks
       )
     )
+  }
+
+  private func makeSequenceOwner(
+    probe: SDKPublicConnectionProbe,
+    sessions: [SDKPublicSessionController],
+    configuration: NearWireConfiguration = .default,
+    hooks: SDKPublicConnectionHooks = .none,
+    sleep: @escaping @Sendable (Duration) async throws -> Void = { _ in }
+  ) -> NearWire {
+    let sequence = SDKPublicSessionSequence(sessions)
+    return NearWire(
+      configuration: configuration,
+      dependencies: SDKTestClock().dependencies,
+      connectionDependencies: SDKPublicConnectionDependencies(
+        makeTransitionGate: { SDKSessionTransitionGate() },
+        claimLease: {
+          probe.recordClaim()
+          return SDKPublicConnectionLease { probe.recordRelease() }
+        },
+        loadInstallationIdentity: {
+          probe.recordIdentity()
+          return "00000000-0000-4000-8000-000000000001"
+        },
+        bundleMetadata: {
+          SDKBundleMetadataInput(
+            applicationIdentifier: "com.example.Host",
+            shortVersion: "1.0",
+            buildVersion: "1",
+            displayName: "Host",
+            bundleName: "Fallback"
+          )
+        },
+        makeAdmission: { pairingCode, hello, plan, gate, phaseObserver in
+          sequence.next().makeAdmission(
+            pairingCode: pairingCode,
+            hello: hello,
+            plan: plan,
+            gate: gate,
+            phaseObserver: phaseObserver
+          )
+        },
+        makePump: { attachment, owner, limits in
+          SDKActiveEventPump(attachment: attachment, owner: owner, limits: limits)
+        },
+        hooks: hooks,
+        sleep: sleep
+      )
+    )
+  }
+
+  private func waitUntilState(
+    _ expected: NearWireState,
+    owner: NearWire,
+    timeoutNanoseconds: UInt64 = 1_000_000_000
+  ) async {
+    let start = DispatchTime.now().uptimeNanoseconds
+    while await owner.currentState != expected,
+      DispatchTime.now().uptimeNanoseconds - start < timeoutNanoseconds
+    {
+      await Task.yield()
+    }
+    let finalState = await owner.currentState
+    XCTAssertEqual(finalState, expected)
+  }
+
+  private func waitUntilSuspended(
+    owner: NearWire,
+    timeoutNanoseconds: UInt64 = 1_000_000_000
+  ) async {
+    let start = DispatchTime.now().uptimeNanoseconds
+    while !(await owner.lifecycleSnapshot.isSuspended),
+      DispatchTime.now().uptimeNanoseconds - start < timeoutNanoseconds
+    {
+      await Task.yield()
+    }
+    let snapshot = await owner.lifecycleSnapshot
+    XCTAssertTrue(snapshot.isSuspended)
+  }
+
+  private func waitUntilNotSuspended(
+    owner: NearWire,
+    timeoutNanoseconds: UInt64 = 1_000_000_000
+  ) async {
+    let start = DispatchTime.now().uptimeNanoseconds
+    while await owner.lifecycleSnapshot.isSuspended,
+      DispatchTime.now().uptimeNanoseconds - start < timeoutNanoseconds
+    {
+      await Task.yield()
+    }
+    let snapshot = await owner.lifecycleSnapshot
+    XCTAssertFalse(snapshot.isSuspended)
   }
 
   private func makeAdmissionOwner(
@@ -1017,6 +1777,114 @@ private final class SDKPublicConnectionProbe: @unchecked Sendable {
 
   func recordChannel() {
     lock.withLock { value.channels += 1 }
+  }
+}
+
+private final class SDKPublicSessionSequence: @unchecked Sendable {
+  private let lock = NSLock()
+  private let sessions: [SDKPublicSessionController]
+  private var index = 0
+
+  init(_ sessions: [SDKPublicSessionController]) {
+    precondition(!sessions.isEmpty)
+    self.sessions = sessions
+  }
+
+  func next() -> SDKPublicSessionController {
+    lock.withLock {
+      precondition(index < sessions.count, "Unexpected additional lifecycle route.")
+      defer { index += 1 }
+      return sessions[index]
+    }
+  }
+}
+
+private final class SDKPublicSleepBarrier: @unchecked Sendable {
+  private let lock = NSLock()
+  private var reached = false
+  private var reachWaiters: [CheckedContinuation<Void, Never>] = []
+  private var continuation: CheckedContinuation<Void, Error>?
+
+  func run(_ duration: Duration) async throws {
+    precondition(duration > .zero)
+    try await withCheckedThrowingContinuation { continuation in
+      let waiters = lock.withLock {
+        self.continuation = continuation
+        reached = true
+        let retained = reachWaiters
+        reachWaiters.removeAll(keepingCapacity: false)
+        return retained
+      }
+      for waiter in waiters { waiter.resume() }
+    }
+  }
+
+  func waitUntilReached() async {
+    await withCheckedContinuation { continuation in
+      let resumeImmediately = lock.withLock {
+        if reached { return true }
+        reachWaiters.append(continuation)
+        return false
+      }
+      if resumeImmediately { continuation.resume() }
+    }
+  }
+
+  func resume() {
+    let retained = lock.withLock {
+      let retained = continuation
+      continuation = nil
+      return retained
+    }
+    retained?.resume()
+  }
+}
+
+private final class SDKPublicSleepSequence: @unchecked Sendable {
+  private let lock = NSLock()
+  private let barriers: [SDKPublicSleepBarrier]
+  private var index = 0
+
+  init(_ barriers: [SDKPublicSleepBarrier]) {
+    precondition(!barriers.isEmpty)
+    self.barriers = barriers
+  }
+
+  func run(_ duration: Duration) async throws {
+    let barrier = lock.withLock {
+      precondition(index < barriers.count, "Unexpected additional recovery delay.")
+      defer { index += 1 }
+      return barriers[index]
+    }
+    try await barrier.run(duration)
+  }
+}
+
+private final class SDKNthPublicVoidBarrier: @unchecked Sendable {
+  private let lock = NSLock()
+  private let ordinal: Int
+  private let barrier = SDKPublicVoidBarrier()
+  private var count = 0
+
+  init(ordinal: Int) {
+    precondition(ordinal > 0)
+    self.ordinal = ordinal
+  }
+
+  func reach() async {
+    let shouldBlock = lock.withLock {
+      count += 1
+      return count == ordinal
+    }
+    if shouldBlock { await barrier.run() }
+  }
+
+  func waitUntilReached() async {
+    await barrier.waitUntilReached()
+  }
+
+  func resume() {
+    barrier.resume()
   }
 }
 
@@ -1310,9 +2178,14 @@ private final class SDKPublicSecureDriver: SecureConnectionDriving, @unchecked S
   private var stateHandler: (@Sendable (SecureDriverState) -> Void)?
   private var receiveCompletion: (@Sendable (Data?, Bool, Bool) -> Void)?
   private var storedCancelCount = 0
+  private var storedSentData: [Data] = []
 
   var cancelCount: Int {
     lock.withLock { storedCancelCount }
+  }
+
+  var sentData: [Data] {
+    lock.withLock { storedSentData }
   }
 
   func start(stateHandler: @escaping @Sendable (SecureDriverState) -> Void) {
@@ -1327,6 +2200,7 @@ private final class SDKPublicSecureDriver: SecureConnectionDriving, @unchecked S
   }
 
   func send(_ data: Data, completion: @escaping @Sendable (Bool) -> Void) {
+    lock.withLock { storedSentData.append(data) }
     completion(false)
   }
 

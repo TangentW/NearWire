@@ -34,6 +34,31 @@ final class NearWireStreamLifecycleTests: XCTestCase {
     XCTAssertNil(terminalFinished)
   }
 
+  func testConnectionStatusSubscribersReceiveCurrentAndTerminalStatus() async {
+    let nearWire = NearWire()
+    var first = nearWire.connectionStatuses.makeAsyncIterator()
+    let initial = await first.next()
+    XCTAssertEqual(initial, NearWireConnectionStatus(state: .idle))
+
+    await nearWire.updateSessionState(.connecting)
+    let connecting = await first.next()
+    XCTAssertEqual(connecting, NearWireConnectionStatus(state: .connecting))
+
+    var late = nearWire.connectionStatuses.makeAsyncIterator()
+    let lateInitial = await late.next()
+    XCTAssertEqual(lateInitial, NearWireConnectionStatus(state: .connecting))
+
+    await nearWire.shutdown()
+    let firstShutdown = await first.next()
+    let firstFinished = await first.next()
+    let lateShutdown = await late.next()
+    let lateFinished = await late.next()
+    XCTAssertEqual(firstShutdown, NearWireConnectionStatus(state: .shutdown))
+    XCTAssertNil(firstFinished)
+    XCTAssertEqual(lateShutdown, NearWireConnectionStatus(state: .shutdown))
+    XCTAssertNil(lateFinished)
+  }
+
   func testSlowEventSubscriberFailsWithoutAffectingActiveSubscriber() async throws {
     let configuration = try NearWireConfiguration(eventStreamBufferCapacity: 1)
     let nearWire = NearWire(configuration: configuration)
@@ -124,6 +149,24 @@ final class NearWireStreamLifecycleTests: XCTestCase {
     DispatchQueue.concurrentPerform(iterations: 128) { index in
       if index == 64 {
         hub.finish(with: .shutdown)
+      } else {
+        streams.append(hub.makeStream())
+      }
+    }
+
+    XCTAssertEqual(streams.snapshot.count, 127)
+    XCTAssertEqual(hub.subscriberCount, 0)
+  }
+
+  func testConcurrentStatusSubscriptionAndFinishRetainsNoContinuations() {
+    let hub = ConnectionStatusStreamHub(
+      initial: NearWireConnectionStatus(state: .idle)
+    )
+    let streams = SDKLockedCapture<AsyncStream<NearWireConnectionStatus>>()
+
+    DispatchQueue.concurrentPerform(iterations: 128) { index in
+      if index == 64 {
+        hub.finish(with: NearWireConnectionStatus(state: .shutdown))
       } else {
         streams.append(hub.makeStream())
       }

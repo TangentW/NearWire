@@ -52,11 +52,13 @@ Implement outbound queue draining, incoming event delivery, sequence validation,
 
 Expose explicit instance-based connection entry points, claim the process lease, map every internal admission and ownership failure to safe public errors, and publish connection state without reconnection or background behavior.
 
-Implemented: the supported `connect(code:)` path now composes device-local installation identity, discovery, mandatory TLS admission, initial flow policy, one terminal coordinator, safe public errors, and exact public states. Disconnect and reconnect remain item 13.
+Implemented: the supported `connect(code:)` path composes device-local installation identity, discovery, mandatory TLS admission, initial flow policy, one terminal coordinator, safe public errors, and exact public states. Lifecycle operations and recovery are composed by item 13.
 
 ### 13. `sdk-connection-lifecycle`
 
 Implement explicit disconnect, transient-failure classification, bounded reconnection, background transitions, exact-handle release, route replacement, and final public connection-state behavior.
+
+Implemented: async disconnect waits for exact cleanup; host-controlled suspend/resume adds no automatic platform observer; default-disabled recovery uses a total intent-wide budget, fresh routes, safe phase-aware failure classification, and latest-value connection status.
 
 ### 14. `sdk-ui`
 

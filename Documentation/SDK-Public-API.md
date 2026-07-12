@@ -6,7 +6,7 @@ The primary SDK is the `NearWire` module. It supports iOS 16 or later, Xcode 16 
 
 The SDK uses Swift concurrency. It does not provide a singleton, delegate API, Combine publisher, NotificationCenter contract, or Objective-C compatibility layer.
 
-The supported facade includes one explicit `connect(code:)` attempt. It does not yet expose disconnect, automatic reconnection, background policy, or lifecycle observation. Construction does not start connection work early.
+The supported facade includes explicit connect and disconnect, host-controlled suspension and resumption, default-disabled bounded recovery, and latest-value lifecycle status. Construction does not start connection work early, and NearWire never subscribes to application lifecycle or reachability notifications.
 
 ## Create an Instance
 
@@ -26,7 +26,12 @@ let configuration = try NearWireConfiguration(
   maximumUplinkEventsPerSecond: 100,
   maximumDownlinkEventsPerSecond: 50,
   buffer: buffer,
-  eventStreamBufferCapacity: 256
+  eventStreamBufferCapacity: 256,
+  reconnectionPolicy: try NearWireReconnectionPolicy(
+    maximumAttempts: 5,
+    initialDelay: .seconds(1),
+    maximumDelay: .seconds(8)
+  )
 )
 
 let nearWire = NearWire(configuration: configuration)
@@ -46,7 +51,7 @@ do {
 }
 ```
 
-The code uses the same bounded six-character normalization as Viewer discovery. It is a discovery and admission selector, not a password or certificate credential. NearWire does not persist it or retain it for retry.
+The code uses the same bounded six-character normalization as Viewer discovery. It is a discovery and admission selector, not a password or certificate credential. NearWire never persists it. One actor-owned intent retains the normalized value in memory after validation so an admitted connection can later be suspended or recovered. Route owners, delay tasks, errors, Events, Keychain, and diagnostics do not retain it. Disconnect, permanent recovery failure, enabled recovery exhaustion, and shutdown clear the intent.
 
 One call performs one attempt: it claims process ownership, loads the device-local installation identifier, discovers the matching Viewer through peer-to-peer-enabled Bonjour, establishes mandatory TLS 1.3, completes hello approval, and activates the first conservative flow policy. Success means that active transport is ready. It does not mean that any Event was received, persisted, processed, or acknowledged.
 
@@ -54,7 +59,7 @@ The installation identifier is a canonical random UUID stored as a generic-passw
 
 The App hello also includes the compiled NearWire version and, when valid String values exist, the host bundle identifier, short version or build fallback, and display name or bundle-name fallback. Invalid or non-String property-list values are omitted rather than stringified.
 
-Only one attempt or active session may belong to one `NearWire` instance. A second call returns `connectionInProgress` or `alreadyConnected`. The process lease also prevents a different NearWire instance from connecting concurrently. Cancelling the connect Task requests cancellation but does not release ownership until current non-cancellable work or permanent session cleanup reaches its exact terminal boundary.
+Only one intent, attempt, cleanup boundary, or active session may belong to one `NearWire` instance. A second call returns `connectionInProgress`, `alreadyConnected`, `connectionSuspended`, or `connectionIntentExists` according to the current lifecycle. Changing Viewer code requires `await disconnect()` first. The process lease also prevents a different NearWire instance from connecting concurrently. Cancelling the connect Task requests cancellation but does not release ownership until current non-cancellable work or permanent session cleanup reaches its exact terminal boundary.
 
 ## Send Codable Events
 
@@ -160,11 +165,39 @@ Each state subscription immediately receives the current value and then later ch
 
 ```swift
 for await state in nearWire.states {
-  // idle, discovering, connecting, connected, disconnected, shutdown
+  // idle, discovering, connecting, connected, reconnecting, disconnected, shutdown
 }
 ```
 
-State streams retain only the latest pending state because an intermediate UI snapshot is superseded by a newer one. Cancelling one subscription does not disconnect or shut down the instance. One public attempt drives `discovering`, `connecting`, and `connected`; a pre-success failure after discovery or any post-success terminal condition drives `disconnected`. `reconnecting` remains source-compatible but is not emitted by this implementation.
+State streams retain only the latest pending state because an intermediate UI snapshot is superseded by a newer one. Cancelling one subscription does not disconnect or shut down the instance. One public attempt drives `discovering`, `connecting`, and `connected`. Recovery remains `reconnecting` across its delay, discovery, admission, and activation phases.
+
+For error and progress details, use the coherent latest-value status:
+
+```swift
+for await status in nearWire.connectionStatuses {
+  print(status.state, status.lastError as Any, status.reconnectAttempt as Any)
+}
+```
+
+`connectionStatus` returns the current snapshot. Each snapshot also reports `isSuspended`. The status stream is not history and may coalesce intermediate values independently from `states`.
+
+## Disconnect, Suspend, Resume, and Recovery
+
+```swift
+await nearWire.disconnect()
+
+// Call these only if the host wants connection policy to follow its own scene/app policy.
+await nearWire.suspendConnection()
+await nearWire.resumeConnection()
+```
+
+`disconnect()` is idempotent, clears intent and status error, and returns only after the exact current route has invoked its process-lease release boundary. Cancelling the caller Task does not make this nonthrowing operation return early. If terminal evidence cannot be obtained, cleanup remains fail-closed and the call deliberately cannot claim completion.
+
+Suspension preserves an already-active intent, cancels current work, and waits for the same cleanup boundary. Resumption is nonblocking and creates a fresh route only after suspended cleanup, or after a transient disconnected result under the disabled automatic policy. Resume is inert while connected, during initial connect, or during any recovery campaign. NearWire does not import UIKit for observation, request background execution, or infer multi-scene policy.
+
+Automatic recovery is disabled by default. An enabled policy accepts 1 through 20 total recovery attempts for one connection intent. Delays double from the configured initial value to its cap. A brief successful replacement does not reset the total budget, preventing an indefinitely flapping Viewer from creating unbounded discovery and TLS work. Explicit resume resets the campaign. Each replacement performs fresh Bonjour discovery, TLS, admission, session epoch, sequence state, and Event pump setup.
+
+Only Events still in the offline queue may cross a replacement. Bytes already accepted by an old secure transport are never reconstructed or requeued, and replies bound to an old route are dropped by route-affinity validation.
 
 ## Shutdown
 
@@ -180,10 +213,10 @@ Releasing an instance also releases its local observers and memory. Applications
 
 `NearWireError` contains a stable code, an optional safe field, and a fixed English diagnostic message. It does not forward arbitrary `localizedDescription` text from application Codable implementations, transport failures, certificate data, endpoint data, pairing codes, or event content.
 
-Connection-specific codes distinguish invalid code, same-instance overlap, process contention or unavailable ownership, Task cancellation, discovery timeout or denial, ambiguous discovery, connection timeout, secure transport failure, incompatible or rejected Viewer, identity mismatch, remote close, and a closed internal-failure fallback. Failures after `connect` has already returned are represented only by the `disconnected` state; there is no terminal-error history API.
+Connection-specific codes distinguish invalid code, suspended or retained intent, same-instance overlap, process contention or unavailable ownership, Task cancellation, discovery timeout or denial, ambiguous discovery, connection timeout, secure transport failure, incompatible or rejected Viewer, identity mismatch, remote close, and a closed internal-failure fallback. Failures after `connect` returned appear as the safe `lastError` in the latest connection status; there is no unbounded terminal-error history.
 
 The message is intended for engineering diagnostics, not as a localized user-interface contract. Applications should branch on `code`.
 
 ## Explicit Non-Guarantees
 
-The SDK facade does not itself provide persistence, delivery acknowledgement, RPC semantics, retry, at-least-once delivery, exactly-once delivery, background execution, automatic enablement, reconnection, or pre-established Viewer authentication. The current TLS policy prevents plaintext transport but intentionally permits normal Viewer switching without certificate pinning. Persistence remains a Viewer concern.
+The SDK facade does not provide persistence, delivery acknowledgement, RPC semantics, byte replay, at-least-once delivery, exactly-once delivery, background execution, automatic lifecycle observation, or pre-established Viewer authentication. Recovery is App-configured, bounded, and fresh-session-only. The current TLS policy prevents plaintext transport but intentionally permits normal Viewer switching without certificate pinning. Persistence remains a Viewer concern.

@@ -64,4 +64,4 @@ Discovery is one-shot. Cancellation, policy denial, browser failure, result-limi
 
 ## Explicit Non-Guarantees
 
-Discovery itself does not provide persistence, internet rendezvous, background execution, retry timers, connection ownership, reconnection, TLS establishment, Viewer admission, event delivery, or authentication. Public `connect(code:)` composes discovery with the current TLS admission and active Event pump. Disconnect, reconnection, and background lifecycle policy remain separate work.
+Discovery itself does not provide persistence, internet rendezvous, background execution, retry timers, connection ownership, reconnection, TLS establishment, Viewer admission, event delivery, or authentication. Public connect and lifecycle recovery compose a fresh discovery with TLS admission and an active Event pump. The lifecycle layer, not discovery, owns the default-disabled total retry budget and host-controlled suspension policy.

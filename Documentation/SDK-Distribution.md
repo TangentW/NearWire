@@ -19,7 +19,7 @@ The root package exposes three supported SDK products:
 
 `NearWireCore` is present for the local Viewer build and repository tests. Its declarations use the `NearWireInternal` Swift SPI so CocoaPods can compile Core and SDK sources into one module without making Core values visible to a normal `import NearWire`. Repository-owned targets opt into that SPI explicitly. It is an internal product and is not covered by consumer API compatibility guarantees.
 
-Supported SDK signatures never expose a type that exists only in NearWireCore, NearWireTransport, or NearWireFlowControl. Public event, configuration, and result models belong to `NearWire`, `NearWireUI`, or `NearWirePerformance` and convert to internal wire models behind the supported module boundary.
+Supported SDK signatures never expose a type that exists only in NearWireCore, NearWireTransport, or NearWireFlowControl. Public event, configuration, reconnection-policy, connection-status, and result models belong to `NearWire`, `NearWireUI`, or `NearWirePerformance` and convert to internal models behind the supported module boundary. SwiftPM and CocoaPods compile the same disconnect, suspend, resume, and status APIs.
 
 `NearWireBuiltins` is a separate narrow SPI on the supported SDK module. It lets repository-owned optional modules, such as `NearWirePerformance`, enqueue reserved `nearwire.*` events through the same facade and queue. It is not an application API and does not grant access to the broader `NearWireInternal` implementation SPI.
 

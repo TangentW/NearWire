@@ -10,9 +10,10 @@ The supported SDK event and explicit connection facade is documented in [Documen
 let nearWire = NearWire()
 try await nearWire.connect(code: "ABC234")
 try await nearWire.send(type: "debug.snapshot", content: snapshot)
+await nearWire.disconnect()
 ```
 
-Connection uses peer-to-peer-enabled Bonjour discovery and mandatory TLS 1.3. The pairing code selects the Viewer but is not an authentication credential, and Event delivery is not acknowledged.
+Connection uses peer-to-peer-enabled Bonjour discovery and mandatory TLS 1.3. The pairing code selects the Viewer but is not an authentication credential, and Event delivery is not acknowledged. Automatic recovery is opt-in and bounded; host-controlled suspend/resume never installs a hidden application lifecycle observer.
 
 ## Repository Layout
 

@@ -2,6 +2,8 @@ import Foundation
 
 enum SDKSessionCancellationReason: Equatable, Sendable {
   case task
+  case suspension
+  case disconnect
   case shutdown
 }
 
@@ -127,7 +129,7 @@ final class SDKSessionTransitionGate: @unchecked Sendable {
       lock.unlock()
       return CancellationResult(accepted: false, deliveredToTarget: false)
     }
-    if reason == .shutdown || cancellationReason == nil {
+    if cancellationReason.map({ cancellationPriority(reason) > cancellationPriority($0) }) ?? true {
       cancellationReason = reason
       cancellationOrder = takeOrder()
     }
@@ -224,7 +226,7 @@ final class SDKSessionTransitionGate: @unchecked Sendable {
     defer { lock.unlock() }
     hooks.beforeActiveTransferMutation()
     if cancellationReason == .shutdown { return .failure(.shutdown) }
-    if cancellationReason == .task,
+    if cancellationReason != nil,
       let cancellationOrder,
       terminalOrder.map({ cancellationOrder < $0 }) ?? true
     {
@@ -241,7 +243,7 @@ final class SDKSessionTransitionGate: @unchecked Sendable {
     lock.lock()
     defer { lock.unlock() }
     if cancellationReason == .shutdown { return .shutdown }
-    if cancellationReason == .task,
+    if cancellationReason != nil,
       let cancellationOrder,
       terminalOrder.map({ cancellationOrder < $0 }) ?? true
     {
@@ -256,6 +258,7 @@ final class SDKSessionTransitionGate: @unchecked Sendable {
     defer { lock.unlock() }
     hooks.beforeConnectedCommitMutation()
     if cancellationReason == .shutdown { return .failure(.shutdown) }
+    if cancellationReason != nil { return .failure(.cancelled) }
     if let terminalCode { return .failure(.terminal(terminalCode)) }
     guard phase == .transferred else { return .failure(.invalidState) }
     phase = .connected
@@ -275,5 +278,14 @@ final class SDKSessionTransitionGate: @unchecked Sendable {
     let order = nextOrder
     nextOrder &+= 1
     return order
+  }
+
+  private func cancellationPriority(_ reason: SDKSessionCancellationReason) -> Int {
+    switch reason {
+    case .task: return 0
+    case .suspension: return 1
+    case .disconnect: return 2
+    case .shutdown: return 3
+    }
   }
 }

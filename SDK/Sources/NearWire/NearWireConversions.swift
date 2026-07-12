@@ -6,6 +6,10 @@ import Foundation
 #endif
 
 enum SDKValidation {
+  static let minimumReconnectionDelayNanoseconds: UInt64 = 100_000_000
+  static let maximumInitialReconnectionDelayNanoseconds: UInt64 = 60_000_000_000
+  static let maximumReconnectionDelayNanoseconds: UInt64 = 300_000_000_000
+
   static func validateRate(_ value: Double, field: String) throws {
     do {
       _ = try EventRateLimit(eventsPerSecond: value)
@@ -38,6 +42,68 @@ enum SDKValidation {
       )
     }
     _ = try coreTTL(defaultTTL, field: "buffer.defaultTTL")
+  }
+
+  static func validateReconnectionPolicy(
+    maximumAttempts: Int,
+    initialDelay: Duration,
+    maximumDelay: Duration
+  ) throws {
+    guard (1...20).contains(maximumAttempts) else {
+      throw invalidReconnectionPolicy(
+        field: "reconnectionPolicy.maximumAttempts",
+        message: "Recovery attempts must be between 1 and 20."
+      )
+    }
+    let initial = try exactNanoseconds(
+      initialDelay,
+      field: "reconnectionPolicy.initialDelay"
+    )
+    guard
+      (minimumReconnectionDelayNanoseconds...maximumInitialReconnectionDelayNanoseconds)
+        .contains(initial)
+    else {
+      throw invalidReconnectionPolicy(
+        field: "reconnectionPolicy.initialDelay",
+        message: "The initial recovery delay must be between 100 milliseconds and 60 seconds."
+      )
+    }
+    let maximum = try exactNanoseconds(
+      maximumDelay,
+      field: "reconnectionPolicy.maximumDelay"
+    )
+    guard maximum >= initial, maximum <= maximumReconnectionDelayNanoseconds else {
+      throw invalidReconnectionPolicy(
+        field: "reconnectionPolicy.maximumDelay",
+        message:
+          "The maximum recovery delay must be at least the initial delay and at most 300 seconds."
+      )
+    }
+  }
+
+  static func reconnectionDelay(
+    policy: NearWireReconnectionPolicy,
+    attempt: Int
+  ) -> Duration? {
+    guard policy.isEnabled, (1...policy.maximumAttempts).contains(attempt),
+      let initial = try? exactNanoseconds(
+        policy.initialDelay,
+        field: "reconnectionPolicy.initialDelay"
+      ),
+      let maximum = try? exactNanoseconds(
+        policy.maximumDelay,
+        field: "reconnectionPolicy.maximumDelay"
+      )
+    else { return nil }
+
+    var value = initial
+    if attempt > 1 {
+      for _ in 1..<attempt {
+        if value >= maximum { break }
+        value = min(maximum, value > maximum / 2 ? maximum : value * 2)
+      }
+    }
+    return .nanoseconds(Int64(value))
   }
 
   static func coreTTL(_ ttl: NearWireEventTTL, field: String = "options.ttl") throws -> EventTTL {
@@ -79,6 +145,36 @@ enum SDKValidation {
       field: field,
       message: "TTL must be between one millisecond and seven days."
     )
+  }
+
+  private static func exactNanoseconds(_ duration: Duration, field: String) throws -> UInt64 {
+    let components = duration.components
+    guard components.seconds >= 0, components.attoseconds >= 0,
+      components.attoseconds % 1_000_000_000 == 0
+    else {
+      throw invalidReconnectionPolicy(
+        field: field,
+        message: "Recovery delays must be nonnegative whole nanoseconds."
+      )
+    }
+    let (seconds, secondsOverflow) = UInt64(components.seconds)
+      .multipliedReportingOverflow(by: 1_000_000_000)
+    let fractional = UInt64(components.attoseconds / 1_000_000_000)
+    let (result, additionOverflow) = seconds.addingReportingOverflow(fractional)
+    guard !secondsOverflow, !additionOverflow else {
+      throw invalidReconnectionPolicy(
+        field: field,
+        message: "Recovery delay is outside the supported range."
+      )
+    }
+    return result
+  }
+
+  private static func invalidReconnectionPolicy(
+    field: String,
+    message: String
+  ) -> NearWireError {
+    NearWireError(code: .invalidConfiguration, field: field, message: message)
   }
 }
 

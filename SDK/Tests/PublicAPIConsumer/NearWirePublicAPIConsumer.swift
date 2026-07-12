@@ -17,7 +17,12 @@ func compileSupportedNearWireAPI() async throws {
     maximumUplinkEventsPerSecond: 100,
     maximumDownlinkEventsPerSecond: 50,
     buffer: buffer,
-    eventStreamBufferCapacity: 64
+    eventStreamBufferCapacity: 64,
+    reconnectionPolicy: try NearWireReconnectionPolicy(
+      maximumAttempts: 3,
+      initialDelay: .seconds(1),
+      maximumDelay: .seconds(4)
+    )
   )
   let nearWire = NearWire(configuration: configuration)
   do {
@@ -25,6 +30,7 @@ func compileSupportedNearWireAPI() async throws {
   } catch let error as NearWireError {
     switch error.code {
     case .invalidPairingCode, .connectionInProgress, .alreadyConnected,
+      .connectionSuspended, .connectionIntentExists,
       .anotherConnectionIsActive, .connectionOwnershipUnavailable, .connectionCancelled,
       .discoveryTimedOut, .localNetworkDenied, .discoveryUnavailable, .discoveryAmbiguous,
       .connectionTimedOut, .secureConnectionFailed, .incompatibleViewer,
@@ -36,6 +42,7 @@ func compileSupportedNearWireAPI() async throws {
     }
   }
   _ = await nearWire.currentState
+  _ = await nearWire.connectionStatus
   let result = try await nearWire.send(
     type: "fixture.value",
     content: NearWireConsumerPayload(name: "fixture", value: 1),
@@ -50,6 +57,11 @@ func compileSupportedNearWireAPI() async throws {
     break
   }
 
+  for await status in nearWire.connectionStatuses {
+    _ = (status.state, status.lastError, status.reconnectAttempt, status.isSuspended)
+    break
+  }
+
   for try await event in nearWire.events {
     let decoded = try event.decode(NearWireConsumerPayload.self)
     _ = try await nearWire.reply(
@@ -61,5 +73,8 @@ func compileSupportedNearWireAPI() async throws {
   }
 
   _ = await nearWire.clearBufferedEvents()
+  await nearWire.suspendConnection()
+  await nearWire.resumeConnection()
+  await nearWire.disconnect()
   await nearWire.shutdown()
 }

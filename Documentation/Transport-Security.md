@@ -39,13 +39,13 @@ This identifier is included in the App hello so the Viewer can correlate one ins
 
 ## Bounded Byte Channel
 
-`SecureByteChannel` internally wraps a mandatory-TLS connection or an injected test driver and owns one connection lifecycle. The public App factory does not accept a caller-created `NWConnection`, so supported callers cannot substitute plaintext parameters. The channel starts once, requests at most one receive at a time, and bounds every receive chunk. Empty nonterminal deliveries, oversized driver deliveries, EOF, and driver faults terminate the channel safely.
+`SecureByteChannel` internally wraps a mandatory-TLS connection or an injected test driver and owns one route lifecycle. The public App factory does not accept a caller-created `NWConnection`, so supported callers cannot substitute plaintext parameters. The channel starts once, requests at most one receive at a time, and bounds every receive chunk. Empty nonterminal deliveries, oversized driver deliveries, EOF, and driver faults terminate the channel safely.
 
 The production adapter reports ready only after Network.framework metadata confirms TLS 1.3 and the `nearwire/1` ALPN token. Driver callbacks enter one ordered sequencer, and every receive carries a distinct operation token, so replayed or duplicated callbacks cannot create concurrent receives.
 
 Pending sends are limited by count, total bytes, and single-send bytes. A lock-protected mailbox provides synchronous admission from an actor-isolated session coordinator without requiring an actor hop: success transfers ownership of the bytes to the channel, while rejection leaves the existing FIFO unchanged. Admission checks use overflow-safe accounting under the same lock, including concurrent callers. Exactly one send is in flight, and its completed payload slot is cleared immediately. A failed send clears remaining buffers and is never retried because the sender cannot know how much of an ordered byte stream the peer received. The single-send limit includes the wire format's four-byte length and one-byte lane header, so a maximum legal wire payload still fits as one complete send.
 
-Cancellation is idempotent, clears pending data, cancels the driver once, and invalidates late state, receive, and send callbacks. The channel does not reconnect; a later session layer reconnects with a new epoch and fresh wire state.
+Cancellation is idempotent, clears pending data, cancels the driver once, and invalidates late state, receive, and send callbacks. The channel does not reconnect. The SDK lifecycle layer may create a wholly new channel, TLS evaluation, epoch, and wire state after exact old-route release; it never downgrades or replays accepted bytes.
 
 Default limits are:
 
@@ -63,4 +63,4 @@ Transport failures expose stable codes, safe paths, safe messages, and operation
 
 ## Non-Guarantees
 
-The transport layer itself does not implement Viewer identity persistence, certificate rotation UI, mutual TLS, public-CA hostname validation, persistent pinning, reconnection, retry, event acknowledgement, background execution, storage, or UI. Public connection orchestration composes discovery and pairing admission above this layer without weakening these transport rules.
+The transport layer itself does not implement Viewer identity persistence, certificate rotation UI, mutual TLS, public-CA hostname validation, persistent pinning, reconnection, retry, event acknowledgement, background execution, storage, or UI. Public connection and lifecycle orchestration compose discovery, pairing admission, and bounded fresh-route recovery above this layer without weakening these transport rules.

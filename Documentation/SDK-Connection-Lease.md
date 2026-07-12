@@ -1,8 +1,8 @@
 # SDK Process Connection Lease
 
-NearWire contains one internal process-wide connection lease. The lease does not make `NearWire` a singleton: App code may create multiple independent instances, buffer events, and subscribe to their streams. Only explicit `connect(code:)` claims the lease, because one App process may own at most one Viewer connection attempt or active Viewer session.
+NearWire contains one internal process-wide connection lease. The lease does not make `NearWire` a singleton: App code may create multiple independent instances, buffer events, and subscribe to their streams. Only an explicit `connect(code:)` call or one generation-current lifecycle recovery attempt may claim the lease, because one App process may own at most one Viewer connection attempt or active Viewer session.
 
-The lease itself is not supported SDK API or SPI and exposes no handle or disconnect operation. Public `connect(code:)` composes it internally; constructing or using an idle `NearWire` instance never touches lease state.
+The lease itself is not supported SDK API or SPI and exposes no handle. Public connect and lifecycle recovery compose it internally; constructing or using an idle `NearWire` instance never touches lease state. Public disconnect and suspension cancel only exact current ownership and await a shared cleanup receipt after the exact release invocation.
 
 ## Process-wide identity
 
@@ -15,7 +15,7 @@ com.nearwire.connection-lease.owner
 
 These names are independent of SDK, product, protocol, schema, and build versions. They must not change between coexisting NearWire binaries. A new uncoordinated namespace would allow two framework images in one App process to believe they both own the connection.
 
-Each loaded NearWire image briefly synchronizes on `ProcessInfo.processInfo` the first time it explicitly claims. That bounded bootstrap reads or installs one private retained `NSObject` monitor. All ordinary claims and releases synchronize only on the private monitor; they do not keep using the public ProcessInfo singleton.
+Each loaded NearWire image briefly synchronizes on `ProcessInfo.processInfo` the first time an explicit or lifecycle-recovery attempt claims. That bounded bootstrap reads or installs one private retained `NSObject` monitor. All ordinary claims and releases synchronize only on the private monitor; they do not keep using the public ProcessInfo singleton.
 
 ## Claim and release behavior
 

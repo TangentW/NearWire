@@ -27,6 +27,20 @@ enum SDKPublicConnectionErrorMapping {
     )
   }
 
+  static func connectionSuspended() -> NearWireError {
+    NearWireError(
+      code: .connectionSuspended,
+      message: "This NearWire instance is suspended. Resume it before connecting."
+    )
+  }
+
+  static func connectionIntentExists() -> NearWireError {
+    NearWireError(
+      code: .connectionIntentExists,
+      message: "This NearWire instance already has a connection intent. Disconnect it first."
+    )
+  }
+
   static func invalidConnectionConfiguration(field: String) -> NearWireError {
     NearWireError(
       code: .invalidConfiguration,

@@ -96,12 +96,58 @@ public struct NearWireBufferConfiguration: Equatable, Sendable {
   }
 }
 
+/// App-local policy for bounded recovery after a previously active connection ends.
+public struct NearWireReconnectionPolicy: Equatable, Sendable {
+  public static let disabled = NearWireReconnectionPolicy(
+    isEnabled: false,
+    maximumAttempts: 0,
+    initialDelay: .zero,
+    maximumDelay: .zero
+  )
+
+  public let isEnabled: Bool
+  public let maximumAttempts: Int
+  public let initialDelay: Duration
+  public let maximumDelay: Duration
+
+  public init(
+    maximumAttempts: Int,
+    initialDelay: Duration = .seconds(1),
+    maximumDelay: Duration = .seconds(30)
+  ) throws {
+    try SDKValidation.validateReconnectionPolicy(
+      maximumAttempts: maximumAttempts,
+      initialDelay: initialDelay,
+      maximumDelay: maximumDelay
+    )
+    self.init(
+      isEnabled: true,
+      maximumAttempts: maximumAttempts,
+      initialDelay: initialDelay,
+      maximumDelay: maximumDelay
+    )
+  }
+
+  private init(
+    isEnabled: Bool,
+    maximumAttempts: Int,
+    initialDelay: Duration,
+    maximumDelay: Duration
+  ) {
+    self.isEnabled = isEnabled
+    self.maximumAttempts = maximumAttempts
+    self.initialDelay = initialDelay
+    self.maximumDelay = maximumDelay
+  }
+}
+
 public struct NearWireConfiguration: Equatable, Sendable {
   public static let `default` = NearWireConfiguration(
     validatedMaximumUplinkEventsPerSecond: 100,
     maximumDownlinkEventsPerSecond: 50,
     buffer: .default,
-    eventStreamBufferCapacity: 256
+    eventStreamBufferCapacity: 256,
+    reconnectionPolicy: .disabled
   )
 
   /// The App-local cap. A session later uses the minimum of this and the Viewer request.
@@ -112,12 +158,14 @@ public struct NearWireConfiguration: Equatable, Sendable {
 
   public let buffer: NearWireBufferConfiguration
   public let eventStreamBufferCapacity: Int
+  public let reconnectionPolicy: NearWireReconnectionPolicy
 
   public init(
     maximumUplinkEventsPerSecond: Double = 100,
     maximumDownlinkEventsPerSecond: Double = 50,
     buffer: NearWireBufferConfiguration = .default,
-    eventStreamBufferCapacity: Int = 256
+    eventStreamBufferCapacity: Int = 256,
+    reconnectionPolicy: NearWireReconnectionPolicy = .disabled
   ) throws {
     try SDKValidation.validateRate(
       maximumUplinkEventsPerSecond,
@@ -138,7 +186,8 @@ public struct NearWireConfiguration: Equatable, Sendable {
       validatedMaximumUplinkEventsPerSecond: maximumUplinkEventsPerSecond,
       maximumDownlinkEventsPerSecond: maximumDownlinkEventsPerSecond,
       buffer: buffer,
-      eventStreamBufferCapacity: eventStreamBufferCapacity
+      eventStreamBufferCapacity: eventStreamBufferCapacity,
+      reconnectionPolicy: reconnectionPolicy
     )
   }
 
@@ -146,12 +195,14 @@ public struct NearWireConfiguration: Equatable, Sendable {
     validatedMaximumUplinkEventsPerSecond maximumUplinkEventsPerSecond: Double,
     maximumDownlinkEventsPerSecond: Double,
     buffer: NearWireBufferConfiguration,
-    eventStreamBufferCapacity: Int
+    eventStreamBufferCapacity: Int,
+    reconnectionPolicy: NearWireReconnectionPolicy
   ) {
     self.maximumUplinkEventsPerSecond = maximumUplinkEventsPerSecond
     self.maximumDownlinkEventsPerSecond = maximumDownlinkEventsPerSecond
     self.buffer = buffer
     self.eventStreamBufferCapacity = eventStreamBufferCapacity
+    self.reconnectionPolicy = reconnectionPolicy
   }
 }
 
@@ -163,6 +214,26 @@ public enum NearWireState: String, Equatable, Sendable {
   case reconnecting
   case disconnected
   case shutdown
+}
+
+/// The newest supported connection lifecycle snapshot.
+public struct NearWireConnectionStatus: Equatable, Sendable {
+  public let state: NearWireState
+  public let lastError: NearWireError?
+  public let reconnectAttempt: Int?
+  public let isSuspended: Bool
+
+  internal init(
+    state: NearWireState,
+    lastError: NearWireError? = nil,
+    reconnectAttempt: Int? = nil,
+    isSuspended: Bool = false
+  ) {
+    self.state = state
+    self.lastError = lastError
+    self.reconnectAttempt = reconnectAttempt
+    self.isSuspended = isSuspended
+  }
 }
 
 public struct NearWireSessionMetadata: Equatable, Sendable {
