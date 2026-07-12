@@ -53,7 +53,10 @@ let package = Package(
         "NearWireTransport",
         "NearWireFlowControl",
       ],
-      path: "SDK/Sources/NearWire"
+      path: "SDK/Sources/NearWire",
+      linkerSettings: [
+        .linkedFramework("Security")
+      ]
     ),
     .target(
       name: "NearWireUI",

@@ -20,6 +20,22 @@ func compileSupportedNearWireAPI() async throws {
     eventStreamBufferCapacity: 64
   )
   let nearWire = NearWire(configuration: configuration)
+  do {
+    try await nearWire.connect(code: "ABC234")
+  } catch let error as NearWireError {
+    switch error.code {
+    case .invalidPairingCode, .connectionInProgress, .alreadyConnected,
+      .anotherConnectionIsActive, .connectionOwnershipUnavailable, .connectionCancelled,
+      .discoveryTimedOut, .localNetworkDenied, .discoveryUnavailable, .discoveryAmbiguous,
+      .connectionTimedOut, .secureConnectionFailed, .incompatibleViewer,
+      .viewerIdentityMismatch, .viewerRejected, .connectionClosed, .connectionInternalFailure,
+      .invalidConfiguration, .shutdown:
+      break
+    default:
+      break
+    }
+  }
+  _ = await nearWire.currentState
   let result = try await nearWire.send(
     type: "fixture.value",
     content: NearWireConsumerPayload(name: "fixture", value: 1),

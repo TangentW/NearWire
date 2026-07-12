@@ -263,7 +263,7 @@ if printf '%s' "$valid_package_json" | ruby Scripts/check-package-boundaries.rb 
   exit 1
 fi
 
-valid_podspec_json='{"name":"NearWire","pod_target_xcconfig":{"DEFINES_MODULE":"YES","SWIFT_STRICT_CONCURRENCY":"complete","SWIFT_TREAT_WARNINGS_AS_ERRORS":"YES"},"subspecs":[{"name":"NearWire/Core","source_files":["Core/**/*.swift"]},{"name":"NearWire/SDK","dependencies":{"NearWire/Core":[]},"source_files":["SDK/**/*.swift"]}]}'
+valid_podspec_json='{"name":"NearWire","pod_target_xcconfig":{"DEFINES_MODULE":"YES","SWIFT_STRICT_CONCURRENCY":"complete","SWIFT_TREAT_WARNINGS_AS_ERRORS":"YES"},"subspecs":[{"name":"NearWire/Core","source_files":["Core/**/*.swift"]},{"name":"NearWire/SDK","dependencies":{"NearWire/Core":[]},"frameworks":["Security"],"source_files":["SDK/**/*.swift"]}]}'
 printf '%s' "$valid_podspec_json" | ruby Scripts/check-podspec-boundaries.rb \
   --root "$fixture_root" \
   >/dev/null

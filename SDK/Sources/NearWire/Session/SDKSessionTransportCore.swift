@@ -32,34 +32,46 @@ final class SDKSessionCancellationRelay: @unchecked Sendable {
   }
 }
 
+final class SDKSessionLifetime: @unchecked Sendable {
+  let relay: SDKSessionCancellationRelay
+  let transitionGate: SDKSessionTransitionGate
+  let termination: SDKActiveEventPumpTermination
+
+  init(core: SDKSessionTransportCore, transitionGate: SDKSessionTransitionGate) {
+    relay = SDKSessionCancellationRelay(core: core)
+    self.transitionGate = transitionGate
+    termination = SDKActiveEventPumpTermination(core: core)
+  }
+}
+
 final class SDKAdmittedSession: @unchecked Sendable {
   let route: SDKSessionRoute
   let capabilities: Set<WireCapability>
   let sendPolicies: Set<WireSendPolicy>
   let maximumEventBytes: Int
 
-  private let relay: SDKSessionCancellationRelay
+  let lifetime: SDKSessionLifetime
 
   init(
     route: SDKSessionRoute,
     capabilities: Set<WireCapability>,
     sendPolicies: Set<WireSendPolicy>,
     maximumEventBytes: Int,
-    relay: SDKSessionCancellationRelay
+    lifetime: SDKSessionLifetime
   ) {
     self.route = route
     self.capabilities = capabilities
     self.sendPolicies = sendPolicies
     self.maximumEventBytes = maximumEventBytes
-    self.relay = relay
+    self.lifetime = lifetime
   }
 
   func attachEventPump() async throws -> SDKSessionPumpAttachment {
-    try await relay.core.attachEventPump(relay: relay)
+    try await lifetime.relay.core.attachEventPump(lifetime: lifetime)
   }
 
   func cancel() {
-    relay.requestCancellation()
+    lifetime.relay.requestCancellation()
   }
 }
 
@@ -72,27 +84,26 @@ extension SDKAdmittedSession: CustomStringConvertible, CustomDebugStringConverti
 }
 
 final class SDKSessionPumpAttachment: @unchecked Sendable {
-  private let relay: SDKSessionCancellationRelay
+  let lifetime: SDKSessionLifetime
 
-  init(relay: SDKSessionCancellationRelay) {
-    self.relay = relay
+  init(lifetime: SDKSessionLifetime) {
+    self.lifetime = lifetime
   }
 
   func nextPolicyMessage() async throws -> SDKSessionPolicyMessage {
     let gate = SDKSessionPullCancellationGate()
     return try await withTaskCancellationHandler {
-      try await relay.core.nextPolicyMessage(cancellationGate: gate)
+      try await lifetime.relay.core.nextPolicyMessage(cancellationGate: gate)
     } onCancel: {
       gate.cancel()
     }
   }
 
   func cancel() {
-    relay.requestCancellation()
+    lifetime.relay.requestCancellation()
   }
 
-  var transportCore: SDKSessionTransportCore { relay.core }
-  var activeRelay: SDKSessionCancellationRelay { relay }
+  var transportCore: SDKSessionTransportCore { lifetime.relay.core }
 }
 
 extension SDKSessionPumpAttachment: CustomStringConvertible, CustomDebugStringConvertible,
@@ -168,6 +179,7 @@ actor SDKSessionTransportCore {
   private let ingress: SDKSessionChannelIngress
   private var localHello: WireHello?
   private var localHelloBytes: Data?
+  private let transitionGate: SDKSessionTransitionGate
   private var discoveredDiscriminator: ViewerDiscoveryDiscriminator?
   private let wireLimits: WireProtocolLimits
   private let admissionLimits: SDKSessionAdmissionLimits
@@ -199,7 +211,7 @@ actor SDKSessionTransportCore {
   private var policyConsumerOwner: PolicyConsumerOwner = .unclaimed
   private var admittedCapabilities: Set<WireCapability> = []
   private var admittedMaximumEventBytes = 0
-  private var activeOwner: NearWire?
+  private var activeAppMaximumRates: DirectionalEventRates?
   private var activeLimits: SDKActiveEventPumpLimits?
   private var activeDependencies: SDKActiveEventPumpDependencies?
   private var activeLiveOperations: SDKActiveLiveOperations?
@@ -242,6 +254,7 @@ actor SDKSessionTransportCore {
     attemptToken: SDKSessionAttemptToken,
     wireLimits: WireProtocolLimits,
     admissionLimits: SDKSessionAdmissionLimits,
+    transitionGate: SDKSessionTransitionGate = SDKSessionTransitionGate(),
     sleep: @escaping @Sendable (Int) async throws -> Void
   ) {
     self.ingress = ingress
@@ -252,6 +265,7 @@ actor SDKSessionTransportCore {
     self.wireLimits = wireLimits
     self.admissionLimits = admissionLimits
     self.sleep = sleep
+    self.transitionGate = transitionGate
     frameDecoder = WireFrameDecoder(limits: wireLimits.frame)
     preHandshakeCodec = WirePreHandshakeCodec(limits: wireLimits)
   }
@@ -319,7 +333,7 @@ actor SDKSessionTransportCore {
   }
 
   func attachEventPump(
-    relay: SDKSessionCancellationRelay
+    lifetime: SDKSessionLifetime
   ) throws -> SDKSessionPumpAttachment {
     if let terminalError { throw terminalError }
     guard state == .admitted else {
@@ -330,7 +344,7 @@ actor SDKSessionTransportCore {
     }
     pumpAttached = true
     cancelDeadline()
-    return SDKSessionPumpAttachment(relay: relay)
+    return SDKSessionPumpAttachment(lifetime: lifetime)
   }
 
   func nextPolicyMessage(
@@ -495,6 +509,22 @@ actor SDKSessionTransportCore {
     let (requiredPendingBytes, pendingOverflow) = reservedControlBytes.addingReportingOverflow(
       maximumEventSendBytes
     )
+    let appMaximumRates: DirectionalEventRates
+    do {
+      appMaximumRates = DirectionalEventRates(
+        appUplink: try EventRateLimit(
+          eventsPerSecond: owner.configuration.maximumUplinkEventsPerSecond
+        ),
+        appDownlink: try EventRateLimit(
+          eventsPerSecond: owner.configuration.maximumDownlinkEventsPerSecond
+        )
+      )
+    } catch {
+      gate.close()
+      finish(with: SDKSessionAdmissionError(.invalidLocalConfiguration))
+      continuation.resume(throwing: SDKSessionAdmissionError(.invalidLocalConfiguration))
+      return
+    }
     guard admittedCapabilities.contains(.bidirectionalEvents),
       admittedCapabilities.contains(.flowPolicy)
     else {
@@ -522,7 +552,7 @@ actor SDKSessionTransportCore {
     pendingActivation = PendingActivation(token: token, gate: gate, continuation: continuation)
     let operationGate = SDKActiveOperationGate(hooks: dependencies.operationGateHooks)
     let liveOperations = dependencies.bindLiveOperations(owner, channel, operationGate)
-    activeOwner = owner
+    activeAppMaximumRates = appMaximumRates
     activeLimits = limits
     activeDependencies = dependencies
     activeLiveOperations = liveOperations
@@ -994,7 +1024,9 @@ actor SDKSessionTransportCore {
     let epoch = try SessionEpoch(rawValue: route.sessionEpoch.nearWireCanonicalString)
     let source = EventEndpoint(role: .viewer, id: try EndpointID(rawValue: route.viewerID))
     let target = EventEndpoint(role: .app, id: try EndpointID(rawValue: route.appID))
-    let receivedAt = liveOperations.clockNanoseconds()
+    guard let receivedAt = liveOperations.clockNanoseconds() else {
+      throw SDKSessionAdmissionError(.ownerUnavailable)
+    }
     var items: [SDKIncomingEventItem] = []
     items.reserveCapacity(records.count)
     for record in records {
@@ -1127,7 +1159,7 @@ actor SDKSessionTransportCore {
   }
 
   private func activateInitialPolicy(_ offer: WireFlowPolicyOffer) throws {
-    guard let owner = activeOwner, let codec = sessionCodec,
+    guard let appMaximumRates = activeAppMaximumRates, let codec = sessionCodec,
       let dependencies = activeDependencies, let pendingActivation
     else {
       throw SDKSessionAdmissionError(.invalidLocalConfiguration)
@@ -1140,17 +1172,9 @@ actor SDKSessionTransportCore {
         eventsPerSecond: offer.policy.appDownlinkEventsPerSecond
       )
     )
-    let appRates = DirectionalEventRates(
-      appUplink: try EventRateLimit(
-        eventsPerSecond: owner.configuration.maximumUplinkEventsPerSecond
-      ),
-      appDownlink: try EventRateLimit(
-        eventsPerSecond: owner.configuration.maximumDownlinkEventsPerSecond
-      )
-    )
     let effective = try DirectionalEventRates.effective(
       viewerRequested: viewerRates,
-      appMaximum: appRates
+      appMaximum: appMaximumRates
     )
     let acceptedPolicy = try WireFlowPolicy(
       appUplinkEventsPerSecond: effective.appUplink.eventsPerSecond,
@@ -1163,7 +1187,9 @@ actor SDKSessionTransportCore {
     guard let liveOperations = activeLiveOperations else {
       throw SDKSessionAdmissionError(.invalidLocalConfiguration)
     }
-    let now = liveOperations.clockNanoseconds()
+    guard let now = liveOperations.clockNanoseconds() else {
+      throw SDKSessionAdmissionError(.ownerUnavailable)
+    }
     let plannedUplink = try EventTokenBucket(rate: effective.appUplink, startNanoseconds: now)
     let plannedDownlink = try EventTokenBucket(rate: effective.appDownlink, startNanoseconds: now)
     dependencies.beforeActivationCommit()
@@ -1209,7 +1235,7 @@ actor SDKSessionTransportCore {
   }
 
   private func applyDynamicPolicy(_ offer: WireFlowPolicyOffer) throws {
-    guard let owner = activeOwner, let codec = sessionCodec,
+    guard let appMaximumRates = activeAppMaximumRates, let codec = sessionCodec,
       var plannedUplink = uplinkBucket, var plannedDownlink = downlinkBucket
     else {
       throw SDKSessionAdmissionError(.invalidLocalConfiguration)
@@ -1225,14 +1251,7 @@ actor SDKSessionTransportCore {
             eventsPerSecond: offer.policy.appDownlinkEventsPerSecond
           )
         ),
-        appMaximum: DirectionalEventRates(
-          appUplink: try EventRateLimit(
-            eventsPerSecond: owner.configuration.maximumUplinkEventsPerSecond
-          ),
-          appDownlink: try EventRateLimit(
-            eventsPerSecond: owner.configuration.maximumDownlinkEventsPerSecond
-          )
-        )
+        appMaximum: appMaximumRates
       )
     } catch {
       throw SDKSessionAdmissionError(.protocolViolation)
@@ -1254,7 +1273,9 @@ actor SDKSessionTransportCore {
     guard let liveOperations = activeLiveOperations else {
       throw SDKSessionAdmissionError(.invalidLocalConfiguration)
     }
-    let commitTime = liveOperations.clockNanoseconds()
+    guard let commitTime = liveOperations.clockNanoseconds() else {
+      throw SDKSessionAdmissionError(.ownerUnavailable)
+    }
     do {
       try plannedUplink.reconfigure(rate: effective.appUplink, atNanoseconds: commitTime)
       try plannedDownlink.reconfigure(rate: effective.appDownlink, atNanoseconds: commitTime)
@@ -1294,7 +1315,9 @@ actor SDKSessionTransportCore {
       let result: Result<OutboundTurnResult, SDKSessionAdmissionError>
       do {
         var refreshedBucket = bucket
-        let now = liveOperations.clockNanoseconds()
+        guard let now = liveOperations.clockNanoseconds() else {
+          throw SDKSessionAdmissionError(.ownerUnavailable)
+        }
         let allowance: Int
         do {
           allowance = try refreshedBucket.availableWholeTokens(atNanoseconds: now)
@@ -1317,21 +1340,21 @@ actor SDKSessionTransportCore {
             )
           )
         } else {
-          result = .success(
-            .drained(
-              await liveOperations.drain(
-                route,
-                codec,
-                sequenceCounter,
-                activeLimits.maximumOutboundServiceUnitsPerTurn,
-                allowance,
-                activeLimits.maximumOutboundAccountedBytesPerTurn,
-                2,
-                reservedBytes
-              ),
-              refreshedBucket: refreshedBucket
+          guard
+            let drain = await liveOperations.drain(
+              route,
+              codec,
+              sequenceCounter,
+              activeLimits.maximumOutboundServiceUnitsPerTurn,
+              allowance,
+              activeLimits.maximumOutboundAccountedBytesPerTurn,
+              2,
+              reservedBytes
             )
-          )
+          else {
+            throw SDKSessionAdmissionError(.ownerUnavailable)
+          }
+          result = .success(.drained(drain, refreshedBucket: refreshedBucket))
         }
       } catch let error as SDKSessionAdmissionError {
         result = .failure(error)
@@ -1469,7 +1492,10 @@ actor SDKSessionTransportCore {
     guard let liveOperations = activeLiveOperations, var bucket = uplinkBucket,
       let dependencies = activeDependencies
     else { return }
-    let now = liveOperations.clockNanoseconds()
+    guard let now = liveOperations.clockNanoseconds() else {
+      finish(with: SDKSessionAdmissionError(.ownerUnavailable))
+      return
+    }
     let tokenDelay: UInt64?
     do {
       tokenDelay =
@@ -1519,7 +1545,10 @@ actor SDKSessionTransportCore {
       cancelOutboundDecision()
       return
     }
-    let now = liveOperations.clockNanoseconds()
+    guard let now = liveOperations.clockNanoseconds() else {
+      finish(with: SDKSessionAdmissionError(.ownerUnavailable))
+      return
+    }
     let delay = deadline > now ? deadline - now : 0
     if delay == 0 {
       outboundWorkRequested = true
@@ -1572,7 +1601,10 @@ actor SDKSessionTransportCore {
       let liveOperations = activeLiveOperations, let dependencies = activeDependencies
     else { return }
     cancelIncomingDecision()
-    let now = liveOperations.clockNanoseconds()
+    guard let now = liveOperations.clockNanoseconds() else {
+      finish(with: SDKSessionAdmissionError(.ownerUnavailable))
+      return
+    }
     let expiredCount: Int
     do {
       let expiredIDs = try queue.removeExpired(
@@ -1755,14 +1787,14 @@ actor SDKSessionTransportCore {
       seconds: admissionLimits.pumpAttachmentTimeoutSeconds,
       failure: .pumpAttachmentTimedOut
     )
-    let relay = SDKSessionCancellationRelay(core: self)
+    let lifetime = SDKSessionLifetime(core: self, transitionGate: transitionGate)
     waiter.resume(
       returning: SDKAdmittedSession(
         route: provisionalAdmission.route,
         capabilities: provisionalAdmission.negotiation.capabilities,
         sendPolicies: provisionalAdmission.negotiation.sendPolicies,
         maximumEventBytes: provisionalAdmission.negotiation.maximumEventBytes,
-        relay: relay
+        lifetime: lifetime
       )
     )
   }
@@ -1844,6 +1876,7 @@ actor SDKSessionTransportCore {
     cancelChannel: Bool = true
   ) {
     guard terminalError == nil else { return }
+    _ = transitionGate.markTerminal(error.code)
     activeLiveOperations?.terminalClose()
     activeOperationGate?.close()
     terminalError = error
@@ -1866,7 +1899,7 @@ actor SDKSessionTransportCore {
     let wakeToken = activeWakeToken
     activeWakeToken = nil
     activeBindingToken = nil
-    activeOwner = nil
+    activeAppMaximumRates = nil
     activeLimits = nil
     activeDependencies = nil
     activeLiveOperations = nil

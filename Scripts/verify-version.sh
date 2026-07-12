@@ -14,4 +14,15 @@ if [[ "$pod_version" != "$version" ]]; then
   exit 1
 fi
 
+sdk_version="$(ruby -e '
+  source = File.read("SDK/Sources/NearWire/Connection/SDKProductMetadata.swift")
+  match = source.match(/static let current = "([^"]+)"/)
+  abort "Compiled SDK version literal is unavailable." unless match
+  puts match[1]
+')"
+if [[ "$sdk_version" != "$version" ]]; then
+  echo "Compiled SDK version $sdk_version does not match VERSION $version." >&2
+  exit 1
+fi
+
 echo "Version verification passed for $version."

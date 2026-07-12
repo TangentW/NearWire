@@ -484,6 +484,24 @@ final class ProcessConnectionLeaseTests: XCTestCase {
     }
   }
 
+  func testPublicLeaseWrapperInvokesProductionHandleReleaseExactlyOnce() throws {
+    try ProcessLeaseTestGate.shared.run {
+      let monitor = NSObject()
+      let runtime = ProcessLeaseRuntimeProbe()
+      let handle = try ProcessConnectionLeaseOperation.claim(
+        reference: ProcessConnectionLeaseRuntimeReference(monitor: monitor),
+        runtime: runtime
+      )
+      var wrapper: SDKPublicConnectionLease? = SDKPublicConnectionLease(handle: handle)
+      wrapper?.release()
+      wrapper = nil
+
+      XCTAssertNil(wrapper)
+      XCTAssertNil(objc_getAssociatedObject(monitor, ProcessConnectionLeaseNamespace.ownerKey))
+      XCTAssertEqual(runtime.snapshot, .init(enters: 2, exits: 2, reads: 2, writes: 2))
+    }
+  }
+
   func testHandleAndErrorsHaveFixedContentSafeDiagnostics() throws {
     try ProcessLeaseTestGate.shared.run {
       let handle = try ProcessConnectionLeaseRegistry.claim()

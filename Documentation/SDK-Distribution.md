@@ -25,6 +25,8 @@ Supported SDK signatures never expose a type that exists only in NearWireCore, N
 
 The root package intentionally has no external package dependencies. Viewer-only dependencies are managed by the Viewer Xcode project and are never resolved by SDK consumers.
 
+The primary SDK target explicitly links Apple's `Security.framework` for its private installation-identity Keychain implementation. Security types do not appear in supported signatures, and consumers add no host-facing dependency or configuration.
+
 ## CocoaPods
 
 The root podspec defines these subspecs:
@@ -47,7 +49,7 @@ pod "NearWire/UI"
 pod "NearWire/Performance"
 ```
 
-The CocoaPods module name is fixed as `NearWire`. The podspec does not force static-framework linkage; CocoaPods and the consuming application retain the default linkage selection. NearWire does not declare custom frameworks, weak frameworks, libraries, module maps, prefix headers, compiler flags, consumer build settings, or script hooks. Its pod target build settings are restricted to module generation, complete Swift concurrency checking, and warnings as errors. Any expansion requires a reviewed OpenSpec contract change.
+The CocoaPods module name is fixed as `NearWire`. The podspec does not force static-framework linkage; CocoaPods and the consuming application retain the default linkage selection. The SDK subspec links only Apple's `Security.framework` for the same private Keychain implementation as SwiftPM. NearWire declares no third-party runtime framework, weak framework, library, module map, prefix header, compiler flag, consumer build setting, or script hook. Its pod target build settings are restricted to module generation, complete Swift concurrency checking, and warnings as errors. Any expansion requires a reviewed OpenSpec contract change.
 
 The final internal Specs repository, project homepage, and Git source URL will be selected during release engineering. The bootstrap podspec uses reserved, non-resolving `example.invalid` HTTPS locations, so an accidental pre-release integration cannot fetch code from an unrelated namespace. The podspec cannot be published until release engineering replaces both values with authorized internal locations.
 

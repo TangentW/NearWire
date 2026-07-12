@@ -588,4 +588,23 @@ fi
 
 echo "Real TLS active-session integration passed."
 
+public_connect_tls_output="$(swift test \
+  --package-path "$package_harness" \
+  "${swift_cache_options[@]}" \
+  --disable-sandbox \
+  --scratch-path "$package_harness/RealTLSAdmissionBuild" \
+  --filter SDKSessionAdmissionTests.testPublicConnectUsesProductionTLSBidirectionalEventsAndRealProcessLease \
+  "${strict_concurrency_options[@]}" 2>&1)"
+printf '%s\n' "$public_connect_tls_output"
+if grep -Fq "Test skipped" <<< "$public_connect_tls_output"; then
+  echo "Public connect TLS integration requires an unrestricted macOS validation environment." >&2
+  exit 1
+fi
+if ! grep -Fq "Executed 1 test, with 0 failures" <<< "$public_connect_tls_output"; then
+  echo "Public connect TLS integration was not proven by exactly one passing test." >&2
+  exit 1
+fi
+
+echo "Public connect production TLS integration passed."
+
 echo "Swift Package verification passed."

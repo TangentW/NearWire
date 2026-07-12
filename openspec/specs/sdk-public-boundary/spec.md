@@ -5,12 +5,12 @@ TBD - created by archiving change sdk-public-api. Update Purpose after archive.
 ## Requirements
 ### Requirement: SwiftPM and CocoaPods expose one supported API
 
-The repository SHALL compile the same representative iOS consumer source against the Swift Package product and the CocoaPods default SDK subspec. Both paths SHALL use Swift 5 language mode and iOS 16 or later.
+The repository SHALL compile the same representative iOS consumer source against the Swift Package product and CocoaPods default SDK subspec in Swift 5 language mode for iOS 16 or later. Both paths SHALL link the SDK's Apple Security.framework use without requiring a host-facing third-party dependency or supported Security type.
 
 #### Scenario: Consumer compile gate
 
-- **WHEN** repository distribution validation runs
-- **THEN** construction, configuration, send, decode, reply, streams, diagnostics, and shutdown compile through both integrations
+- **WHEN** distribution validation runs
+- **THEN** construction, configuration, connect, public connection errors, state handling, send, decode, reply, streams, diagnostics, and shutdown compile through both integrations
 
 ### Requirement: SDK implementation dependencies stay hidden
 
@@ -42,30 +42,18 @@ The NearWire module SHALL expose a non-supported `NearWireBuiltins` SPI that adm
 
 ### Requirement: Public API work does not start session features early
 
-NearWire construction and every supported public facade operation SHALL remain side-effect-free with respect to connection ownership and SHALL remain source-compatible. Repository-internal pairing, Bonjour discovery, secure session admission, process connection ownership, and active Event pumping MAY begin only through their explicit internal operations. The process lease SHALL NOT be claimed by initialization, ordinary event APIs, `SDKSessionAdmission`, or `SDKActiveEventPump`; the later public-connect orchestrator SHALL claim it explicitly before invoking admission.
+NearWire construction and every supported public operation other than connect, shutdown, and active-owner deinitialization SHALL remain side-effect-free with respect to connection ownership. Pairing and connection-limit validation SHALL precede lease claim. Only one token-current explicit connect SHALL claim the lease, access installation identity, discover, open mandatory TLS, perform admission, attach the active pump, publish connection state, and transfer Events. Shutdown and active-owner deinitialization MAY only detach and cancel exact existing ownership and initiate terminal cleanup; they SHALL NOT start or replace a connection. Ordinary Event and observation APIs SHALL NOT implicitly connect.
 
-This change SHALL add no supported connect/disconnect, lease, active-pump, or effective-rate API. Only one explicit internal admission `run()` MAY open the reviewed peer-to-peer-enabled TLS transport and negotiate hello/approval. Only one explicitly attached internal active-pump `run()` MAY negotiate effective flow policy, drain the bound NearWire queue, and publish validated incoming Events through that admitted transport. Neither operation SHALL publish supported SDK state, reconnect, observe background lifecycle, persist data, access Keychain, create UI, collect performance data, or schedule recurring polling work.
+This change SHALL expose no public disconnect, reconnect, lifecycle observer, terminal-error history, active-pump handle, effective rate, lease, protocol, Network.framework, Security.framework, endpoint, certificate, or Keychain type. Supported signatures SHALL continue to use only standard-library, Foundation, or supported NearWire facade types. Products, targets, pod subspecs, third-party dependencies, entitlements, and privacy declarations SHALL remain unchanged.
 
 #### Scenario: Side-effect audit
 
-- **WHEN** NearWire instances, idle admission values, active-pump values, and internal lease-capable types are constructed
-- **THEN** no lease is claimed, browser starts, local-network permission is requested, connection opens, Task or timer is scheduled, queue drains, Event publishes, persistence is accessed, or global ownership changes
+- **WHEN** NearWire is constructed and public operations other than connect or exact existing-owner cleanup are exercised
+- **THEN** no lease, Keychain, browser, permission request, connection, handshake, pump, lifecycle, or background work begins
 
-#### Scenario: Explicit internal admission run
+#### Scenario: Explicit public connect
 
-- **WHEN** repository-owned code explicitly runs one session admission
-- **THEN** only that operation may start exact discovery, mandatory TLS, and hello/approval negotiation
-- **AND** supported API inventory and NearWire state remain unchanged
-
-#### Scenario: Explicit internal active-pump run
-
-- **WHEN** repository-owned code explicitly runs one pump for an attached admitted owner
-- **THEN** only that operation may negotiate flow policy and transfer Events on the existing admitted route
-- **AND** process lease, supported API inventory, and NearWire state remain unchanged
-
-#### Scenario: Explicit internal lease claim
-
-- **WHEN** a later repository-owned public connection operation explicitly claims the process lease
-- **THEN** only constant-size synchronous ownership state changes
-- **AND** the supported application API inventory remains unchanged
+- **WHEN** a token-current call invokes connect with valid input
+- **THEN** only that operation may compose the reviewed internal discovery, secure admission, and active pump
+- **AND** no implementation type enters the supported API
 

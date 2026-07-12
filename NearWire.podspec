@@ -41,6 +41,7 @@ Pod::Spec.new do |spec|
   spec.subspec "SDK" do |sdk|
     sdk.dependency "NearWire/Core"
     sdk.source_files = "SDK/Sources/NearWire/**/*.swift"
+    sdk.frameworks = ["Security"]
   end
 
   spec.subspec "UI" do |ui|

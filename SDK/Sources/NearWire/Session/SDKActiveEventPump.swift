@@ -135,7 +135,7 @@ struct SDKActiveLiveOperationHooks: Sendable {
 }
 
 struct SDKActiveLiveOperations: Sendable {
-  let clockNanoseconds: @Sendable () -> UInt64
+  let clockNanoseconds: @Sendable () -> UInt64?
   let registerWake:
     @Sendable (SDKOutboundWakeToken, @escaping @Sendable () -> Void, Int) async throws
       -> SDKOutboundWakeRegistrationResult
@@ -144,7 +144,7 @@ struct SDKActiveLiveOperations: Sendable {
   let drain:
     @Sendable (SDKSessionRoute, WireSessionCodec, WireSequenceCounter, Int, Int, Int, Int, Int)
       async
-      -> SDKActiveWireDrainResult
+      -> SDKActiveWireDrainResult?
   let canAdmitSend: @Sendable (Int, Int, Int) -> Bool
   let admitSend: @Sendable (Data) throws -> Void
   let publishIncoming: @Sendable (WireReceivedEvent) async -> SDKActiveIncomingPublicationResult
@@ -158,12 +158,18 @@ struct SDKActiveLiveOperations: Sendable {
     gate: SDKActiveOperationGate,
     hooks: SDKActiveLiveOperationHooks
   ) {
-    clockNanoseconds = {
+    clockNanoseconds = { [weak owner] in
       hooks.beforeClock()
-      return owner.activeClockNanoseconds()
+      return owner?.activeClockNanoseconds()
     }
-    registerWake = { token, callback, maximumServiceUnits in
+    registerWake = { [weak owner] token, callback, maximumServiceUnits in
       await hooks.beforeWakeRegistration()
+      guard let owner else {
+        return SDKOutboundWakeRegistrationResult(
+          installed: false,
+          schedule: .ownerUnavailable
+        )
+      }
       return try await owner.registerOutboundWorkWake(
         token: token,
         callback: callback,
@@ -172,12 +178,13 @@ struct SDKActiveLiveOperations: Sendable {
         operationHooks: hooks
       )
     }
-    removeWake = { token in
+    removeWake = { [weak owner] token in
       await hooks.beforeWakeRemoval()
-      await owner.removeOutboundWorkWake(token: token)
+      await owner?.removeOutboundWorkWake(token: token)
     }
-    observeSchedule = { maximumServiceUnits in
+    observeSchedule = { [weak owner] maximumServiceUnits in
       await hooks.beforeScheduleObservation()
+      guard let owner else { return .ownerUnavailable }
       return await owner.outboundSchedule(
         maximumServiceUnits: maximumServiceUnits,
         gate: gate,
@@ -185,9 +192,11 @@ struct SDKActiveLiveOperations: Sendable {
       )
     }
     drain = {
+      [weak owner]
       route, codec, sequenceCounter, serviceUnits, acceptedCount, accountedBytes,
       reservedCount, reservedBytes in
       await hooks.beforeDrain()
+      guard let owner else { return nil }
       return await owner.drainActiveWire(
         for: route,
         codec: codec,
@@ -214,8 +223,9 @@ struct SDKActiveLiveOperations: Sendable {
       hooks.beforeMailboxAdmission()
       try channel.admitSend(data)
     }
-    publishIncoming = { received in
+    publishIncoming = { [weak owner] received in
       await hooks.beforePublication()
+      guard let owner else { return .ownerUnavailable }
       return await owner.publishIncomingActive(received, gate: gate)
     }
     mailboxCompletion = { hooks.beforeMailboxCompletion() }
@@ -262,7 +272,7 @@ final class SDKActiveEventPump: @unchecked Sendable {
       cancellationGate.cancel()
     }
 
-    return SDKActiveEventPumpHandle(relay: attachment.activeRelay)
+    return SDKActiveEventPumpHandle(lifetime: attachment.lifetime)
   }
 
   private func claimAttachment() throws -> SDKSessionPumpAttachment {
@@ -283,20 +293,20 @@ final class SDKActiveEventPump: @unchecked Sendable {
 }
 
 final class SDKActiveEventPumpHandle: @unchecked Sendable {
-  private let relay: SDKSessionCancellationRelay
+  private let lifetime: SDKSessionLifetime
   let termination: SDKActiveEventPumpTermination
 
-  init(relay: SDKSessionCancellationRelay) {
-    self.relay = relay
-    termination = SDKActiveEventPumpTermination(core: relay.core)
+  init(lifetime: SDKSessionLifetime) {
+    self.lifetime = lifetime
+    termination = lifetime.termination
   }
 
   func cancel() {
-    relay.requestCancellation()
+    lifetime.relay.requestCancellation()
   }
 
   deinit {
-    relay.requestCancellation()
+    lifetime.relay.requestCancellation()
   }
 }
 
@@ -318,15 +328,13 @@ final class SDKActiveEventPumpTermination: @unchecked Sendable {
   }
 
   func wait() async throws -> SDKSessionAdmissionError.Code {
-    try claimWait()
+    let registration = try registerWait()
+    return try await registration.wait()
+  }
 
-    let token = SDKActiveTerminationToken()
-    let cancellationGate = SDKSessionPullCancellationGate()
-    return try await withTaskCancellationHandler {
-      try await core.waitForActiveTermination(token: token, cancellationGate: cancellationGate)
-    } onCancel: {
-      cancellationGate.cancel()
-    }
+  func registerWait() throws -> SDKActiveEventPumpTerminationRegistration {
+    try claimWait()
+    return SDKActiveEventPumpTerminationRegistration(core: core)
   }
 
   private func claimWait() throws {
@@ -336,6 +344,25 @@ final class SDKActiveEventPumpTermination: @unchecked Sendable {
       throw SDKSessionAdmissionError(.terminationWaitAlreadyStarted)
     }
     didStart = true
+  }
+}
+
+final class SDKActiveEventPumpTerminationRegistration: @unchecked Sendable {
+  private let core: SDKSessionTransportCore
+
+  init(core: SDKSessionTransportCore) {
+    self.core = core
+  }
+
+  func wait() async throws -> SDKSessionAdmissionError.Code {
+
+    let token = SDKActiveTerminationToken()
+    let cancellationGate = SDKSessionPullCancellationGate()
+    return try await withTaskCancellationHandler {
+      try await core.waitForActiveTermination(token: token, cancellationGate: cancellationGate)
+    } onCancel: {
+      cancellationGate.cancel()
+    }
   }
 }
 

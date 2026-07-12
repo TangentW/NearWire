@@ -20,6 +20,11 @@ enum SDKSessionAdmissionState: String, Equatable, Sendable {
   case cancelled
 }
 
+enum SDKSessionPhaseAuthorization: Equatable, Sendable {
+  case authorized
+  case cancelled
+}
+
 struct SDKSessionAdmissionError: Error, Equatable, Sendable {
   enum Code: String, CaseIterable, Sendable {
     case invalidLocalConfiguration

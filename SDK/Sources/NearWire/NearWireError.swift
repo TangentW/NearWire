@@ -14,6 +14,23 @@ public struct NearWireError: Error, Equatable, Sendable {
     case eventTooLarge
     case bufferOperationFailed
     case streamOverflow
+    case invalidPairingCode
+    case connectionInProgress
+    case alreadyConnected
+    case anotherConnectionIsActive
+    case connectionOwnershipUnavailable
+    case connectionCancelled
+    case discoveryTimedOut
+    case localNetworkDenied
+    case discoveryUnavailable
+    case discoveryAmbiguous
+    case connectionTimedOut
+    case secureConnectionFailed
+    case incompatibleViewer
+    case viewerIdentityMismatch
+    case viewerRejected
+    case connectionClosed
+    case connectionInternalFailure
     case shutdown
   }
 
@@ -46,5 +63,10 @@ extension NearWireError {
   static let streamOverflow = NearWireError(
     code: .streamOverflow,
     message: "The event stream consumer exceeded its configured buffer."
+  )
+
+  static let connectionCancelled = NearWireError(
+    code: .connectionCancelled,
+    message: "The NearWire connection attempt was cancelled."
   )
 }

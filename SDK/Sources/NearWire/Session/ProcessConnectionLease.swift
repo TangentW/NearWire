@@ -97,6 +97,8 @@ final class ProcessConnectionLeaseHandle: @unchecked Sendable {
   private let monitor: NSObject
   private let token: NSObject
   private let runtime: any ProcessConnectionLeaseRuntimeOperations
+  private let releaseLock = NSLock()
+  private var didRelease = false
 
   init(
     monitor: NSObject,
@@ -109,6 +111,12 @@ final class ProcessConnectionLeaseHandle: @unchecked Sendable {
   }
 
   func release() {
+    let shouldRelease = releaseLock.withLock {
+      guard !didRelease else { return false }
+      didRelease = true
+      return true
+    }
+    guard shouldRelease else { return }
     ProcessConnectionLeaseOperation.release(
       monitor: monitor,
       token: token,

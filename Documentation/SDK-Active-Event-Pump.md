@@ -2,7 +2,7 @@
 
 ## Current Boundary
 
-NearWire contains a repository-internal active Event pump for one admitted App session. It is intentionally not a supported SDK API or SPI. The later public connection coordinator will supply the admitted attachment and process lease, run this pump, retain its lifetime handle, and map its closed internal failures to supported SDK state and errors.
+NearWire contains a repository-internal active Event pump for one admitted App session. It is intentionally not a supported SDK API or SPI. The public connection coordinator supplies the admitted attachment and process lease, runs this pump, retains its lifetime handle, and maps its closed internal failures to supported SDK state and errors.
 
 Constructing the pump starts no task, timer, queue operation, transport send, Event publication, lifecycle observation, persistence, Keychain access, process lease, or UI work. One explicit `run()` binds the existing `NearWire` instance, negotiates the initial flow policy, and returns after activation. The returned lifetime handle owns cancellation. Its separate one-shot termination observer can outlive the handle without retaining it; releasing the final handle still cancels the session.
 
@@ -77,4 +77,4 @@ One lock-protected operation gate orders terminal cleanup against wake assignmen
 
 All active bytes use the admitted mandatory TLS 1.3 channel. The pump adds no plaintext path, certificate bypass, persistence, authentication upgrade, or server dependency. Pairing code, Bonjour metadata, and connection-local certificate anchoring retain the security limits documented in [Transport-Security.md](Transport-Security.md) and [SDK-Session-Admission.md](SDK-Session-Admission.md).
 
-This stage does not expose `connect` or `disconnect`, claim the process lease, publish supported connection states, reconnect, observe App lifecycle, run in the background, or persist Events. Those remain responsibilities of later roadmap changes.
+The pump itself does not expose public lifecycle operations or claim process ownership. Public `connect(code:)` now composes it; public disconnect, reconnection, App lifecycle policy, background execution, and Event persistence remain later roadmap work.

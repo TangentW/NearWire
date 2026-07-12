@@ -5,6 +5,141 @@ import XCTest
 @_spi(NearWireInternal) @testable import NearWireTransport
 
 final class WireEventTests: XCTestCase {
+  func testMaximumEventRecordBoundCoversAdversarialProductionEncodings() throws {
+    let maximum = try WireEventRecord.maximumDeterministicEncodedByteCount()
+    let values: [JSONValue] = [
+      .null,
+      .bool(true),
+      .integer(Int64.min),
+      .number(-Double.greatestFiniteMagnitude),
+      .string(String(repeating: "\\\"/\u{0008}", count: 1_000)),
+      .array((0..<4_096).map { .integer(Int64($0)) }),
+      .object(
+        Dictionary(
+          uniqueKeysWithValues: (0..<4_096).map {
+            ("key-\($0)", JSONValue.string("value-é-\($0)"))
+          })
+      ),
+    ]
+
+    for content in values {
+      do {
+        try content.validate()
+      } catch {
+        continue
+      }
+      let record = try maximumShapeRecord(content: content)
+      XCTAssertLessThanOrEqual(try record.deterministicEncodedByteCount(), maximum)
+    }
+
+    let exactContent = maximumSizedContent()
+    XCTAssertEqual(
+      WireDateCodec.format(Date(timeIntervalSince1970: 0.123_456_789)),
+      "1970-01-01T00:00:00.1234568Z"
+    )
+    try exactContent.validate()
+    XCTAssertEqual(
+      try exactContent.deterministicData().count,
+      EventValidationLimits.default.maximumEncodedContentBytes
+    )
+    XCTAssertEqual(
+      try maximumShapeRecord(content: exactContent).deterministicEncodedByteCount(),
+      maximum
+    )
+  }
+
+  func testMaximumEventRecordBoundCoversSeededGeneratedContentShapes() throws {
+    let maximum = try WireEventRecord.maximumDeterministicEncodedByteCount()
+    var generator = SeededJSONValueGenerator(seed: 0x4E65_6172_5769_7265)
+
+    for _ in 0..<256 {
+      let content = generator.next(depth: 3)
+      try content.validate()
+      let record = try maximumShapeRecord(content: content)
+      XCTAssertLessThanOrEqual(try record.deterministicEncodedByteCount(), maximum)
+    }
+  }
+
+  func testMaximumRecordTraversesProductionSessionCodecAtExactBoundary() throws {
+    let maximumRecordBytes = try WireEventRecord.maximumDeterministicEncodedByteCount()
+    let sizingFrameLimits = try WireFrameLimits(
+      maximumControlPayloadBytes: WireFrameLimits.default.maximumControlPayloadBytes,
+      maximumEventPayloadBytes: WireFrameLimits.hardMaximumPayloadBytes
+    )
+    let maximumFrameBytes = try WireSessionCodec.maximumEncodedV1SingleEventFrameBytes(
+      maximumEventBytes: maximumRecordBytes,
+      frameLimits: sizingFrameLimits
+    )
+    let exactFrameLimits = try WireFrameLimits(
+      maximumControlPayloadBytes: WireFrameLimits.default.maximumControlPayloadBytes,
+      maximumEventPayloadBytes: maximumFrameBytes - WireFrameLimits.encodedFrameOverheadBytes
+    )
+    let exactWireLimits = try WireProtocolLimits(
+      frame: exactFrameLimits,
+      maximumEventBytes: maximumRecordBytes
+    )
+    let app = try makeHello(
+      role: .app,
+      maximumEventBytes: maximumRecordBytes,
+      limits: exactWireLimits
+    )
+    let viewer = try makeHello(
+      role: .viewer,
+      maximumEventBytes: maximumRecordBytes,
+      limits: exactWireLimits
+    )
+    let codec = try WireSessionCodec(
+      negotiation: WireNegotiator.negotiate(local: app, remote: viewer),
+      baseLimits: exactWireLimits
+    )
+    let record = try maximumShapeRecord(content: maximumSizedContent())
+    let encoded = try codec.encode(WireEventPayload(record: record), phase: .active)
+    XCTAssertEqual(encoded.count, maximumFrameBytes)
+
+    var decodedRecords = 0
+    var decoder = WireFrameDecoder(limits: exactFrameLimits)
+    try decoder.consume(encoded) { frame in
+      let admitted = try codec.decode(frame: frame, phase: .active)
+      let payload = try codec.decode(WireEventPayload.self, from: admitted)
+      XCTAssertEqual(payload.record, record)
+      decodedRecords += 1
+    }
+    XCTAssertEqual(decodedRecords, 1)
+
+    let oneUnderWireLimits = try WireProtocolLimits(
+      frame: exactFrameLimits,
+      maximumEventBytes: maximumRecordBytes - 1
+    )
+    let oneUnderApp = try makeHello(
+      role: .app,
+      maximumEventBytes: maximumRecordBytes - 1,
+      limits: oneUnderWireLimits
+    )
+    let oneUnderViewer = try makeHello(
+      role: .viewer,
+      maximumEventBytes: maximumRecordBytes - 1,
+      limits: oneUnderWireLimits
+    )
+    let oneUnderCodec = try WireSessionCodec(
+      negotiation: WireNegotiator.negotiate(local: oneUnderApp, remote: oneUnderViewer),
+      baseLimits: oneUnderWireLimits
+    )
+    assertWireError(.frameTooLarge) {
+      _ = try oneUnderCodec.encode(WireEventPayload(record: record), phase: .active)
+    }
+
+    let oneUnderFrameLimits = try WireFrameLimits(
+      maximumControlPayloadBytes: WireFrameLimits.default.maximumControlPayloadBytes,
+      maximumEventPayloadBytes: exactFrameLimits.maximumEventPayloadBytes - 1
+    )
+    assertWireError(.invalidConfiguration) {
+      _ = try WireSessionCodec.maximumEncodedV1SingleEventFrameBytes(
+        maximumEventBytes: maximumRecordBytes,
+        frameLimits: oneUnderFrameLimits
+      )
+    }
+  }
+
   func testMaximumSingleEventFrameIncludesMessageAndFrameWrappers() throws {
     let maximumEventBytes = 1_024
     let app = try makeHello(role: .app, maximumEventBytes: maximumEventBytes)
@@ -364,4 +499,94 @@ final class WireEventTests: XCTestCase {
       _ = try WireEventBatchPayload(records: records + [overflowing])
     }
   }
+}
+
+private struct SeededJSONValueGenerator {
+  private var state: UInt64
+
+  init(seed: UInt64) {
+    state = seed
+  }
+
+  mutating func next(depth: Int) -> JSONValue {
+    let kind = depth == 0 ? Int(draw() % 5) : Int(draw() % 7)
+    switch kind {
+    case 0:
+      return .null
+    case 1:
+      return .bool(draw() & 1 == 0)
+    case 2:
+      return .integer(Int64(bitPattern: draw()))
+    case 3:
+      let sign = draw() & 1 == 0 ? 1.0 : -1.0
+      return .number(sign * Double(draw() % 1_000_000) / 100.0)
+    case 4:
+      let fragments = [
+        "plain", "\\\"escaped", "é", "combining-e\u{301}", "\n", "emoji-🙂",
+      ]
+      return .string(fragments[Int(draw() % UInt64(fragments.count))])
+    case 5:
+      return .array((0..<Int(draw() % 7)).map { _ in next(depth: depth - 1) })
+    default:
+      let count = Int(draw() % 7)
+      return .object(
+        Dictionary(
+          uniqueKeysWithValues: (0..<count).map { index in
+            ("key-\(index)-\(draw() % 17)", next(depth: depth - 1))
+          }
+        )
+      )
+    }
+  }
+
+  private mutating func draw() -> UInt64 {
+    state = state &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
+    return state
+  }
+}
+
+private func maximumSizedContent() -> JSONValue {
+  .array([
+    .string(String(repeating: "x", count: 65_536)),
+    .string(String(repeating: "y", count: 65_536)),
+    .string(String(repeating: "z", count: 65_536)),
+    .string(String(repeating: "w", count: 65_523)),
+  ])
+}
+
+private func maximumShapeRecord(content: JSONValue) throws -> WireEventRecord {
+  let maximumUUID = "ffffffff-ffff-4fff-bfff-ffffffffffff"
+  let endpoint = EventEndpoint(
+    role: .app,
+    id: try EndpointID(rawValue: String(repeating: "z", count: 128))
+  )
+  let target = EventEndpoint(
+    role: .viewer,
+    id: try EndpointID(rawValue: String(repeating: "z", count: 128))
+  )
+  let limits = EventValidationLimits.default
+  let ttl = try EventTTL(milliseconds: limits.maximumTTLMilliseconds)
+  let envelope = try EventEnvelope(
+    id: try EventID(rawValue: maximumUUID),
+    type: try EventType.user(String(repeating: "a", count: limits.maximumTypeBytes)),
+    content: content,
+    createdAt: Date(timeIntervalSince1970: 0.123_456_789),
+    monotonicTimestampNanoseconds: UInt64.max - ttl.milliseconds * 1_000_000,
+    source: endpoint,
+    target: target,
+    direction: .appToViewer,
+    sessionEpoch: try SessionEpoch(rawValue: maximumUUID),
+    sequence: EventSequence(UInt64.max),
+    priority: .critical,
+    ttl: ttl,
+    causality: EventCausality(
+      correlationID: try EventID(rawValue: maximumUUID),
+      replyTo: try EventID(rawValue: maximumUUID)
+    ),
+    schemaVersion: try EventSchemaVersion(UInt16.max)
+  )
+  return try WireEventRecord(
+    envelope: envelope,
+    remainingTTLNanoseconds: ttl.milliseconds * 1_000_000
+  )
 }

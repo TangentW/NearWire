@@ -60,7 +60,7 @@ ROOT_ALLOWED_KEYS = (
   ] + PATH_ATTRIBUTE_KEYS + PLATFORM_ATTRIBUTE_KEYS
 ).freeze
 SUBSPEC_ALLOWED_KEYS = (
-  %w[dependencies name pod_target_xcconfig subspecs] +
+  %w[dependencies frameworks name pod_target_xcconfig subspecs] +
   PATH_ATTRIBUTE_KEYS +
   PLATFORM_ATTRIBUTE_KEYS
 ).freeze
@@ -212,6 +212,10 @@ def validate_attributes(attributes, root_name, name, short_name, repository_root
   dependencies = attributes.fetch("dependencies", {}).keys
   external = dependencies.reject { |dependency| internal_dependency?(dependency, root_name) }
   abort "External dependency in #{name}: #{external.join(", ")}" unless external.empty?
+
+  frameworks = Array(attributes["frameworks"])
+  expected_frameworks = short_name == "SDK" ? ["Security"] : []
+  abort "Unsupported Apple framework set in #{name}: #{frameworks.join(", ")}" unless frameworks == expected_frameworks
 
   FORBIDDEN_VENDOR_KEYS.each do |key|
     value = attributes[key]

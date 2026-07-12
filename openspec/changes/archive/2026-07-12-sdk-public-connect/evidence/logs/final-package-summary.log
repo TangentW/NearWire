@@ -1,0 +1,26 @@
+command: ./Scripts/verify-package.sh
+cwd: /Users/tangent/Desktop/RemoteLens
+environment: unrestricted macOS validation; final remediated worktree
+exit_status: 0
+
+Process lease structural audit passed.
+Process lease multi-image validation passed.
+Process lease validation artifacts remained temporary and outside package products.
+Session admission and active-pump ownership boundaries passed.
+Core package fixture parity passed.
+iOS Swift Package SDK consumer API passed.
+Swift Package SDK consumer API passed.
+SDK implementation-type API boundary passed.
+iOS CocoaPods same-module SDK consumer and API parity passed.
+Wire payload public API sealing passed.
+Mandatory TLS public API boundary passed.
+Raw connection wrapping boundary passed.
+CocoaPods same-module raw connection boundary passed.
+Transport identity lifecycle boundary passed.
+iOS result: totalTestCount=406 passedTests=402 skippedTests=4 failedTests=0 result=Passed
+Core harness: Executed 196 tests, with 0 failures.
+testRealTLSProductionChannelCompletesAdmissionSequence: Executed 1 test, with 0 failures.
+Real TLS active-session integration passed.
+testPublicConnectUsesProductionTLSBidirectionalEventsAndRealProcessLease: Executed 1 test, with 0 failures.
+Public connect production TLS integration passed.
+Swift Package verification passed.

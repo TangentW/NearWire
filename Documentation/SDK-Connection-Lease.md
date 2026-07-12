@@ -1,8 +1,8 @@
 # SDK Process Connection Lease
 
-NearWire contains one internal process-wide connection lease. The lease does not make `NearWire` a singleton: App code may create multiple independent instances, buffer events, and subscribe to their streams. Only a future explicit connection operation will claim the lease, because one App process may own at most one Viewer connection attempt or active Viewer session.
+NearWire contains one internal process-wide connection lease. The lease does not make `NearWire` a singleton: App code may create multiple independent instances, buffer events, and subscribe to their streams. Only explicit `connect(code:)` claims the lease, because one App process may own at most one Viewer connection attempt or active Viewer session.
 
-The lease is not supported SDK API or SPI. It adds no public `connect` or `disconnect` method in this change, and constructing or using an idle `NearWire` instance never touches lease state.
+The lease itself is not supported SDK API or SPI and exposes no handle or disconnect operation. Public `connect(code:)` composes it internally; constructing or using an idle `NearWire` instance never touches lease state.
 
 ## Process-wide identity
 
@@ -21,7 +21,7 @@ Each loaded NearWire image briefly synchronizes on `ProcessInfo.processInfo` the
 
 A claim creates one private reference-identity token before entering the monitor. If the owner slot is empty, the operation stores the token, exits the monitor, and returns an opaque internal handle. If another token exists and synchronization succeeds, it exits and returns the fixed internal contention error. Any synchronization status failure takes precedence and returns the fixed runtime-unavailable error without returning a handle.
 
-The handle releases ownership only when its token is still the exact current token. Explicit release and deinitialization use the same idempotent operation, so repeated, concurrent, empty, and stale releases cannot clear a newer owner. Release has no status result. A failed enter leaves the owner slot untouched; a failed exit may follow a clear but makes no later-reacquisition guarantee. Future terminal connection paths must always invoke exact-handle release and must map both internal errors to supported safe SDK errors.
+The handle releases ownership only when its token is still the exact current token. Explicit release and deinitialization use the same idempotent operation, so repeated, concurrent, empty, and stale releases cannot clear a newer owner. Release has no status result. A failed enter leaves the owner slot untouched; a failed exit may follow a clear but makes no later-reacquisition guarantee. The current public terminal coordinator invokes exact-handle release after observed terminal state, and public connection orchestration maps both internal claim errors to supported safe SDK errors.
 
 The monitor protects only associated-object access and primitive outcomes. Handle and error construction, diagnostics, cleanup, callbacks, tasks, and application work occur outside the monitor. The handle retains no `NearWire` instance, event, queue, closure, task, timer, endpoint, pairing code, or Viewer identity. Its diagnostics are fixed and content-free.
 

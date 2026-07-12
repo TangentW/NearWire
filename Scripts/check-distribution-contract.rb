@@ -33,6 +33,7 @@ module NearWireDistributionContract
   EXPECTED_POD_SUBSPECS = {
     "Core" => {
       "dependencies" => [],
+      "frameworks" => [],
       "source_files" => [
         "Core/Sources/NearWireCore/**/*.swift",
         "Core/Sources/NearWireTransport/**/*.swift",
@@ -41,14 +42,17 @@ module NearWireDistributionContract
     },
     "SDK" => {
       "dependencies" => ["NearWire/Core"],
+      "frameworks" => ["Security"],
       "source_files" => ["SDK/Sources/NearWire/**/*.swift"],
     },
     "UI" => {
       "dependencies" => ["NearWire/SDK"],
+      "frameworks" => [],
       "source_files" => ["SDK/Sources/NearWireUI/**/*.swift"],
     },
     "Performance" => {
       "dependencies" => ["NearWire/SDK"],
+      "frameworks" => [],
       "source_files" => ["SDK/Sources/NearWirePerformance/**/*.swift"],
     },
   }.freeze
@@ -96,7 +100,12 @@ module NearWireDistributionContract
           "packageAccess" => true,
           "path" => path,
           "resources" => [],
-          "settings" => [],
+          "settings" => name == "NearWire" ? [
+            {
+              "kind" => { "linkedFramework" => { "_0" => "Security" } },
+              "tool" => "linker",
+            },
+          ] : [],
           "type" => type,
         },
       ]
@@ -150,6 +159,7 @@ module NearWireDistributionContract
       normalized = deep_copy(subspec)
       normalized["name"] = name
       normalized["dependencies"] = normalized.fetch("dependencies", {})
+      normalized["frameworks"] = Array(normalized["frameworks"])
       normalized["source_files"] = Array(normalized["source_files"])
       [name, normalized]
     end
@@ -157,6 +167,7 @@ module NearWireDistributionContract
       normalized = {
         "name" => name,
         "dependencies" => details.fetch("dependencies").to_h { |dependency| [dependency, []] },
+        "frameworks" => details.fetch("frameworks"),
         "source_files" => details.fetch("source_files"),
       }
       [name, normalized]
@@ -213,6 +224,7 @@ module NearWireDistributionContract
         {
           "name" => name,
           "dependencies" => details.fetch("dependencies").to_h { |dependency| [dependency, []] },
+          "frameworks" => details.fetch("frameworks"),
           "source_files" => details.fetch("source_files"),
         }
       end,

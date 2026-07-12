@@ -6,12 +6,15 @@ import Foundation
 #endif
 
 actor SDKSessionAdmission {
-  private var pairingCode: PairingCode?
+  private var pairingTransfer: SDKPairingCodeTransfer?
   private var localHello: WireHello?
   private let wireLimits: WireProtocolLimits
   private let transportLimits: SecureTransportLimits
   private let admissionLimits: SDKSessionAdmissionLimits
   private let dependencies: SDKSessionAdmissionDependencies
+  private nonisolated let transitionGate: SDKSessionTransitionGate
+  private let phaseObserver: @Sendable () async -> SDKSessionPhaseAuthorization
+  private let cancellationObserver: @Sendable () -> Void
 
   private var state: SDKSessionAdmissionState = .idle
   private var discovery: (any SDKSessionDiscoveryOperation)?
@@ -27,13 +30,21 @@ actor SDKSessionAdmission {
     wireLimits: WireProtocolLimits = .default,
     transportLimits: SecureTransportLimits = .default,
     admissionLimits: SDKSessionAdmissionLimits = .default,
+    transitionGate: SDKSessionTransitionGate = SDKSessionTransitionGate(),
+    phaseObserver: @escaping @Sendable () async -> SDKSessionPhaseAuthorization = {
+      .authorized
+    },
+    cancellationObserver: @escaping @Sendable () -> Void = {},
     dependencies: SDKSessionAdmissionDependencies
   ) {
-    self.pairingCode = pairingCode
+    pairingTransfer = SDKPairingCodeTransfer(pairingCode: pairingCode)
     self.localHello = localHello
     self.wireLimits = wireLimits
     self.transportLimits = transportLimits
     self.admissionLimits = admissionLimits
+    self.transitionGate = transitionGate
+    self.phaseObserver = phaseObserver
+    self.cancellationObserver = cancellationObserver
     self.dependencies = dependencies
   }
 
@@ -43,6 +54,11 @@ actor SDKSessionAdmission {
     wireLimits: WireProtocolLimits = .default,
     transportLimits: SecureTransportLimits = .default,
     admissionLimits: SDKSessionAdmissionLimits = .default,
+    transitionGate: SDKSessionTransitionGate = SDKSessionTransitionGate(),
+    phaseObserver: @escaping @Sendable () async -> SDKSessionPhaseAuthorization = {
+      .authorized
+    },
+    cancellationObserver: @escaping @Sendable () -> Void = {},
     connectionQueue: DispatchQueue,
     verificationQueue: DispatchQueue
   ) {
@@ -52,6 +68,9 @@ actor SDKSessionAdmission {
       wireLimits: wireLimits,
       transportLimits: transportLimits,
       admissionLimits: admissionLimits,
+      transitionGate: transitionGate,
+      phaseObserver: phaseObserver,
+      cancellationObserver: cancellationObserver,
       dependencies: .live(
         connectionQueue: connectionQueue,
         verificationQueue: verificationQueue,
@@ -64,15 +83,17 @@ actor SDKSessionAdmission {
     try await withTaskCancellationHandler {
       try await execute()
     } onCancel: {
-      Task { await self.cancel() }
+      let result = self.transitionGate.requestCancellationResult(.task)
+      if !result.deliveredToTarget { Task { await self.cancel() } }
     }
   }
 
   func cancel() async {
+    cancellationObserver()
     switch state {
     case .idle:
       state = .cancelled
-      pairingCode = nil
+      pairingTransfer = nil
       localHello = nil
     case .discovering:
       guard discoveryTerminalOverride == nil else { return }
@@ -90,18 +111,23 @@ actor SDKSessionAdmission {
     }
   }
 
+  func retainsPairingCode() -> Bool {
+    guard let pairingTransfer else { return false }
+    return !pairingTransfer.isEmpty
+  }
+
   private func execute() async throws -> SDKAdmittedSession {
     guard state == .idle else {
       if state == .cancelled { throw SDKSessionAdmissionError(.cancelled) }
       throw SDKSessionAdmissionError(.alreadyStarted)
     }
-    guard !Task.isCancelled else {
+    guard !Task.isCancelled, transitionGate.isAuthorized() else {
       state = .cancelled
-      pairingCode = nil
+      pairingTransfer = nil
       localHello = nil
       throw SDKSessionAdmissionError(.cancelled)
     }
-    guard let pairingCode, let localHello, localHello.role == .app else {
+    guard let localHello, localHello.role == .app else {
       return try failLocalConfiguration()
     }
 
@@ -120,9 +146,10 @@ actor SDKSessionAdmission {
       return try failLocalConfiguration()
     }
 
-    let discovery = dependencies.makeDiscovery(pairingCode)
+    guard let discovery = makeDiscovery() else {
+      return try failLocalConfiguration()
+    }
     self.discovery = discovery
-    self.pairingCode = nil
     state = .discovering
     startDiscoveryDeadline()
 
@@ -150,6 +177,22 @@ actor SDKSessionAdmission {
       throw SDKSessionAdmissionError(.discoveryFailed)
     }
 
+    guard state == .discovering, discoveryTerminalOverride == nil,
+      !Task.isCancelled, transitionGate.isAuthorized()
+    else {
+      state = .cancelled
+      self.localHello = nil
+      throw SDKSessionAdmissionError(.cancelled)
+    }
+    let phaseAuthorization = await phaseObserver()
+    guard phaseAuthorization == .authorized, state == .discovering,
+      discoveryTerminalOverride == nil, !Task.isCancelled, transitionGate.isAuthorized()
+    else {
+      state = .cancelled
+      self.localHello = nil
+      throw SDKSessionAdmissionError(.cancelled)
+    }
+
     let ingress = SDKSessionChannelIngress(
       maximumEvents: admissionLimits.maximumIngressEvents,
       maximumReceiveBytes: admissionLimits.maximumIngressBytes
@@ -163,6 +206,7 @@ actor SDKSessionAdmission {
       attemptToken: token,
       wireLimits: wireLimits,
       admissionLimits: admissionLimits,
+      transitionGate: transitionGate,
       sleep: dependencies.sleep
     )
     core = transportCore
@@ -212,9 +256,15 @@ actor SDKSessionAdmission {
 
   private func failLocalConfiguration<T>() throws -> T {
     state = .failed
-    pairingCode = nil
+    pairingTransfer = nil
     localHello = nil
     throw SDKSessionAdmissionError(.invalidLocalConfiguration)
+  }
+
+  private func makeDiscovery() -> (any SDKSessionDiscoveryOperation)? {
+    guard let transfer = pairingTransfer, let pairingCode = transfer.take() else { return nil }
+    pairingTransfer = nil
+    return dependencies.makeDiscovery(pairingCode)
   }
 
   private func startDiscoveryDeadline() {
@@ -255,7 +305,7 @@ actor SDKSessionAdmission {
   private func finishDiscoveryStage(state: SDKSessionAdmissionState) {
     cancelDiscoveryDeadline()
     discovery = nil
-    pairingCode = nil
+    pairingTransfer = nil
     localHello = nil
     self.state = state
   }

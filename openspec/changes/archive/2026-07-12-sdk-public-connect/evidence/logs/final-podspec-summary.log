@@ -1,0 +1,10 @@
+command: ./Scripts/verify-podspec.sh
+cwd: /Users/tangent/Desktop/RemoteLens
+environment: unrestricted Xcode/CocoaPods validation; final remediated worktree
+exit_status: 0
+cocoapods_version: 1.16.2
+
+NearWire (0.1.0)
+Expected warning: placeholder URL https://example.invalid/nearwire could not be validated.
+NearWire passed validation.
+CocoaPods podspec verification passed.

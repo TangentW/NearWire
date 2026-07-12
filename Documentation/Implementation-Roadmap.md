@@ -46,11 +46,13 @@ Compose pairing discovery, peer-to-peer-enabled TLS connection, hello and admiss
 
 ### 11. `sdk-active-event-pump`
 
-Implement outbound queue draining, incoming event delivery, sequence validation, active-route affinity, negotiated flow policy, and bounded transport backpressure for one admitted session. This internal layer is implemented; supported connection orchestration remains item 12.
+Implement outbound queue draining, incoming event delivery, sequence validation, active-route affinity, negotiated flow policy, and bounded transport backpressure for one admitted session. This internal layer is implemented and is composed by item 12.
 
 ### 12. `sdk-public-connect`
 
 Expose explicit instance-based connection entry points, claim the process lease, map every internal admission and ownership failure to safe public errors, and publish connection state without reconnection or background behavior.
+
+Implemented: the supported `connect(code:)` path now composes device-local installation identity, discovery, mandatory TLS admission, initial flow policy, one terminal coordinator, safe public errors, and exact public states. Disconnect and reconnect remain item 13.
 
 ### 13. `sdk-connection-lifecycle`
 

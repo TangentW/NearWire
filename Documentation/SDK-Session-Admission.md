@@ -6,7 +6,7 @@ NearWire now contains the repository-internal App-side operation that turns one 
 
 Constructing an admission value performs no discovery, permission request, network operation, task, timer, persistence, Keychain access, process-lease claim, SDK state mutation, or event transfer. Only one explicit internal `run()` starts work, and that operation is single-use.
 
-Public connection APIs, process-lease orchestration, reconnection, background behavior, and lifecycle state publication remain later roadmap work. The repository-internal active transfer stage that consumes an admitted attachment is documented in [SDK-Active-Event-Pump.md](SDK-Active-Event-Pump.md).
+Public `connect(code:)` and process-lease orchestration now compose this lower layer and publish one-shot lifecycle states. Reconnection, public disconnect, and background behavior remain later roadmap work. The repository-internal active transfer stage that consumes an admitted attachment is documented in [SDK-Active-Event-Pump.md](SDK-Active-Event-Pump.md).
 
 ## Sequence
 
@@ -77,4 +77,4 @@ Admission uses one closed internal error code set. Descriptions are generated on
 
 The admitted core remains in policy negotiation and rejects Event-lane traffic until exactly one internal active runner claims the attachment. That runner preserves the same channel, ingress, decoder, codec, route, relay, and terminal owner while enabling negotiated bidirectional transfer. See [SDK-Active-Event-Pump.md](SDK-Active-Event-Pump.md).
 
-A later `sdk-public-connect` change will claim the process lease before admission and expose supported connection operations and safe public state transitions.
+The supported `connect(code:)` coordinator now claims the process lease before admission and maps this internal result into safe public state and errors. This document continues to describe the lower admission boundary.

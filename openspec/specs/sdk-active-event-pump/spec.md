@@ -5,52 +5,27 @@ TBD - created by archiving change sdk-active-event-pump. Update Purpose after ar
 ## Requirements
 ### Requirement: Active Event pumping is one explicit internal operation
 
-The SDK SHALL provide one internal active-event-pump starter constructed from exactly one `SDKSessionPumpAttachment`, one `NearWire` instance, immutable validated active limits, and fixed injected operation dependencies. Construction SHALL start no Task, timer, wake registration, queue drain, transport send, Event publication, process lease, state publication, persistence, Keychain access, lifecycle observation, or UI work.
+The active-pump starter SHALL continue to consume exactly one admitted attachment and one NearWire owner, start only through explicit run, and preserve its existing single-run, cancellation, activation, channel, decoder, codec, route, gate, and terminal authority. The admitted attachment, starter, and returned handle SHALL carry the same `SDKSessionLifetime` and exactly one termination value created at admission; the active handle SHALL NOT create a replacement. Existing internal callers that did not start an earlier wait MAY continue waiting through the active handle.
 
-One explicit `run()` SHALL start at most one activation attempt. Before core registration it SHALL install a private lock-protected cancellation gate and reference-identity token. Pre-latched task cancellation SHALL atomically terminate the attached core with `cancelled` without installing an activation waiter or wake callback. A second run on the same starter SHALL fail with `alreadyStarted` and SHALL NOT replace work. Initial-policy activation SHALL atomically close the run cancellation gate, invalidate its token, clear its activation waiter, and only then resume `run()`. The starter SHALL construct one redacted `SDKActiveEventPumpHandle` synchronously without suspension and transfer attachment ownership to it. Cancellation-first SHALL return no handle; activation-first SHALL make every later run-task cancellation callback stale.
+Active binding SHALL capture App maximum directional rates by value before suspension. The permanent core SHALL remove every strong NearWire owner reference. `SDKActiveLiveOperations` SHALL capture NearWire weakly for instance clock, wake registration/removal, scheduling, drain, and incoming publication and SHALL return a closed owner-unavailable outcome when the weak owner is absent. The core SHALL map owner absence to existing `ownerUnavailable`, close the operation gate, and perform terminal cleanup. If NearWire still exists, exact tokenized wake removal remains required; if it has deinitialized, destruction of its actor storage has already released the registration.
 
-The active handle SHALL retain the same shared cancellation relay and SHALL provide explicit cancellation plus one separate redacted termination observer that retains neither handle nor relay. Its `wait()` SHALL be one-shot. Registration precedence SHALL be: claim the one-shot observer, observe pre-latched per-call cancellation, return stored core terminal state, or install one pending observer. A second wait SHALL return `terminationWaitAlreadyStarted`; pre-latched or cancellation-first pending observation SHALL return `terminationWaitCancelled`, release only that observer, and SHALL NOT terminate the session. Stored-terminal-first SHALL close the observer cancellation gate and return that exact terminal code. A terminal core SHALL retain its exact result for a later unused first wait. Handle deinitialization SHALL request cancellation once even while an unstructured Task awaits that observer. The relay SHALL retain the same permanent `SDKSessionTransportCore`; the core SHALL NOT retain the relay. Pump activation SHALL NOT replace or retarget the secure channel, callback ingress, frame decoder, negotiated session codec, route, or terminal authority.
+No strong path from permanent core, live-operation closures, signal ingress, transport callback, channel, terminal coordinator, or wait Task SHALL reach NearWire. Channel, decoder, route, session codec, cancellation relay, sequence, policy, queue, backpressure, and bounded timer semantics SHALL otherwise remain unchanged.
 
-#### Scenario: Idle pump is constructed
+#### Scenario: Existing internal pump use
 
-- **WHEN** an active-pump value is initialized but not run
-- **THEN** no queue, callback, Task, timer, transport, state, lease, persistence, or Event work begins
+- **WHEN** no earlier lifetime terminal wait exists and an internal caller activates a pump
+- **THEN** the returned handle exposes the same unused termination value and may wait once as before
 
-#### Scenario: Run is cancelled before registration
+#### Scenario: Public owner disappears
 
-- **WHEN** task cancellation latches before the core claims the pump gate
-- **THEN** run fails once with `cancelled`
-- **AND** the attached session terminates without an activation waiter or outbound wake registration
+- **WHEN** the final NearWire reference is released after activation
+- **THEN** weak live operations report owner unavailable, the hidden handle deinitializes and requests cancellation, and the permanent core terminates
+- **AND** no strong core-to-owner cycle prevents cleanup
 
-#### Scenario: Existing permanent owner becomes active
+#### Scenario: Wake cleanup observes absent owner
 
-- **WHEN** one attached admitted session successfully starts its pump
-- **THEN** the original channel, ingress, decoder, codec, route, core, and cancellation relay remain the active owners
-- **AND** no callback target changes
-
-#### Scenario: Active handle is abandoned while termination is observed
-
-- **WHEN** the active handle is released while another Task awaits its separate termination waiter
-- **THEN** handle deinitialization requests core cancellation once
-- **AND** the waiter completes without retaining the handle or relay
-
-#### Scenario: Termination observation is cancelled
-
-- **WHEN** the observer's first wait is task-cancelled while the active handle remains live
-- **THEN** only that wait returns `terminationWaitCancelled`
-- **AND** the session remains active until its handle or another terminal cause cancels it
-
-#### Scenario: Activation races late run cancellation
-
-- **WHEN** initial policy activation commits before the run-task cancellation callback claims its token
-- **THEN** run returns exactly one active handle and the late callback is ignored
-- **AND** no cancellation can overtake handle ownership transfer
-
-#### Scenario: Terminal races observer cancellation
-
-- **WHEN** a pending first termination wait races core terminal state with per-call cancellation
-- **THEN** the core orders exactly one winner through the observer's private cancellation gate
-- **AND** terminal-first returns the stored terminal code while cancellation-first returns only `terminationWaitCancelled`
+- **WHEN** terminal cleanup runs after NearWire deinitialization
+- **THEN** no actor operation is attempted and destroyed owner storage retains no wake registration
 
 ### Requirement: Active owner binding closes wake-registration races
 

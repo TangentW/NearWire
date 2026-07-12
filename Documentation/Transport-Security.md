@@ -29,7 +29,13 @@ It is intentionally not a trust-all callback: certificate parsing, signatures, v
 
 The optional SHA-256 leaf fingerprint is diagnostic data only. V1 does not persist it or silently convert it into a pin. A later product decision can add explicit fingerprint confirmation without adding a plaintext mode.
 
-Bonjour instance names and pairing codes are not certificate secrets. They help discovery and admission in a later change, but publishing or matching them does not by itself prove TLS identity.
+Bonjour instance names and pairing codes are not certificate secrets. The public SDK uses them to select one Viewer for discovery and admission, but publishing or matching them does not by itself prove TLS identity.
+
+## App Installation Identifier
+
+The public connect path stores one canonical random V4 UUID in the data-protection Keychain under service `com.nearwire.sdk.installation-identity` and account `default`. Reads suppress authentication UI. New items use `WhenUnlockedThisDeviceOnly`, have no access group, do not synchronize, and cannot migrate to another device. NearWire performs no update or delete and exposes no reset API.
+
+This identifier is included in the App hello so the Viewer can correlate one installation. It is not a credential, is not derived from the pairing code, and does not strengthen Viewer authentication. An inaccessible, malformed, or conflicting item fails the connection closed without exposing Security status or query details.
 
 ## Bounded Byte Channel
 
@@ -57,4 +63,4 @@ Transport failures expose stable codes, safe paths, safe messages, and operation
 
 ## Non-Guarantees
 
-This layer does not implement discovery, pairing admission, Viewer identity persistence, certificate rotation UI, mutual TLS, public-CA hostname validation, persistent pinning, reconnection, retry, event acknowledgement, background execution, storage, or UI. Those responsibilities remain in later roadmap changes.
+The transport layer itself does not implement Viewer identity persistence, certificate rotation UI, mutual TLS, public-CA hostname validation, persistent pinning, reconnection, retry, event acknowledgement, background execution, storage, or UI. Public connection orchestration composes discovery and pairing admission above this layer without weakening these transport rules.

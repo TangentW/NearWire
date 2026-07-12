@@ -318,9 +318,11 @@ final class SDKSessionAdmissionTests: XCTestCase {
     let fixture = try SessionAdmissionFixture()
     let admitted = try await fixture.admit()
     let attachment = try await admitted.attachEventPump()
+    let owner = NearWire()
+    defer { withExtendedLifetime(owner) {} }
     var handle: SDKActiveEventPumpHandle?
     var run: Task<SDKActiveEventPumpHandle, Error>? = Task {
-      try await SDKActiveEventPump(attachment: attachment, owner: NearWire()).run()
+      try await SDKActiveEventPump(attachment: attachment, owner: owner).run()
     }
     await fixture.driver.waitForReceive()
     await sessionWaitUntil {
@@ -807,10 +809,12 @@ final class SDKSessionAdmissionTests: XCTestCase {
     let attachment = try await admitted.attachEventPump()
     let beforeCompletion = SessionOneShotAsyncBarrier()
     let limits = try SDKActiveEventPumpLimits(maximumDeferredPolicyTransactions: 1)
+    let owner = NearWire()
+    defer { withExtendedLifetime(owner) {} }
     let run = Task {
       try await SDKActiveEventPump(
         attachment: attachment,
-        owner: NearWire(),
+        owner: owner,
         limits: limits,
         dependencies: SDKActiveEventPumpDependencies(
           sleep: sessionTestSleep,
@@ -1187,8 +1191,10 @@ final class SDKSessionAdmissionTests: XCTestCase {
     let admitted = try await fixture.admit()
     let attachment = try await admitted.attachEventPump()
     let limits = try SDKActiveEventPumpLimits(maximumCompletedFramesPerReceive: 2)
+    let owner = NearWire()
+    defer { withExtendedLifetime(owner) {} }
     let run = Task {
-      try await SDKActiveEventPump(attachment: attachment, owner: NearWire(), limits: limits).run()
+      try await SDKActiveEventPump(attachment: attachment, owner: owner, limits: limits).run()
     }
     await fixture.driver.waitForReceive()
     await sessionWaitUntil {
@@ -1556,8 +1562,10 @@ final class SDKSessionAdmissionTests: XCTestCase {
     let fixture = try SessionAdmissionFixture()
     let admitted = try await fixture.admit()
     let attachment = try await admitted.attachEventPump()
+    let owner = NearWire()
+    defer { withExtendedLifetime(owner) {} }
     let run = Task {
-      try await SDKActiveEventPump(attachment: attachment, owner: NearWire()).run()
+      try await SDKActiveEventPump(attachment: attachment, owner: owner).run()
     }
     await fixture.driver.waitForReceive()
     await sessionWaitUntil {
@@ -1600,10 +1608,12 @@ final class SDKSessionAdmissionTests: XCTestCase {
     let admitted = try await fixture.admit()
     let attachment = try await admitted.attachEventPump()
     let entries = SDKLockedCapture<String>()
+    let owner = NearWire()
+    defer { withExtendedLifetime(owner) {} }
     let run = Task {
       try await SDKActiveEventPump(
         attachment: attachment,
-        owner: NearWire(),
+        owner: owner,
         dependencies: SDKActiveEventPumpDependencies(
           sleep: sessionTestSleep,
           beforeWakeRegistration: {},
@@ -1665,8 +1675,10 @@ final class SDKSessionAdmissionTests: XCTestCase {
     let fixture = try SessionAdmissionFixture()
     let admitted = try await fixture.admit()
     let attachment = try await admitted.attachEventPump()
+    let owner = NearWire()
+    defer { withExtendedLifetime(owner) {} }
     let run = Task {
-      try await SDKActiveEventPump(attachment: attachment, owner: NearWire()).run()
+      try await SDKActiveEventPump(attachment: attachment, owner: owner).run()
     }
     await fixture.driver.waitForReceive()
     await sessionWaitUntil {
@@ -2021,8 +2033,10 @@ final class SDKSessionAdmissionTests: XCTestCase {
     let fixture = try SessionAdmissionFixture()
     let admitted = try await fixture.admit()
     let attachment = try await admitted.attachEventPump()
+    let owner = NearWire()
+    defer { withExtendedLifetime(owner) {} }
     let run = Task {
-      try await SDKActiveEventPump(attachment: attachment, owner: NearWire()).run()
+      try await SDKActiveEventPump(attachment: attachment, owner: owner).run()
     }
     await fixture.driver.waitForReceive()
     await sessionWaitUntil {
@@ -2066,10 +2080,12 @@ final class SDKSessionAdmissionTests: XCTestCase {
     let admitted = try await fixture.admit()
     let attachment = try await admitted.attachEventPump()
     let limits = try SDKActiveEventPumpLimits(maximumIncomingEncodedBytes: 1_024)
+    let owner = NearWire()
+    defer { withExtendedLifetime(owner) {} }
     let run = Task {
       try await SDKActiveEventPump(
         attachment: attachment,
-        owner: NearWire(),
+        owner: owner,
         limits: limits
       ).run()
     }
@@ -2133,10 +2149,12 @@ final class SDKSessionAdmissionTests: XCTestCase {
       let admitted = try await fixture.admit()
       let attachment = try await admitted.attachEventPump()
       let beforeCompletion = SessionOneShotAsyncBarrier()
+      let owner = NearWire()
+      defer { withExtendedLifetime(owner) {} }
       let run = Task {
         try await SDKActiveEventPump(
           attachment: attachment,
-          owner: NearWire(),
+          owner: owner,
           limits: limits,
           dependencies: SDKActiveEventPumpDependencies(
             sleep: sessionTestSleep,
@@ -3876,6 +3894,309 @@ final class SDKSessionAdmissionTests: XCTestCase {
     #else
       throw XCTSkip("The unrestricted real-TLS admission integration gate runs on macOS.")
     #endif
+  }
+
+  func testPublicConnectUsesProductionTLSBidirectionalEventsAndRealProcessLease() async throws {
+    #if os(macOS)
+      let configuration = try NearWireConfiguration()
+      let plan = try SDKPublicConnectionLimitPlan.make(configuration: configuration)
+      let appInstallationID = "123e4567-e89b-42d3-a456-426614174001"
+      let appHello = try WireHello(
+        productVersion: SDKProductVersion.wireValue(),
+        role: .app,
+        installationID: EndpointID(rawValue: appInstallationID),
+        maximumEventBytes: plan.maximumEventRecordBytes,
+        limits: plan.wireLimits
+      )
+      let viewerHello = try WireHello(
+        productVersion: WireProductVersion("1.0.0"),
+        role: .viewer,
+        installationID: EndpointID(rawValue: "viewer-installation"),
+        maximumEventBytes: plan.maximumEventRecordBytes,
+        limits: plan.wireLimits
+      )
+      let negotiation = try WireNegotiator.negotiate(local: appHello, remote: viewerHello)
+      let codec = try WireSessionCodec(negotiation: negotiation, baseLimits: plan.wireLimits)
+      let sessionEpoch = try SessionEpoch(
+        rawValue: "123e4567-e89b-12d3-a456-426614174000"
+      )
+      let acknowledgement = try WireNegotiator.makeAcknowledgement(
+        result: negotiation,
+        sessionEpoch: sessionEpoch,
+        limits: plan.wireLimits
+      )
+      let expectedAppHello = try WirePreHandshakeCodec(limits: plan.wireLimits).encode(appHello)
+      let viewerAdmissionBytes =
+        try WirePreHandshakeCodec(limits: plan.wireLimits).encode(viewerHello)
+        + codec.encode(acknowledgement, phase: .awaitingApproval)
+
+      let securityIdentity = try makeSessionTLSViewerIdentity()
+      guard try sessionSystemTrustEvaluationIsAvailable(identity: securityIdentity) else {
+        throw XCTSkip("Security trust evaluation is unavailable in the restricted test sandbox.")
+      }
+      let listener = try SecureViewerTransport.makeListener(
+        identity: ViewerTransportIdentity(identity: securityIdentity),
+        limits: plan.transportLimits
+      )
+      let connectionQueue = DispatchQueue(label: "nearwire.tests.public-connect.real-tls")
+      let verificationQueue = DispatchQueue(
+        label: "nearwire.tests.public-connect.real-tls-verify"
+      )
+      let listenerReady = expectation(description: "public-connect TLS listener ready")
+      let viewerReady = expectation(description: "public-connect TLS Viewer ready")
+      let appHelloReceived = expectation(description: "public-connect App hello received")
+      let recorder = SessionTLSIntegrationRecorder(
+        outboundBytes: viewerAdmissionBytes,
+        expectedAppHello: expectedAppHello,
+        viewerReady: viewerReady,
+        appHelloReceived: appHelloReceived
+      )
+
+      try listener.start(queue: connectionQueue) { event in
+        switch event {
+        case .ready(let port):
+          recorder.setPort(port)
+          listenerReady.fulfill()
+        case .incoming(let incoming):
+          do {
+            let channel = try incoming.makeChannel(queue: connectionQueue) {
+              [weak recorder] event in
+              recorder?.receive(event)
+            }
+            recorder.setViewerChannel(channel)
+            Task { try await channel.start() }
+          } catch {
+            recorder.recordFailure()
+          }
+        case .failed(let error):
+          recorder.recordFailure(error.code)
+          listenerReady.fulfill()
+          viewerReady.fulfill()
+          appHelloReceived.fulfill()
+        case .cancelled:
+          break
+        }
+      }
+
+      await fulfillment(of: [listenerReady], timeout: 2)
+      let port = try XCTUnwrap(recorder.port)
+      let endpointPort = try XCTUnwrap(NWEndpoint.Port(rawValue: port))
+      let identity = try XCTUnwrap(
+        NearWireBonjourServiceIdentity(
+          instanceName: "NearWire-ABC234",
+          type: NearWireBonjour.serviceType,
+          domain: NearWireBonjour.localDomain,
+          viewerDiscriminator: ViewerDiscoveryDiscriminator(
+            viewerInstallationID: viewerHello.installationID
+          )
+        )
+      )
+      let discovered = DiscoveredViewer(
+        identity: identity,
+        endpoint: .hostPort(host: "127.0.0.1", port: endpointPort)
+      )
+      let connectionDependencies = SDKPublicConnectionDependencies(
+        makeTransitionGate: { SDKSessionTransitionGate() },
+        claimLease: {
+          SDKPublicConnectionLease(handle: try ProcessConnectionLeaseRegistry.claim())
+        },
+        loadInstallationIdentity: { appInstallationID },
+        bundleMetadata: {
+          SDKBundleMetadataInput(
+            applicationIdentifier: nil,
+            shortVersion: nil,
+            buildVersion: nil,
+            displayName: nil,
+            bundleName: nil
+          )
+        },
+        makeAdmission: { pairingCode, hello, activePlan, gate, phaseObserver in
+          SDKSessionAdmission(
+            pairingCode: pairingCode,
+            localHello: hello,
+            wireLimits: activePlan.wireLimits,
+            transportLimits: activePlan.transportLimits,
+            admissionLimits: activePlan.admissionLimits,
+            transitionGate: gate,
+            phaseObserver: phaseObserver,
+            dependencies: SDKSessionAdmissionDependencies(
+              makeDiscovery: { _ in SessionTestDiscovery(result: discovered) },
+              makeChannel: { discovered, handler in
+                SecureAppTransport.makeChannel(
+                  endpoint: discovered.endpoint,
+                  connectionQueue: connectionQueue,
+                  verificationQueue: verificationQueue,
+                  limits: activePlan.transportLimits,
+                  eventHandler: handler
+                )
+              },
+              sleep: sessionTestSleep
+            )
+          )
+        },
+        makePump: { attachment, owner, limits in
+          SDKActiveEventPump(attachment: attachment, owner: owner, limits: limits)
+        },
+        hooks: .none
+      )
+      let owner = NearWire(
+        configuration: configuration,
+        dependencies: .live,
+        connectionDependencies: connectionDependencies
+      )
+      _ = try await owner.send(type: "integration.uplink", content: ["value": 1])
+      let connectTask = Task { try await owner.connect(code: "ABC234") }
+
+      await fulfillment(of: [viewerReady, appHelloReceived], timeout: 3)
+      let competitorIdentityLoads = SDKLockedCapture<Void>()
+      let competitor = NearWire(
+        dependencies: .live,
+        connectionDependencies: SDKPublicConnectionDependencies(
+          makeTransitionGate: { SDKSessionTransitionGate() },
+          claimLease: {
+            SDKPublicConnectionLease(handle: try ProcessConnectionLeaseRegistry.claim())
+          },
+          loadInstallationIdentity: {
+            competitorIdentityLoads.append(())
+            return appInstallationID
+          },
+          bundleMetadata: {
+            SDKBundleMetadataInput(
+              applicationIdentifier: nil,
+              shortVersion: nil,
+              buildVersion: nil,
+              displayName: nil,
+              bundleName: nil
+            )
+          },
+          makeAdmission: { _, _, _, _, _ in
+            fatalError("A contended public connection must not create admission.")
+          },
+          makePump: { _, _, _ in
+            fatalError("A contended public connection must not create a pump.")
+          },
+          hooks: .none
+        )
+      )
+      do {
+        try await competitor.connect(code: "ABC234")
+        XCTFail("A second public connection unexpectedly acquired the process lease.")
+      } catch {
+        assertNearWireError(error, code: .anotherConnectionIsActive)
+      }
+      XCTAssertTrue(competitorIdentityLoads.snapshot.isEmpty)
+
+      let viewerChannel = try XCTUnwrap(recorder.viewerChannel)
+      try await viewerChannel.send(
+        try codec.encode(
+          WireFlowPolicyOffer(
+            policy: try WireFlowPolicy(
+              appUplinkEventsPerSecond: 10,
+              appDownlinkEventsPerSecond: 10
+            )
+          ),
+          phase: .negotiatingPolicy
+        )
+      )
+      try await connectTask.value
+      let connectedState = await owner.currentState
+      XCTAssertEqual(connectedState, .connected)
+
+      let eventTask = Task { () throws -> NearWireEvent? in
+        var iterator = owner.events.makeAsyncIterator()
+        return try await iterator.next()
+      }
+      await sdkWaitUntil { owner.streamSubscriberCounts.events == 1 }
+      let route = SDKSessionRoute(
+        sessionEpoch: UUID(uuidString: sessionEpoch.rawValue)!,
+        viewerID: viewerHello.installationID.rawValue,
+        appID: appInstallationID
+      )
+      let downlinkRecord = try makeSessionIncomingRecord(
+        route: route,
+        sequence: 0,
+        id: "30000000-0000-0000-0000-000000000042"
+      )
+      try await viewerChannel.send(
+        try codec.encode(WireEventPayload(record: downlinkRecord), phase: .active)
+      )
+      let receivedEvent = try await eventTask.value
+      let published = try XCTUnwrap(receivedEvent)
+      XCTAssertEqual(published.id.uuidString.lowercased(), downlinkRecord.envelope.id.rawValue)
+
+      await sdkWaitUntil {
+        sessionFrameCount(in: Data(recorder.receivedBytes.dropFirst(expectedAppHello.count))) >= 2
+      }
+      let activeAppBytes = Data(recorder.receivedBytes.dropFirst(expectedAppHello.count))
+      XCTAssertEqual(
+        Array(try decodeSessionMessageTypes(activeAppBytes, codec: codec).prefix(2)),
+        [.flowPolicyAccepted, .event]
+      )
+      let diagnostics = try await owner.bufferDiagnostics()
+      XCTAssertEqual(diagnostics.eventCount, 0)
+      XCTAssertFalse(recorder.didFail)
+
+      await viewerChannel.cancel()
+      await sessionWaitUntil { await owner.currentState == .disconnected }
+      let reacquired = try ProcessConnectionLeaseRegistry.claim()
+      reacquired.release()
+      listener.cancel()
+    #else
+      throw XCTSkip("The unrestricted public-connect TLS integration gate runs on macOS.")
+    #endif
+  }
+
+  func testPublicAdmissionCancellationOwnerIsCalledOnceWhenOuterHandlerWins() async throws {
+    try await assertPublicAdmissionCancellationIsOneShot(outerHandlerWins: true)
+  }
+
+  func testPublicAdmissionCancellationOwnerIsCalledOnceWhenNestedHandlerWins() async throws {
+    try await assertPublicAdmissionCancellationIsOneShot(outerHandlerWins: false)
+  }
+
+  private func assertPublicAdmissionCancellationIsOneShot(
+    outerHandlerWins: Bool
+  ) async throws {
+    let gate = SDKSessionTransitionGate()
+    let discovery = SessionControlledDiscovery()
+    let cancellationEntries = SDKLockedCapture<Void>()
+    let admission = SDKSessionAdmission(
+      pairingCode: try PairingCode("ABC234"),
+      localHello: try makeSessionHello(role: .app),
+      transitionGate: gate,
+      cancellationObserver: { cancellationEntries.append(()) },
+      dependencies: SDKSessionAdmissionDependencies(
+        makeDiscovery: { _ in discovery },
+        makeChannel: { _, _ in
+          fatalError("Cancellation during discovery must not construct a channel.")
+        },
+        sleep: sessionTestSleep
+      )
+    )
+    let target = SDKSessionTransitionTarget()
+    XCTAssertTrue(
+      gate.installTarget(token: target) {
+        Task { await admission.cancel() }
+      }
+    )
+    let run = Task { try await admission.run() }
+    await discovery.waitUntilRunning()
+    let retainsPairingCode = await admission.retainsPairingCode()
+    XCTAssertFalse(retainsPairingCode)
+
+    if outerHandlerWins {
+      XCTAssertTrue(gate.requestCancellation(.task))
+      run.cancel()
+    } else {
+      run.cancel()
+      await sdkWaitUntil { cancellationEntries.snapshot.count == 1 }
+      XCTAssertTrue(gate.requestCancellation(.task))
+    }
+
+    await assertAdmissionError(.cancelled) { _ = try await run.value }
+    await sdkWaitUntil { cancellationEntries.snapshot.count == 1 }
+    XCTAssertEqual(cancellationEntries.snapshot.count, 1)
+    XCTAssertEqual(discovery.cancelCount, 1)
   }
 }
 

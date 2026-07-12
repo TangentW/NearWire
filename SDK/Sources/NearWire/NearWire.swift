@@ -43,6 +43,13 @@ private enum SDKEventNamespace {
   case platform
 }
 
+private final class SDKPublicConnectionToken: @unchecked Sendable {}
+
+private enum SDKPublicConnectionSlot {
+  case attempt(SDKPublicConnectionToken, SDKSessionTransitionGate)
+  case active(SDKPublicConnectionToken, SDKPublicConnectedOwner)
+}
+
 struct SDKRuntimeDependencies: Sendable {
   let wallClock: @Sendable () -> Date
   let monotonicClock: @Sendable () -> UInt64
@@ -81,8 +88,10 @@ public actor NearWire {
   private nonisolated let stateHub: StateStreamHub
   private nonisolated let eventHub: EventStreamHub
   private nonisolated let dependencies: SDKRuntimeDependencies
+  private nonisolated let connectionDependencies: SDKPublicConnectionDependencies
   private let instanceIdentifier: UUID
   private var state: NearWireState = .idle
+  private var connectionSlot: SDKPublicConnectionSlot?
   private var queue: BoundedEventQueue<SDKQueuedEvent>
   private var liveEventIDs = Set<EventID>()
   private var submittedCount: UInt64 = 0
@@ -96,6 +105,7 @@ public actor NearWire {
     stateHub = StateStreamHub(initial: .idle)
     eventHub = EventStreamHub(capacity: configuration.eventStreamBufferCapacity)
     dependencies = .live
+    connectionDependencies = .live
     instanceIdentifier = UUID()
     queue = BoundedEventQueue(limits: SDKValidation.queueLimits(configuration.buffer))
   }
@@ -103,12 +113,14 @@ public actor NearWire {
   internal init(
     configuration: NearWireConfiguration = .default,
     dependencies: SDKRuntimeDependencies,
+    connectionDependencies: SDKPublicConnectionDependencies = .live,
     instanceIdentifier: UUID = UUID()
   ) {
     self.configuration = configuration
     stateHub = StateStreamHub(initial: .idle)
     eventHub = EventStreamHub(capacity: configuration.eventStreamBufferCapacity)
     self.dependencies = dependencies
+    self.connectionDependencies = connectionDependencies
     self.instanceIdentifier = instanceIdentifier
     queue = BoundedEventQueue(limits: SDKValidation.queueLimits(configuration.buffer))
   }
@@ -116,6 +128,434 @@ public actor NearWire {
   deinit {
     stateHub.finishWithoutChangingState()
     eventHub.finish()
+  }
+
+  /// Performs one explicit secure connection attempt to the Viewer advertising `code`.
+  ///
+  /// Success means the TLS session and its initial flow policy are active. It does not
+  /// acknowledge delivery of any buffered Event.
+  public func connect(code: String) async throws {
+    let transitionGate = connectionDependencies.makeTransitionGate()
+    try await withTaskCancellationHandler {
+      try await performPublicConnect(code: code, transitionGate: transitionGate)
+    } onCancel: {
+      transitionGate.requestCancellation(.task)
+    }
+  }
+
+  private func performPublicConnect(
+    code: String,
+    transitionGate: SDKSessionTransitionGate
+  ) async throws {
+    guard state != .shutdown else { throw NearWireError.shutdown }
+    guard !Task.isCancelled else { throw NearWireError.connectionCancelled }
+    if let connectionSlot {
+      switch connectionSlot {
+      case .attempt:
+        throw SDKPublicConnectionErrorMapping.connectionInProgress()
+      case .active:
+        throw SDKPublicConnectionErrorMapping.alreadyConnected()
+      }
+    }
+
+    let pairingTransfer: SDKPairingCodeTransfer
+    do {
+      pairingTransfer = try SDKPairingCodeTransfer(rawValue: code)
+    } catch {
+      throw SDKPublicConnectionErrorMapping.invalidPairingCode()
+    }
+
+    let plan: SDKPublicConnectionLimitPlan
+    let productVersion: WireProductVersion
+    do {
+      plan = try SDKPublicConnectionLimitPlan.make(configuration: configuration)
+      productVersion = try SDKProductVersion.wireValue()
+    } catch {
+      throw SDKPublicConnectionErrorMapping.invalidConnectionConfiguration(
+        field: "buffer.maximumEventBytes"
+      )
+    }
+
+    let token = SDKPublicConnectionToken()
+    let priorState = state
+    connectionSlot = .attempt(token, transitionGate)
+    connectionDependencies.hooks.reachSynchronous(.beforeLeaseClaim)
+    if let failure = transitionGate.currentFailure() {
+      connectionSlot = nil
+      throw publicConnectionError(gateFailure: failure, fallback: nil)
+    }
+    let claimedLease: SDKPublicConnectionLease
+    do {
+      claimedLease = try connectionDependencies.claimLease()
+    } catch let error as ProcessConnectionLeaseError {
+      connectionSlot = nil
+      throw publicConnectionError(
+        gateFailure: transitionGate.currentFailure(),
+        fallback: SDKPublicConnectionErrorMapping.map(error)
+      )
+    } catch {
+      connectionSlot = nil
+      throw publicConnectionError(
+        gateFailure: transitionGate.currentFailure(),
+        fallback: NearWireError(
+          code: .connectionOwnershipUnavailable,
+          message: "NearWire process connection ownership is unavailable."
+        )
+      )
+    }
+    var lease: SDKPublicConnectionLease? = claimedLease
+    var didBeginDiscovery = false
+    connectionDependencies.hooks.reachSynchronous(.afterLeaseClaim)
+    guard isCurrentPublicAttempt(token), transitionGate.isAuthorized(), !Task.isCancelled else {
+      try await finishPublicAttemptWithoutLifetime(
+        token: token,
+        transitionGate: transitionGate,
+        lease: lease,
+        priorState: priorState,
+        didBeginDiscovery: didBeginDiscovery,
+        fallback: NearWireError.connectionCancelled
+      )
+    }
+
+    let identityTarget = SDKSessionTransitionTarget()
+    guard transitionGate.installTarget(token: identityTarget, cancel: {}) else {
+      try await finishPublicAttemptWithoutLifetime(
+        token: token,
+        transitionGate: transitionGate,
+        lease: lease,
+        priorState: priorState,
+        didBeginDiscovery: didBeginDiscovery,
+        fallback: NearWireError.connectionCancelled
+      )
+    }
+
+    let installationIdentity: String
+    do {
+      let value = try await connectionDependencies.loadInstallationIdentity()
+      await connectionDependencies.hooks.reach(.beforeIdentityCompletion)
+      installationIdentity = value
+      await connectionDependencies.hooks.reach(.afterIdentityCompletion)
+    } catch let error as SDKInstallationIdentityError {
+      transitionGate.removeTarget(token: identityTarget)
+      try await finishPublicAttemptWithoutLifetime(
+        token: token,
+        transitionGate: transitionGate,
+        lease: lease,
+        priorState: priorState,
+        didBeginDiscovery: didBeginDiscovery,
+        fallback: SDKPublicConnectionErrorMapping.map(error)
+      )
+    } catch {
+      transitionGate.removeTarget(token: identityTarget)
+      try await finishPublicAttemptWithoutLifetime(
+        token: token,
+        transitionGate: transitionGate,
+        lease: lease,
+        priorState: priorState,
+        didBeginDiscovery: didBeginDiscovery,
+        fallback: NearWireError(
+          code: .connectionInternalFailure,
+          message: "NearWire could not prepare its local connection identity."
+        )
+      )
+    }
+
+    guard isCurrentPublicAttempt(token), transitionGate.isAuthorized(), !Task.isCancelled else {
+      try await finishPublicAttemptWithoutLifetime(
+        token: token,
+        transitionGate: transitionGate,
+        lease: lease,
+        priorState: priorState,
+        didBeginDiscovery: didBeginDiscovery,
+        fallback: NearWireError.connectionCancelled
+      )
+    }
+
+    let metadata = SDKHostApplicationMetadata.resolve(connectionDependencies.bundleMetadata())
+    let hello: WireHello
+    do {
+      hello = try WireHello(
+        productVersion: productVersion,
+        role: .app,
+        installationID: EndpointID(rawValue: installationIdentity),
+        maximumEventBytes: plan.maximumEventRecordBytes,
+        displayName: metadata.displayName,
+        applicationIdentifier: metadata.applicationIdentifier,
+        applicationVersion: metadata.applicationVersion,
+        limits: plan.wireLimits
+      )
+    } catch {
+      try await finishPublicAttemptWithoutLifetime(
+        token: token,
+        transitionGate: transitionGate,
+        lease: lease,
+        priorState: priorState,
+        didBeginDiscovery: didBeginDiscovery,
+        fallback: SDKPublicConnectionErrorMapping.invalidConnectionConfiguration(
+          field: "buffer.maximumEventBytes"
+        )
+      )
+    }
+
+    guard
+      let admission = makePublicAdmission(
+        consuming: pairingTransfer,
+        hello: hello,
+        plan: plan,
+        transitionGate: transitionGate,
+        token: token
+      )
+    else {
+      try await finishPublicAttemptWithoutLifetime(
+        token: token,
+        transitionGate: transitionGate,
+        lease: lease,
+        priorState: priorState,
+        didBeginDiscovery: didBeginDiscovery,
+        fallback: NearWireError(
+          code: .connectionInternalFailure,
+          message: "NearWire could not prepare its internal connection transition."
+        )
+      )
+    }
+    didBeginDiscovery = true
+    updateSessionState(.discovering)
+
+    await connectionDependencies.hooks.reach(.beforeAdmissionTarget)
+    let admissionTarget = SDKSessionTransitionTarget()
+    guard
+      transitionGate.replaceTarget(
+        expectedToken: identityTarget,
+        newToken: admissionTarget,
+        cancel: { Task { await admission.cancel() } })
+    else {
+      try await finishPublicAttemptWithoutLifetime(
+        token: token,
+        transitionGate: transitionGate,
+        lease: lease,
+        priorState: priorState,
+        didBeginDiscovery: didBeginDiscovery,
+        fallback: NearWireError.connectionCancelled
+      )
+    }
+
+    let admitted: SDKAdmittedSession
+    let admittedTarget = SDKSessionTransitionTarget()
+    do {
+      admitted = try await admission.run()
+      _ = transitionGate.replaceTarget(
+        expectedToken: admissionTarget,
+        newToken: admittedTarget,
+        cancel: { admitted.cancel() }
+      )
+      await connectionDependencies.hooks.reach(.afterAdmissionResult)
+    } catch let error as SDKSessionAdmissionError {
+      transitionGate.removeTarget(token: admissionTarget)
+      try await finishPublicAttemptWithoutLifetime(
+        token: token,
+        transitionGate: transitionGate,
+        lease: lease,
+        priorState: priorState,
+        didBeginDiscovery: didBeginDiscovery,
+        fallback: SDKPublicConnectionErrorMapping.map(error.code)
+      )
+    } catch {
+      transitionGate.removeTarget(token: admissionTarget)
+      try await finishPublicAttemptWithoutLifetime(
+        token: token,
+        transitionGate: transitionGate,
+        lease: lease,
+        priorState: priorState,
+        didBeginDiscovery: didBeginDiscovery,
+        fallback: NearWireError(
+          code: .connectionInternalFailure,
+          message: "NearWire could not complete its internal connection transition."
+        )
+      )
+    }
+
+    guard let retainedLease = lease else {
+      admittedTarget.requestCancellation()
+      try finishPublicAttemptWithLifetime(
+        token: token,
+        didBeginDiscovery: didBeginDiscovery,
+        fallback: NearWireError(
+          code: .connectionInternalFailure,
+          message: "NearWire could not complete its internal connection transition."
+        )
+      )
+    }
+    guard transitionGate.claimCoordinatorLeaseOwnership() else {
+      admittedTarget.requestCancellation()
+      SDKPublicFailClosedLeaseVault.shared.retain(retainedLease)
+      lease = nil
+      try finishPublicAttemptWithLifetime(
+        token: token,
+        didBeginDiscovery: didBeginDiscovery,
+        fallback: NearWireError(
+          code: .connectionInternalFailure,
+          message: "NearWire could not transfer its internal connection ownership."
+        )
+      )
+    }
+    await connectionDependencies.hooks.reach(.beforeTerminalWaitRegistration)
+    let coordinator: SDKPublicTerminalCoordinator
+    do {
+      coordinator = try SDKPublicTerminalCoordinator(
+        lifetime: admitted.lifetime,
+        lease: retainedLease,
+        hooks: connectionDependencies.hooks,
+        delivery: { [weak self] code in
+          await self?.receivePublicTerminal(token: token, code: code)
+        }
+      )
+    } catch {
+      admittedTarget.requestCancellation()
+      SDKPublicFailClosedLeaseVault.shared.retain(retainedLease)
+      lease = nil
+      try finishPublicAttemptWithLifetime(
+        token: token,
+        didBeginDiscovery: didBeginDiscovery,
+        fallback: NearWireError(
+          code: .connectionInternalFailure,
+          message: "NearWire could not register its terminal connection observer."
+        )
+      )
+    }
+    lease = nil
+    await connectionDependencies.hooks.reach(.afterTerminalWaitRegistration)
+
+    if let failure = transitionGate.currentFailure() {
+      admittedTarget.requestCancellation()
+      transitionGate.removeTarget(token: admittedTarget)
+      try finishPublicAttemptWithLifetime(
+        token: token,
+        didBeginDiscovery: didBeginDiscovery,
+        failure: failure
+      )
+    }
+
+    let attachment: SDKSessionPumpAttachment
+    let attachmentTarget = SDKSessionTransitionTarget()
+    do {
+      attachment = try await admitted.attachEventPump()
+      _ = transitionGate.replaceTarget(
+        expectedToken: admittedTarget,
+        newToken: attachmentTarget,
+        cancel: { attachment.cancel() }
+      )
+    } catch let error as SDKSessionAdmissionError {
+      transitionGate.removeTarget(token: admittedTarget)
+      admittedTarget.requestCancellation()
+      try finishPublicAttemptWithLifetime(
+        token: token,
+        didBeginDiscovery: didBeginDiscovery,
+        fallback: SDKPublicConnectionErrorMapping.map(error.code)
+      )
+    } catch {
+      transitionGate.removeTarget(token: admittedTarget)
+      admittedTarget.requestCancellation()
+      try finishPublicAttemptWithLifetime(
+        token: token,
+        didBeginDiscovery: didBeginDiscovery,
+        fallback: NearWireError(
+          code: .connectionInternalFailure,
+          message: "NearWire could not attach its active Event pump."
+        )
+      )
+    }
+
+    await connectionDependencies.hooks.reach(.beforeActivationTarget)
+    if let failure = transitionGate.currentFailure() {
+      attachmentTarget.requestCancellation()
+      try finishPublicAttemptWithLifetime(
+        token: token,
+        didBeginDiscovery: didBeginDiscovery,
+        failure: failure
+      )
+    }
+
+    let handle: SDKActiveEventPumpHandle
+    let activeHandleTarget = SDKSessionTransitionTarget()
+    do {
+      handle = try await connectionDependencies.makePump(
+        attachment,
+        self,
+        plan.activeLimits
+      ).run()
+      _ = transitionGate.replaceTarget(
+        expectedToken: attachmentTarget,
+        newToken: activeHandleTarget,
+        cancel: { handle.cancel() }
+      )
+      await connectionDependencies.hooks.reach(.afterActivationResult)
+    } catch let error as SDKSessionAdmissionError {
+      transitionGate.removeTarget(token: attachmentTarget)
+      attachmentTarget.requestCancellation()
+      try finishPublicAttemptWithLifetime(
+        token: token,
+        didBeginDiscovery: didBeginDiscovery,
+        fallback: SDKPublicConnectionErrorMapping.map(error.code)
+      )
+    } catch {
+      transitionGate.removeTarget(token: attachmentTarget)
+      attachmentTarget.requestCancellation()
+      try finishPublicAttemptWithLifetime(
+        token: token,
+        didBeginDiscovery: didBeginDiscovery,
+        fallback: NearWireError(
+          code: .connectionInternalFailure,
+          message: "NearWire could not activate its Event pump."
+        )
+      )
+    }
+
+    await connectionDependencies.hooks.reach(.beforeTransferClaim)
+    switch transitionGate.claimActiveTransfer() {
+    case .failure(let failure):
+      activeHandleTarget.requestCancellation()
+      try finishPublicAttemptWithLifetime(
+        token: token,
+        didBeginDiscovery: didBeginDiscovery,
+        failure: failure
+      )
+    case .success:
+      break
+    }
+
+    let handleTarget = SDKSessionTransitionTarget()
+    guard
+      transitionGate.installTarget(
+        token: handleTarget,
+        cancel: {
+          handle.cancel()
+        })
+    else {
+      try finishPublicAttemptWithLifetime(
+        token: token,
+        didBeginDiscovery: didBeginDiscovery,
+        failure: transitionGate.currentFailure() ?? .shutdown
+      )
+    }
+    await connectionDependencies.hooks.reach(.beforeActorCommit)
+    let owner = SDKPublicConnectedOwner(handle: handle, coordinator: coordinator)
+    do {
+      try commitPublicConnected(token: token, gate: transitionGate, owner: owner)
+    } catch let failure as SDKSessionTransitionFailure {
+      handleTarget.requestCancellation()
+      try finishPublicAttemptWithLifetime(
+        token: token,
+        didBeginDiscovery: didBeginDiscovery,
+        failure: failure
+      )
+    } catch let error as NearWireError {
+      handleTarget.requestCancellation()
+      try finishPublicAttemptWithLifetime(
+        token: token,
+        didBeginDiscovery: didBeginDiscovery,
+        fallback: error
+      )
+    }
   }
 
   /// Encodes and admits an App-to-Viewer event to this instance's bounded memory queue.
@@ -234,9 +674,157 @@ public actor NearWire {
     return NearWireClearResult(removedEventIDs: result.removedEventIDs.map(\.sdkUUID))
   }
 
+  private func isCurrentPublicAttempt(_ token: SDKPublicConnectionToken) -> Bool {
+    guard case .attempt(let current, _) = connectionSlot else { return false }
+    return current === token
+  }
+
+  private func makePublicAdmission(
+    consuming transfer: SDKPairingCodeTransfer,
+    hello: WireHello,
+    plan: SDKPublicConnectionLimitPlan,
+    transitionGate: SDKSessionTransitionGate,
+    token: SDKPublicConnectionToken
+  ) -> SDKSessionAdmission? {
+    guard let pairingCode = transfer.take() else { return nil }
+    return connectionDependencies.makeAdmission(
+      pairingCode,
+      hello,
+      plan,
+      transitionGate,
+      { [weak self] in
+        guard let self else { return .cancelled }
+        return await self.authorizePublicConnecting(token: token, gate: transitionGate)
+      }
+    )
+  }
+
+  private func authorizePublicConnecting(
+    token: SDKPublicConnectionToken,
+    gate: SDKSessionTransitionGate
+  ) -> SDKSessionPhaseAuthorization {
+    guard state != .shutdown, isCurrentPublicAttempt(token), gate.isAuthorized() else {
+      return .cancelled
+    }
+    updateSessionState(.connecting)
+    return .authorized
+  }
+
+  private func finishPublicAttemptWithoutLifetime(
+    token: SDKPublicConnectionToken,
+    transitionGate: SDKSessionTransitionGate,
+    lease: SDKPublicConnectionLease?,
+    priorState: NearWireState,
+    didBeginDiscovery: Bool,
+    fallback: NearWireError
+  ) async throws -> Never {
+    await connectionDependencies.hooks.reach(.beforeRelease)
+    lease?.release()
+    await connectionDependencies.hooks.reach(.afterRelease)
+
+    let error = publicConnectionError(
+      gateFailure: transitionGate.currentFailure(),
+      fallback: fallback
+    )
+    if state != .shutdown, isCurrentPublicAttempt(token) {
+      connectionSlot = nil
+      if didBeginDiscovery {
+        updateSessionState(.disconnected)
+      } else if state != priorState {
+        updateSessionState(priorState)
+      }
+    }
+    throw state == .shutdown ? NearWireError.shutdown : error
+  }
+
+  private func finishPublicAttemptWithLifetime(
+    token: SDKPublicConnectionToken,
+    didBeginDiscovery: Bool,
+    failure: SDKSessionTransitionFailure
+  ) throws -> Never {
+    try finishPublicAttemptWithLifetime(
+      token: token,
+      didBeginDiscovery: didBeginDiscovery,
+      fallback: publicConnectionError(gateFailure: failure, fallback: nil)
+    )
+  }
+
+  private func finishPublicAttemptWithLifetime(
+    token: SDKPublicConnectionToken,
+    didBeginDiscovery: Bool,
+    fallback: NearWireError
+  ) throws -> Never {
+    if state != .shutdown, isCurrentPublicAttempt(token) {
+      connectionSlot = nil
+      if didBeginDiscovery { updateSessionState(.disconnected) }
+    }
+    throw state == .shutdown ? NearWireError.shutdown : fallback
+  }
+
+  private func publicConnectionError(
+    gateFailure: SDKSessionTransitionFailure?,
+    fallback: NearWireError?
+  ) -> NearWireError {
+    switch gateFailure {
+    case .shutdown:
+      return .shutdown
+    case .cancelled:
+      return .connectionCancelled
+    case .terminal(let code):
+      return SDKPublicConnectionErrorMapping.map(code)
+    case .invalidState:
+      return NearWireError(
+        code: .connectionInternalFailure,
+        message: "NearWire could not complete its internal connection transition."
+      )
+    case nil:
+      return fallback
+        ?? NearWireError(
+          code: .connectionInternalFailure,
+          message: "NearWire could not complete its internal connection transition."
+        )
+    }
+  }
+
+  private func commitPublicConnected(
+    token: SDKPublicConnectionToken,
+    gate: SDKSessionTransitionGate,
+    owner: SDKPublicConnectedOwner
+  ) throws {
+    guard state != .shutdown else { throw NearWireError.shutdown }
+    guard isCurrentPublicAttempt(token) else {
+      throw SDKSessionTransitionFailure.invalidState
+    }
+    switch gate.claimConnectedCommit() {
+    case .failure(let failure):
+      throw failure
+    case .success:
+      connectionSlot = .active(token, owner)
+      updateSessionState(.connected)
+    }
+  }
+
+  private func receivePublicTerminal(
+    token: SDKPublicConnectionToken,
+    code _: SDKSessionAdmissionError.Code
+  ) {
+    guard case .active(let current, _) = connectionSlot, current === token else { return }
+    connectionSlot = nil
+    if state != .shutdown { updateSessionState(.disconnected) }
+  }
+
   /// Permanently ends this instance and releases its in-memory work and observers.
   public func shutdown() {
     guard state != .shutdown else { return }
+    if let connectionSlot {
+      switch connectionSlot {
+      case .attempt(_, let gate):
+        gate.requestCancellation(.shutdown)
+      case .active(_, let owner):
+        owner.cancel()
+      }
+      self.connectionSlot = nil
+    }
     _ = queue.clear(reason: .ownerRequested)
     liveEventIDs.removeAll(keepingCapacity: false)
     state = .shutdown

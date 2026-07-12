@@ -2,9 +2,9 @@
 
 ## Current Boundary
 
-NearWire contains the repository-internal pairing-code grammar and Bonjour browser used by the later public session coordinator. This stage does not add `connect(code:)`, start discovery during `NearWire` initialization, persist a code, establish TLS, perform protocol admission, or transfer events.
+NearWire contains the repository-internal pairing-code grammar and Bonjour browser used by public `connect(code:)`. Initialization still starts no discovery, codes are not persisted, and this lower layer does not establish TLS, perform protocol admission, or transfer Events by itself.
 
-The browser is explicitly started by its future session owner. It requests TXT-enabled `_nearwire._tcp` Bonjour results in `local.`, sets `NWParameters.includePeerToPeer` to `true`, and accepts both ordinary LAN and Apple peer-to-peer paths. Peer-to-peer inclusion permits those paths; it does not force a particular physical interface.
+The browser is explicitly started by its session owner. It requests TXT-enabled `_nearwire._tcp` Bonjour results in `local.`, sets `NWParameters.includePeerToPeer` to `true`, and accepts both ordinary LAN and Apple peer-to-peer paths. Peer-to-peer inclusion permits those paths; it does not force a particular physical interface.
 
 ## Host App Declarations
 
@@ -45,7 +45,7 @@ The Viewer publishes a required TXT value named `vid`. Core derives it with `Cry
 
 The value is stable while the installation ID remains stable, including across pairing-code refreshes. Resetting the installation identity recomputes it. Because it is a truncated 64-bit value, distinct installations can theoretically collide. It is visible on the local discovery network and allows local correlation across advertisements.
 
-NearWire uses different valid `vid` values only for best-effort ambiguity detection. Missing, malformed, identical, spoofed, or changed values can remain indistinguishable. Neither `vid` nor an unambiguous browser result authenticates a Viewer. The later TLS and protocol-admission layers still run after discovery, and the accepted V1 TLS model does not claim Viewer identity authentication.
+NearWire uses different valid `vid` values only for best-effort ambiguity detection. Missing, malformed, identical, spoofed, or changed values can remain indistinguishable. Neither `vid` nor an unambiguous browser result authenticates a Viewer. The downstream TLS and protocol-admission layers still run after discovery, and the accepted V1 TLS model does not claim Viewer identity authentication.
 
 ## Selection and Lifecycle
 
@@ -64,4 +64,4 @@ Discovery is one-shot. Cancellation, policy denial, browser failure, result-limi
 
 ## Explicit Non-Guarantees
 
-Discovery does not provide persistence, internet rendezvous, background execution, retry timers, connection ownership, reconnection, TLS establishment, Viewer admission, event delivery, or authentication. Those behaviors belong to later narrow changes.
+Discovery itself does not provide persistence, internet rendezvous, background execution, retry timers, connection ownership, reconnection, TLS establishment, Viewer admission, event delivery, or authentication. Public `connect(code:)` composes discovery with the current TLS admission and active Event pump. Disconnect, reconnection, and background lifecycle policy remain separate work.

@@ -6,7 +6,7 @@ The primary SDK is the `NearWire` module. It supports iOS 16 or later, Xcode 16 
 
 The SDK uses Swift concurrency. It does not provide a singleton, delegate API, Combine publisher, NotificationCenter contract, or Objective-C compatibility layer.
 
-This implementation stage provides the event facade and offline memory behavior. Repository-internal pairing and Bonjour discovery now exist for the later session owner, but `connect(code:)`, `disconnect()`, TLS session coordination, rate negotiation, and reconnect behavior remain absent from the supported API. Construction does not start any of those operations early.
+The supported facade includes one explicit `connect(code:)` attempt. It does not yet expose disconnect, automatic reconnection, background policy, or lifecycle observation. Construction does not start connection work early.
 
 ## Create an Instance
 
@@ -32,9 +32,29 @@ let configuration = try NearWireConfiguration(
 let nearWire = NearWire(configuration: configuration)
 ```
 
-The two directional rates are App-local maximums. A later session computes each effective rate as the minimum of this value and the Viewer request. Zero pauses that business-event direction. The default App-local caps are 100 uplink and 50 downlink events per second.
+The two directional rates are App-local maximums. An active session computes each effective rate as the minimum of this value and the Viewer request. Zero pauses that business-event direction. The default App-local caps are 100 uplink and 50 downlink events per second.
 
-Initialization allocates small in-memory state only. It does not start discovery, request local-network permission, open a connection, claim process connection ownership, launch a task or timer, access disk or Keychain, or create UI. Multiple idle instances are independent. The internal process-wide lease is claimed only by a future explicit connection operation and will reject a second active connection attempt without turning the SDK into a singleton.
+Initialization allocates small in-memory state only. It does not start discovery, request local-network permission, open a connection, claim process connection ownership, launch a task or timer, access disk or Keychain, or create UI. Multiple idle instances are independent. An explicit connection attempt claims one process-wide connection lease; a second instance receives a typed contention error rather than replacing the owner.
+
+## Connect Explicitly
+
+```swift
+do {
+  try await nearWire.connect(code: "ABC234")
+} catch let error as NearWireError {
+  // Branch on error.code. Messages are fixed engineering diagnostics.
+}
+```
+
+The code uses the same bounded six-character normalization as Viewer discovery. It is a discovery and admission selector, not a password or certificate credential. NearWire does not persist it or retain it for retry.
+
+One call performs one attempt: it claims process ownership, loads the device-local installation identifier, discovers the matching Viewer through peer-to-peer-enabled Bonjour, establishes mandatory TLS 1.3, completes hello approval, and activates the first conservative flow policy. Success means that active transport is ready. It does not mean that any Event was received, persisted, processed, or acknowledged.
+
+The installation identifier is a canonical random UUID stored as a generic-password item in the data-protection Keychain. It uses `WhenUnlockedThisDeviceOnly`, does not synchronize or migrate to another device, and cannot prompt for authentication. NearWire never overwrites or deletes the item and currently provides no reset API. The identifier lets a Viewer correlate one App installation; it is not a secret or an authentication credential.
+
+The App hello also includes the compiled NearWire version and, when valid String values exist, the host bundle identifier, short version or build fallback, and display name or bundle-name fallback. Invalid or non-String property-list values are omitted rather than stringified.
+
+Only one attempt or active session may belong to one `NearWire` instance. A second call returns `connectionInProgress` or `alreadyConnected`. The process lease also prevents a different NearWire instance from connecting concurrently. Cancelling the connect Task requests cancellation but does not release ownership until current non-cancellable work or permanent session cleanup reaches its exact terminal boundary.
 
 ## Send Codable Events
 
@@ -130,9 +150,9 @@ The reply gets a new event ID and uses the request ID as both `correlationID` an
 
 Replies are bound internally to the NearWire instance, Viewer identity, and session epoch that produced the source event. Passing an event from another NearWire instance fails with `invalidReply`. If a reply is still pending after the active route changes, the SDK drops it before transport admission and increments `routingDropped`; it never sends a reply to a different Viewer or session. Route validation runs before the transport batch byte budget, so an oversized stale reply cannot block later eligible work.
 
-The later session coordinator drains events through one actor-isolated admission operation. Events are removed only when the secure transport's bounded mailbox synchronously accepts their encoded bytes. If transport backpressure rejects a candidate, it and the unattempted remainder stay in their original queue positions; FIFO, scheduler credit, IDs, and TTL are unchanged. Consequently there is no hidden, long-lived reservation outside `bufferDiagnostics()` or `clearBufferedEvents()`. Bytes already accepted by transport are beyond the buffer clear boundary.
+The active session drains events through one actor-isolated admission operation. Events are removed only when the secure transport's bounded mailbox synchronously accepts their encoded bytes. If transport backpressure rejects a candidate, it and the unattempted remainder stay in their original queue positions; FIFO, scheduler credit, IDs, and TTL are unchanged. Consequently there is no hidden, long-lived reservation outside `bufferDiagnostics()` or `clearBufferedEvents()`. Bytes already accepted by transport are beyond the buffer clear boundary.
 
-If a session cannot produce encoded bytes for the candidate, the internal drain reports it as not attempted, leaves it pending, and does not increment `transportAdmissionRejected`. The later session coordinator must resolve that session-level condition instead of immediately retrying the same queue head.
+If a session cannot produce encoded bytes for the candidate, the internal drain reports it as not attempted, leaves it pending, and does not increment `transportAdmissionRejected`. The session coordinator resolves that session-level condition instead of immediately retrying the same queue head.
 
 ## Observe State
 
@@ -140,11 +160,11 @@ Each state subscription immediately receives the current value and then later ch
 
 ```swift
 for await state in nearWire.states {
-  // idle, discovering, connecting, connected, reconnecting, disconnected, shutdown
+  // idle, discovering, connecting, connected, disconnected, shutdown
 }
 ```
 
-State streams retain only the latest pending state because an intermediate UI snapshot is superseded by a newer one. Cancelling one subscription does not disconnect or shut down the instance. This implementation stage publicly drives only `idle` and `shutdown`; later active-session and connection-lifecycle changes will drive the connection phases.
+State streams retain only the latest pending state because an intermediate UI snapshot is superseded by a newer one. Cancelling one subscription does not disconnect or shut down the instance. One public attempt drives `discovering`, `connecting`, and `connected`; a pre-success failure after discovery or any post-success terminal condition drives `disconnected`. `reconnecting` remains source-compatible but is not emitted by this implementation.
 
 ## Shutdown
 
@@ -152,7 +172,7 @@ State streams retain only the latest pending state because an intermediate UI sn
 await nearWire.shutdown()
 ```
 
-Shutdown is idempotent and terminal. It clears pending in-memory App events, publishes the final shutdown state, finishes existing streams, and rejects later sends and replies with `NearWireError.Code.shutdown`. A state stream created afterward yields `shutdown` once and finishes. An event stream created afterward finishes immediately.
+Shutdown is idempotent and terminal. It detaches the exact public connection owner, requests cancellation, clears pending in-memory App events, publishes the final shutdown state, finishes existing streams, and rejects later sends, replies, and connects with `NearWireError.Code.shutdown`. Internal terminal cleanup may continue long enough to close a session and release the process lease safely. A state stream created afterward yields `shutdown` once and finishes. An event stream created afterward finishes immediately.
 
 Releasing an instance also releases its local observers and memory. Applications should call `shutdown()` when they need the explicit terminal state and deterministic clearing behavior.
 
@@ -160,8 +180,10 @@ Releasing an instance also releases its local observers and memory. Applications
 
 `NearWireError` contains a stable code, an optional safe field, and a fixed English diagnostic message. It does not forward arbitrary `localizedDescription` text from application Codable implementations, transport failures, certificate data, endpoint data, pairing codes, or event content.
 
+Connection-specific codes distinguish invalid code, same-instance overlap, process contention or unavailable ownership, Task cancellation, discovery timeout or denial, ambiguous discovery, connection timeout, secure transport failure, incompatible or rejected Viewer, identity mismatch, remote close, and a closed internal-failure fallback. Failures after `connect` has already returned are represented only by the `disconnected` state; there is no terminal-error history API.
+
 The message is intended for engineering diagnostics, not as a localized user-interface contract. Applications should branch on `code`.
 
 ## Explicit Non-Guarantees
 
-The SDK facade does not itself provide persistence, delivery acknowledgement, RPC semantics, request timeouts, retry, at-least-once delivery, exactly-once delivery, background execution, automatic enablement, or Viewer authentication. Pairing discovery remains repository-internal until the dedicated active-session and connection-lifecycle changes expose it through the supported facade; persistence remains a Viewer concern.
+The SDK facade does not itself provide persistence, delivery acknowledgement, RPC semantics, retry, at-least-once delivery, exactly-once delivery, background execution, automatic enablement, reconnection, or pre-established Viewer authentication. The current TLS policy prevents plaintext transport but intentionally permits normal Viewer switching without certificate pinning. Persistence remains a Viewer concern.

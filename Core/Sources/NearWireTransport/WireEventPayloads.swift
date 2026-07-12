@@ -97,6 +97,67 @@ import Foundation
     try jsonValue().deterministicData().count
   }
 
+  /// Returns the exact V1 record maximum for content already bounded by `eventLimits`.
+  ///
+  /// The calculation allocates only a fixed-size maximum non-content wrapper. It never creates
+  /// content proportional to the configured content-byte limit.
+  public static func maximumDeterministicEncodedByteCount(
+    eventLimits: EventValidationLimits = .default
+  ) throws -> Int {
+    let maximumUUID = "ffffffff-ffff-4fff-bfff-ffffffffffff"
+    let maximumEndpointID = String(repeating: "z", count: 128)
+    let maximumType = String(repeating: "a", count: eventLimits.maximumTypeBytes)
+    let (maximumRemainingTTL, ttlOverflow) =
+      eventLimits.maximumTTLMilliseconds.multipliedReportingOverflow(by: 1_000_000)
+    guard !ttlOverflow else {
+      throw WireProtocolError(
+        code: .arithmeticOverflow,
+        path: "maximumEventBytes",
+        message: "Maximum Event TTL size overflowed."
+      )
+    }
+    let placeholder = JSONValue.null
+    let record = JSONValue.object([
+      "causality": .object([
+        "correlationID": .string(maximumUUID),
+        "replyTo": .string(maximumUUID),
+      ]),
+      "content": placeholder,
+      "createdAt": .string("9999-12-31T23:59:59.9999999Z"),
+      "direction": .string(EventDirection.appToViewer.rawValue),
+      "id": .string(maximumUUID),
+      "monotonicTimestampNanoseconds": .string(String(UInt64.max)),
+      "priority": .string(EventPriority.critical.rawValue),
+      "remainingTTLNanoseconds": .string(String(maximumRemainingTTL)),
+      "schemaVersion": .integer(Int64(UInt16.max)),
+      "sequence": .string(String(UInt64.max)),
+      "sessionEpoch": .string(maximumUUID),
+      "source": .object([
+        "id": .string(maximumEndpointID),
+        "role": .string(EndpointRole.app.rawValue),
+      ]),
+      "target": .object([
+        "id": .string(maximumEndpointID),
+        "role": .string(EndpointRole.viewer.rawValue),
+      ]),
+      "ttlMilliseconds": .string(String(eventLimits.maximumTTLMilliseconds)),
+      "type": .string(maximumType),
+    ])
+    let placeholderBytes = try placeholder.deterministicData().count
+    let wrapperBytes = try record.deterministicData().count - placeholderBytes
+    let (maximum, overflow) = wrapperBytes.addingReportingOverflow(
+      eventLimits.maximumEncodedContentBytes
+    )
+    guard !overflow else {
+      throw WireProtocolError(
+        code: .arithmeticOverflow,
+        path: "maximumEventBytes",
+        message: "Maximum Event record size overflowed."
+      )
+    }
+    return maximum
+  }
+
   func jsonValue() throws -> JSONValue {
     guard let createdAt = WireDateCodec.format(envelope.createdAt) else {
       throw WireProtocolError(
