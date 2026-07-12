@@ -46,6 +46,11 @@ swift format lint --recursive \
   Package.swift \
   Core \
   SDK \
+  SDK/Tests/NearWireUIConsumer/SwiftPMUIConsumer.swift \
+  SDK/Tests/NearWireUIConsumer/CocoaPodsUIConsumer.swift \
+  SDK/Tests/NearWireUIConsumer/ForbiddenSDKOnlyUIConsumer.swift \
+  SDK/Tests/NearWireUIConsumer/ForbiddenInternalUIConsumer.swift \
+  SDK/Tests/NearWireUIConsumer/ForbiddenInternalCocoaPodsUIConsumer.swift \
   Scripts/Fixtures/CorePackage.swift \
   Scripts/Fixtures/SecureTransportPublicAPI.swift \
   Scripts/Fixtures/ForbiddenPlaintextTransport.swift \
@@ -66,6 +71,7 @@ fi
 
 "$ROOT/Scripts/verify-process-lease.sh"
 ruby "$ROOT/Scripts/check-session-admission-structure.rb" "$ROOT"
+ruby "$ROOT/Scripts/check-sdk-ui-structure.rb" --self-test
 
 strict_concurrency_options=(
   -Xswiftc -strict-concurrency=complete
@@ -136,6 +142,26 @@ swift build \
   --triple arm64-apple-ios16.0 \
   --sdk "$ios_sdk" \
   "${strict_concurrency_options[@]}"
+
+swift build \
+  "${swift_cache_options[@]}" \
+  --disable-sandbox \
+  --scratch-path "$ROOT/.build/ios16" \
+  --triple arm64-apple-ios16.0 \
+  --sdk "$ios_sdk" \
+  --target NearWireUI \
+  "${strict_concurrency_options[@]}"
+
+swift build \
+  "${swift_cache_options[@]}" \
+  --disable-sandbox \
+  --scratch-path "$ROOT/.build/ios16-tests" \
+  --triple arm64-apple-ios16.0 \
+  --sdk "$ios_sdk" \
+  --build-tests \
+  "${strict_concurrency_options[@]}"
+
+echo "iOS 16 Swift Package test sources compiled."
 
 ios_module_path="$ROOT/.build/ios16/arm64-apple-ios/debug/Modules"
 if [[ ! -d "$ios_module_path" ]]; then
@@ -221,6 +247,36 @@ fi
 
 echo "iOS Swift Package SDK consumer API passed."
 
+xcrun swiftc \
+  -typecheck \
+  -swift-version 5 \
+  -strict-concurrency=complete \
+  -warnings-as-errors \
+  -target arm64-apple-ios16.0 \
+  -sdk "$ios_sdk" \
+  -I "$ios_module_path" \
+  SDK/Tests/NearWireUIConsumer/SwiftPMUIConsumer.swift
+
+forbidden_ui_spm="$package_harness/forbidden-internal-ui-spm.log"
+if xcrun swiftc \
+  -typecheck \
+  -swift-version 5 \
+  -target arm64-apple-ios16.0 \
+  -sdk "$ios_sdk" \
+  -I "$ios_module_path" \
+  SDK/Tests/NearWireUIConsumer/ForbiddenInternalUIConsumer.swift \
+  >"$forbidden_ui_spm" 2>&1; then
+  echo "Swift Package consumer unexpectedly accessed internal NearWireUI types." >&2
+  exit 1
+fi
+if ! grep -Fq "cannot find 'NearWireUIConnectionModel' in scope" "$forbidden_ui_spm"; then
+  echo "Swift Package NearWireUI internal boundary failed for an unexpected reason." >&2
+  cat "$forbidden_ui_spm" >&2
+  exit 1
+fi
+
+echo "Swift Package NearWireUI consumer and internal boundary passed."
+
 macos_sdk="$(xcrun --sdk macosx --show-sdk-path)"
 core_build_targets=()
 while IFS= read -r target; do
@@ -257,6 +313,15 @@ swift build \
   --triple arm64-apple-macosx13.0 \
   --sdk "$macos_sdk" \
   --target NearWire \
+  "${strict_concurrency_options[@]}"
+
+swift build \
+  "${swift_cache_options[@]}" \
+  --disable-sandbox \
+  --scratch-path "$ROOT/.build/macos13" \
+  --triple arm64-apple-macosx13.0 \
+  --sdk "$macos_sdk" \
+  --target NearWireUI \
   "${strict_concurrency_options[@]}"
 
 macos_module_path="$ROOT/.build/macos13/arm64-apple-macosx/debug/Modules"
@@ -429,6 +494,203 @@ ruby -rjson -e '
 ' "$sdk_api_json" "$cocoapods_api_json"
 
 echo "iOS CocoaPods same-module SDK consumer and API parity passed."
+
+forbidden_ui_pod="$package_harness/forbidden-sdk-only-ui-pod.log"
+if xcrun swiftc \
+  -typecheck \
+  -swift-version 5 \
+  -target arm64-apple-ios16.0 \
+  -sdk "$ios_sdk" \
+  -I "$cocoapods_module_dir" \
+  SDK/Tests/NearWireUIConsumer/ForbiddenSDKOnlyUIConsumer.swift \
+  >"$forbidden_ui_pod" 2>&1; then
+  echo "CocoaPods SDK-only consumer unexpectedly accessed NearWireUI." >&2
+  exit 1
+fi
+if ! grep -Fq "cannot find 'NearWireConnectionView' in scope" "$forbidden_ui_pod"; then
+  echo "CocoaPods SDK-only UI boundary failed for an unexpected reason." >&2
+  cat "$forbidden_ui_pod" >&2
+  exit 1
+fi
+
+cocoapods_ui_module_dir="$package_harness/CocoaPodsUIModule"
+mkdir -p "$cocoapods_ui_module_dir"
+cocoapods_ui_sources=()
+while IFS= read -r source; do
+  cocoapods_ui_sources+=("$source")
+done < <(find Core/Sources SDK/Sources/NearWire SDK/Sources/NearWireUI \
+  -type f -name '*.swift' -print | sort)
+
+SDKROOT="$ios_sdk" xcrun --sdk iphoneos swiftc \
+  -parse-as-library \
+  -emit-library \
+  -module-name NearWire \
+  -emit-module-path "$cocoapods_ui_module_dir/NearWire.swiftmodule" \
+  -o "$cocoapods_ui_module_dir/libNearWire.dylib" \
+  -swift-version 5 \
+  -strict-concurrency=complete \
+  -warnings-as-errors \
+  -target arm64-apple-ios16.0 \
+  -sdk "$ios_sdk" \
+  "${cocoapods_ui_sources[@]}"
+
+xcrun swiftc \
+  -typecheck \
+  -swift-version 5 \
+  -strict-concurrency=complete \
+  -warnings-as-errors \
+  -target arm64-apple-ios16.0 \
+  -sdk "$ios_sdk" \
+  -I "$cocoapods_ui_module_dir" \
+  SDK/Tests/NearWireUIConsumer/CocoaPodsUIConsumer.swift
+
+forbidden_internal_ui_pod="$package_harness/forbidden-internal-ui-pod.log"
+if xcrun swiftc \
+  -typecheck \
+  -swift-version 5 \
+  -target arm64-apple-ios16.0 \
+  -sdk "$ios_sdk" \
+  -I "$cocoapods_ui_module_dir" \
+  SDK/Tests/NearWireUIConsumer/ForbiddenInternalCocoaPodsUIConsumer.swift \
+  >"$forbidden_internal_ui_pod" 2>&1; then
+  echo "CocoaPods UI consumer unexpectedly accessed internal NearWireUI types." >&2
+  exit 1
+fi
+if ! grep -Fq "cannot find 'NearWireUIConnectionModel' in scope" \
+  "$forbidden_internal_ui_pod"; then
+  echo "CocoaPods UI internal boundary failed for an unexpected reason." >&2
+  cat "$forbidden_internal_ui_pod" >&2
+  exit 1
+fi
+
+spm_ui_api_json="$package_harness/nearwire-ui-spm-api.json"
+cocoapods_ui_api_json="$package_harness/nearwire-ui-cocoapods-api.json"
+xcrun swift-api-digester \
+  -dump-sdk \
+  -module NearWireUI \
+  -I "$ios_module_path" \
+  -target arm64-apple-ios16.0 \
+  -sdk "$ios_sdk" \
+  -o "$spm_ui_api_json"
+xcrun swift-api-digester \
+  -dump-sdk \
+  -module NearWire \
+  -I "$cocoapods_ui_module_dir" \
+  -target arm64-apple-ios16.0 \
+  -sdk "$ios_sdk" \
+  -o "$cocoapods_ui_api_json"
+
+ruby -rjson -e '
+  def root_nodes(path)
+    JSON.parse(File.read(path)).fetch("ABIRoot").fetch("children", [])
+      .reject { |node| node["kind"] == "Import" || !Array(node["spi_group_names"]).empty? }
+  end
+
+  def public_usrs(path)
+    root_nodes(path).flat_map { |node| collect(node) }.compact.sort.uniq
+  end
+
+  def collect(node)
+    return [] unless Array(node["spi_group_names"]).empty?
+    [node["usr"]] + node.fetch("children", []).flat_map { |child| collect(child) }
+  end
+
+  def canonical(node)
+    return nil unless Array(node["spi_group_names"]).empty?
+    printed = node["printedName"]&.gsub(/\bNearWireUI\./, "")&.gsub(/\bNearWire\./, "")
+    {
+      "kind" => node["kind"],
+      "name" => node["name"],
+      "printedName" => printed,
+      "declKind" => node["declKind"],
+      "implicit" => node["implicit"],
+      "initKind" => node["init_kind"],
+      "accessorKind" => node["accessorKind"],
+      "children" => node.fetch("children", []).map { |child| canonical(child) }.compact,
+      "accessors" => node.fetch("accessors", []).map { |child| canonical(child) }.compact,
+      "conformances" => semantic_conformances(node).map { |child| canonical(child) }.compact,
+    }
+  end
+
+  def semantic_conformances(node)
+    node.fetch("conformances", []).select { |item| item["name"] == "View" }
+  end
+
+  def validate_view_schema(node, initializer)
+    abort "#{node["name"]} must remain a struct" unless node["declKind"] == "Struct"
+    child_schema = node.fetch("children", []).map { |child| [child["kind"], child["printedName"]] }
+    expected_children = [
+      ["Constructor", initializer],
+      ["Var", "body"],
+      ["TypeAlias", "Body"],
+    ]
+    abort "#{node["name"]} public child schema changed: #{child_schema.inspect}" unless child_schema == expected_children
+    constructor, body, body_alias = node.fetch("children")
+    abort "#{node["name"]} body getter schema changed" unless body.fetch("accessors", []).map { |item| [item["kind"], item["accessorKind"]] } == [["Accessor", "get"]]
+    abort "#{node["name"]} Body alias must remain implicit" unless body_alias["implicit"] == true
+    conformances = semantic_conformances(node).map { |item| item["name"] }
+    abort "#{node["name"]} must retain its source-declared View conformance" unless conformances == ["View"]
+  end
+
+  marker_variants = [
+    { "conformances" => [{ "name" => "View" }] },
+    { "conformances" => %w[Copyable Escapable Sendable SendableMetatype View FutureCompilerMarker].map { |name| { "name" => name } } },
+  ]
+  unless marker_variants.map { |node| semantic_conformances(node).map { |item| item["name"] } }.uniq == [["View"]]
+    abort "Toolchain-synthesized marker normalization changed"
+  end
+
+  sdk_usrs = public_usrs(ARGV.fetch(0))
+  aggregate_usrs = public_usrs(ARGV.fetch(1))
+  missing_sdk = sdk_usrs - aggregate_usrs
+  abort "CocoaPods UI aggregate lost SDK API: #{missing_sdk.inspect}" unless missing_sdk.empty?
+
+  expected = %w[NearWireConnectionView NearWireConnectionStatusView]
+  spm_nodes = root_nodes(ARGV.fetch(2)).select { |node| expected.include?(node["name"]) }
+  aggregate_nodes = root_nodes(ARGV.fetch(1)).select { |node| expected.include?(node["name"]) }
+  abort "SwiftPM NearWireUI type inventory changed" unless spm_nodes.map { |node| node["name"] }.sort == expected.sort
+  abort "CocoaPods UI type inventory changed" unless aggregate_nodes.map { |node| node["name"] }.sort == expected.sort
+
+  [spm_nodes, aggregate_nodes].each do |nodes|
+    by_name = nodes.to_h { |node| [node.fetch("name"), node] }
+    validate_view_schema(by_name.fetch("NearWireConnectionView"), "init(nearWire:)")
+    validate_view_schema(by_name.fetch("NearWireConnectionStatusView"), "init(status:)")
+  end
+
+  spm_by_name = spm_nodes.to_h { |node| [node.fetch("name"), canonical(node)] }
+  aggregate_by_name = aggregate_nodes.to_h { |node| [node.fetch("name"), canonical(node)] }
+  unless spm_by_name == aggregate_by_name
+    abort "SwiftPM/CocoaPods normalized NearWireUI declaration trees differ. SwiftPM: #{spm_by_name.inspect}; CocoaPods: #{aggregate_by_name.inspect}"
+  end
+
+  allowed_extra_usrs = aggregate_nodes.flat_map { |node| collect(node) }.compact.sort.uniq
+  unexpected_extra_usrs = (aggregate_usrs - sdk_usrs) - allowed_extra_usrs
+  unless unexpected_extra_usrs.empty?
+    abort "CocoaPods UI aggregate added declarations outside the approved views: #{unexpected_extra_usrs.inspect}"
+  end
+
+  source = Dir["SDK/Sources/NearWireUI/*.swift"].sort.map { |path| File.read(path) }.join("\n")
+  declared = source.scan(/^public struct (\w+)/).flatten.sort
+  abort "NearWireUI public type delta changed: #{declared.inspect}" unless declared == expected.sort
+  abort "NearWireUI initializer delta changed" unless source.scan(/^  public init\(/).length == 2
+  abort "NearWireUI View-body delta changed" unless source.scan(/^  public var body: some View/).length == 2
+  public_lines = source.lines.map(&:strip).select { |line| line.start_with?("public ") }.sort
+  allowed_lines = [
+    "public struct NearWireConnectionStatusView: View {",
+    "public struct NearWireConnectionView: View {",
+    "public init(status: NearWireConnectionStatus) {",
+    "public init(nearWire: NearWire) {",
+    "public var body: some View {",
+    "public var body: some View {",
+  ].sort
+  abort "NearWireUI public member delta changed: #{public_lines.inspect}" unless public_lines == allowed_lines
+  public_kinds = source.scan(/\bpublic\s+(?:nonisolated\s+|static\s+|final\s+)*(struct|class|actor|enum|protocol|extension|typealias|init|var|let|func|subscript)\b/).flatten.sort
+  abort "NearWireUI public declaration kinds changed: #{public_kinds.inspect}" unless public_kinds == %w[init init struct struct var var]
+  abort "NearWireUI supported views gained an extension" if source.match?(/\bextension\s+NearWireConnection(?:Status)?View\b/)
+  abort "NearWireUI supported declarations gained an attribute" if source.match?(/@\w+(?:\([^\n]*\))?\s*(?:\n\s*)?public\s/)
+' "$cocoapods_api_json" "$cocoapods_ui_api_json" "$spm_ui_api_json"
+
+echo "CocoaPods UI consumer, SwiftPM aggregate inventory, and internal boundary passed."
 
 xcrun swiftc \
   -typecheck \

@@ -17,6 +17,8 @@ The root package exposes three supported SDK products:
 - `NearWireUI`
 - `NearWirePerformance`
 
+`NearWireUI` depends on `NearWire` and adds exactly two supported SwiftUI views: `NearWireConnectionView` and `NearWireConnectionStatusView`. It has no resource bundle or third-party dependency. Applications must add both products to the consuming target and inject their own configured `NearWire` instance.
+
 `NearWireCore` is present for the local Viewer build and repository tests. Its declarations use the `NearWireInternal` Swift SPI so CocoaPods can compile Core and SDK sources into one module without making Core values visible to a normal `import NearWire`. Repository-owned targets opt into that SPI explicitly. It is an internal product and is not covered by consumer API compatibility guarantees.
 
 Supported SDK signatures never expose a type that exists only in NearWireCore, NearWireTransport, or NearWireFlowControl. Public event, configuration, reconnection-policy, connection-status, and result models belong to `NearWire`, `NearWireUI`, or `NearWirePerformance` and convert to internal models behind the supported module boundary. SwiftPM and CocoaPods compile the same disconnect, suspend, resume, and status APIs.
@@ -48,6 +50,8 @@ Optional products are selected explicitly:
 pod "NearWire/UI"
 pod "NearWire/Performance"
 ```
+
+The default `NearWire` or explicit `NearWire/SDK` installation does not compile the SwiftUI sources or expose UI declarations. `NearWire/UI` compiles Core, SDK, and UI sources into the CocoaPods `NearWire` module and provides the same two supported views as the separate SwiftPM NearWireUI product.
 
 The CocoaPods module name is fixed as `NearWire`. The podspec does not force static-framework linkage; CocoaPods and the consuming application retain the default linkage selection. The SDK subspec links only Apple's `Security.framework` for the same private Keychain implementation as SwiftPM. NearWire declares no third-party runtime framework, weak framework, library, module map, prefix header, compiler flag, consumer build setting, or script hook. Its pod target build settings are restricted to module generation, complete Swift concurrency checking, and warnings as errors. Any expansion requires a reviewed OpenSpec contract change.
 

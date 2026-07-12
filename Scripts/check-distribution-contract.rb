@@ -26,7 +26,7 @@ module NearWireDistributionContract
     "NearWireFlowControlTests" => ["test", "Core/Tests/NearWireFlowControlTests", ["NearWireFlowControl"]],
     "NearWireTestSupportTests" => ["test", "Core/Tests/NearWireTestSupportTests", ["NearWireTestSupport"]],
     "NearWireTests" => ["test", "SDK/Tests/NearWireTests", %w[NearWire NearWireTransport]],
-    "NearWireUITests" => ["test", "SDK/Tests/NearWireUITests", ["NearWireUI"]],
+    "NearWireUITests" => ["test", "SDK/Tests/NearWireUITests", %w[NearWireUI NearWire]],
     "NearWirePerformanceTests" => ["test", "SDK/Tests/NearWirePerformanceTests", ["NearWirePerformance"]],
   }.freeze
 

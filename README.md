@@ -4,13 +4,21 @@ NearWire is a local, bidirectional event platform for iOS applications and a nat
 
 The repository is under active development. The architecture is defined in [NearWire-Platform-Architecture.md](NearWire-Platform-Architecture.md), and every implementation change is specified through OpenSpec before code is applied.
 
-The supported SDK event and explicit connection facade is documented in [Documentation/SDK-Public-API.md](Documentation/SDK-Public-API.md). Pairing and Bonjour behavior is documented in [Documentation/SDK-Discovery.md](Documentation/SDK-Discovery.md), process ownership in [Documentation/SDK-Connection-Lease.md](Documentation/SDK-Connection-Lease.md), the secure hello and approval sequence in [Documentation/SDK-Session-Admission.md](Documentation/SDK-Session-Admission.md), and bidirectional transfer in [Documentation/SDK-Active-Event-Pump.md](Documentation/SDK-Active-Event-Pump.md).
+The supported SDK event and explicit connection facade is documented in [Documentation/SDK-Public-API.md](Documentation/SDK-Public-API.md). The optional injected SwiftUI panel is documented in [Documentation/SDK-UI.md](Documentation/SDK-UI.md). Pairing and Bonjour behavior is documented in [Documentation/SDK-Discovery.md](Documentation/SDK-Discovery.md), process ownership in [Documentation/SDK-Connection-Lease.md](Documentation/SDK-Connection-Lease.md), the secure hello and approval sequence in [Documentation/SDK-Session-Admission.md](Documentation/SDK-Session-Admission.md), and bidirectional transfer in [Documentation/SDK-Active-Event-Pump.md](Documentation/SDK-Active-Event-Pump.md).
 
 ```swift
 let nearWire = NearWire()
 try await nearWire.connect(code: "ABC234")
 try await nearWire.send(type: "debug.snapshot", content: snapshot)
 await nearWire.disconnect()
+```
+
+Applications that want the standard connection controls can inject that same instance into the optional UI product:
+
+```swift
+import NearWireUI
+
+NearWireConnectionView(nearWire: nearWire)
 ```
 
 Connection uses peer-to-peer-enabled Bonjour discovery and mandatory TLS 1.3. The pairing code selects the Viewer but is not an authentication credential, and Event delivery is not acknowledged. Automatic recovery is opt-in and bounded; host-controlled suspend/resume never installs a hidden application lifecycle observer.

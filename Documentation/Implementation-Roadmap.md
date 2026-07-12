@@ -64,6 +64,8 @@ Implemented: async disconnect waits for exact cleanup; host-controlled suspend/r
 
 Implement the optional injected-instance NearWireUI connection-code, status, error, and disconnect components without hidden SDK ownership or persistence.
 
+Implemented: the two-view public surface injects an existing instance, bounds pairing input in memory, renders complete accessible state, and coordinates simultaneous panels without duplicate Connect or Disconnect work. Disappearance stops UI observation and pending UI attempts without disconnecting an active host-owned session.
+
 ### 15. `sdk-performance`
 
 Implement opt-in one-second performance snapshots, supported public collectors, resource-safe start and stop behavior, keep-latest delivery, unavailable metric semantics, and overhead benchmarks.

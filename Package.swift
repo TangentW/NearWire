@@ -110,7 +110,7 @@ let package = Package(
     ),
     .testTarget(
       name: "NearWireUITests",
-      dependencies: ["NearWireUI"],
+      dependencies: ["NearWireUI", "NearWire"],
       path: "SDK/Tests/NearWireUITests"
     ),
     .testTarget(

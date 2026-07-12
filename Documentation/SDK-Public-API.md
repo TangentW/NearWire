@@ -6,6 +6,8 @@ The primary SDK is the `NearWire` module. It supports iOS 16 or later, Xcode 16 
 
 The SDK uses Swift concurrency. It does not provide a singleton, delegate API, Combine publisher, NotificationCenter contract, or Objective-C compatibility layer.
 
+The optional `NearWireUI` product adds only an injected connection panel and a value-driven status view. It does not create a facade, take host lifecycle ownership, or make UI implementation types public. See [SDK-UI.md](SDK-UI.md).
+
 The supported facade includes explicit connect and disconnect, host-controlled suspension and resumption, default-disabled bounded recovery, and latest-value lifecycle status. Construction does not start connection work early, and NearWire never subscribes to application lifecycle or reachability notifications.
 
 ## Create an Instance
