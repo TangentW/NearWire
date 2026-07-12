@@ -932,7 +932,10 @@ final class ViewerFoundationTests: XCTestCase {
     remoteHello.expectedFulfillmentCount = 1
     let terminal = expectation(description: "Protocol violation closes core")
     terminal.expectedFulfillmentCount = 1
-    let channel = FakeAdmissionChannel(onSend: { _ in sent.fulfill() })
+    let channel = FakeAdmissionChannel(
+      supportsReceivePause: false,
+      onSend: { _ in sent.fulfill() }
+    )
     let viewerID = try EndpointID(rawValue: "viewer-test")
     let appID = try EndpointID(rawValue: "app-test")
     let core = try ViewerAdmissionConnectionCore(
@@ -2564,6 +2567,7 @@ private struct StableSignerProbeRecord: Codable {
 
 private final class FakeAdmissionChannel: ViewerAdmissionChannel, @unchecked Sendable {
   private let lock = NSLock()
+  private let supportsReceivePause: Bool
   private let onSend: @Sendable (Data) -> Void
   private let onStart: @Sendable () -> Void
   private let onCancel: @Sendable () -> Void
@@ -2573,11 +2577,13 @@ private final class FakeAdmissionChannel: ViewerAdmissionChannel, @unchecked Sen
   private var cancellations = 0
 
   init(
+    supportsReceivePause: Bool = true,
     onSend: @escaping @Sendable (Data) -> Void = { _ in },
     onStart: @escaping @Sendable () -> Void = {},
     onCancel: @escaping @Sendable () -> Void = {},
     cancelOperation: @escaping @Sendable () async -> Void = {}
   ) {
+    self.supportsReceivePause = supportsReceivePause
     self.onSend = onSend
     self.onStart = onStart
     self.onCancel = onCancel
@@ -2589,6 +2595,11 @@ private final class FakeAdmissionChannel: ViewerAdmissionChannel, @unchecked Sen
     payloads.append(data)
     lock.unlock()
     onSend(data)
+  }
+
+  func claimReceivePause() -> SecureReceivePauseToken? {
+    guard supportsReceivePause else { return nil }
+    return SecureReceivePauseToken { _ in }
   }
 
   func start() async throws {

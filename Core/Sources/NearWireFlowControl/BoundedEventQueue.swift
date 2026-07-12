@@ -161,6 +161,20 @@ private struct DeadlineHeapNode: Comparable, Sendable {
   }
 }
 
+private struct EnqueueHeapNode: Comparable, Sendable {
+  let enqueuedAtNanoseconds: UInt64
+  let ordinal: UInt64
+  let eventID: EventID
+
+  static func < (lhs: Self, rhs: Self) -> Bool {
+    if lhs.enqueuedAtNanoseconds != rhs.enqueuedAtNanoseconds {
+      return lhs.enqueuedAtNanoseconds < rhs.enqueuedAtNanoseconds
+    }
+    if lhs.ordinal != rhs.ordinal { return lhs.ordinal < rhs.ordinal }
+    return lhs.eventID.rawValue < rhs.eventID.rawValue
+  }
+}
+
 @_spi(NearWireInternal) public struct BoundedEventQueue<Value: Sendable>: Sendable {
   public let limits: EventQueueLimits
   public private(set) var statistics = EventQueueStatistics()
@@ -211,6 +225,7 @@ private struct DeadlineHeapNode: Comparable, Sendable {
   private var highHeap = FlowControlMinHeap<PriorityHeapNode>()
   private var criticalHeap = FlowControlMinHeap<PriorityHeapNode>()
   private var deadlineHeap = FlowControlMinHeap<DeadlineHeapNode>()
+  private var enqueueHeap = FlowControlMinHeap<EnqueueHeapNode>()
   private var accountedBytes = 0
   private var nextOrdinal: UInt64 = 0
   private var lastObservedNanoseconds: UInt64?
@@ -222,6 +237,14 @@ private struct DeadlineHeapNode: Comparable, Sendable {
 
   public var eventCount: Int { eventsByOrdinal.count }
   public var accountedByteCount: Int { accountedBytes }
+
+  public mutating func oldestWaitNanoseconds(atNanoseconds now: UInt64) throws -> UInt64? {
+    try validateObservation(now)
+    guard let oldest = validEnqueueNode()?.enqueuedAtNanoseconds else {
+      return nil
+    }
+    return now - oldest
+  }
 
   public mutating func enqueue(
     _ event: PendingEvent<Value>,
@@ -768,6 +791,7 @@ private struct DeadlineHeapNode: Comparable, Sendable {
     highHeap = FlowControlMinHeap()
     criticalHeap = FlowControlMinHeap()
     deadlineHeap = FlowControlMinHeap()
+    enqueueHeap = FlowControlMinHeap()
     accountedBytes = 0
     credits.reset()
     return EventQueueClearResult(reason: reason, removedEventIDs: ids)
@@ -826,6 +850,13 @@ private struct DeadlineHeapNode: Comparable, Sendable {
         eventID: stored.event.id
       )
     )
+    enqueueHeap.insert(
+      EnqueueHeapNode(
+        enqueuedAtNanoseconds: stored.event.enqueuedAtNanoseconds,
+        ordinal: stored.ordinal,
+        eventID: stored.event.id
+      )
+    )
   }
 
   @discardableResult
@@ -869,6 +900,19 @@ private struct DeadlineHeapNode: Comparable, Sendable {
         return node
       }
       _ = deadlineHeap.popMinimum()
+    }
+    return nil
+  }
+
+  private mutating func validEnqueueNode() -> EnqueueHeapNode? {
+    while let node = enqueueHeap.minimum {
+      if let stored = eventsByOrdinal[node.ordinal],
+        stored.event.id == node.eventID,
+        stored.event.enqueuedAtNanoseconds == node.enqueuedAtNanoseconds
+      {
+        return node
+      }
+      _ = enqueueHeap.popMinimum()
     }
     return nil
   }
@@ -953,7 +997,10 @@ private struct DeadlineHeapNode: Comparable, Sendable {
   private mutating func compactHeapsIfNeeded() {
     let threshold = max(64, eventCount * 2 + 16)
     let priorityNodeCount = lowHeap.count + normalHeap.count + highHeap.count + criticalHeap.count
-    guard deadlineHeap.count > threshold || priorityNodeCount > threshold else { return }
+    guard
+      deadlineHeap.count > threshold || enqueueHeap.count > threshold
+        || priorityNodeCount > threshold
+    else { return }
     rebuildHeaps()
   }
 
@@ -963,6 +1010,7 @@ private struct DeadlineHeapNode: Comparable, Sendable {
     highHeap = FlowControlMinHeap()
     criticalHeap = FlowControlMinHeap()
     deadlineHeap = FlowControlMinHeap()
+    enqueueHeap = FlowControlMinHeap()
     for stored in eventsByOrdinal.values {
       pushPriorityNode(
         PriorityHeapNode(ordinal: stored.ordinal, eventID: stored.event.id),
@@ -975,10 +1023,18 @@ private struct DeadlineHeapNode: Comparable, Sendable {
           eventID: stored.event.id
         )
       )
+      enqueueHeap.insert(
+        EnqueueHeapNode(
+          enqueuedAtNanoseconds: stored.event.enqueuedAtNanoseconds,
+          ordinal: stored.ordinal,
+          eventID: stored.event.id
+        )
+      )
     }
   }
 
   private static func deadline(for event: PendingEvent<Value>) throws -> UInt64 {
+    if let exact = event.expirationDeadlineNanoseconds { return exact }
     let (duration, multiplyOverflow) = event.ttl.milliseconds.multipliedReportingOverflow(
       by: 1_000_000)
     let (deadline, addOverflow) = event.enqueuedAtNanoseconds.addingReportingOverflow(duration)

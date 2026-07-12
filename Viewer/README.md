@@ -10,4 +10,8 @@ Select the team's stable Apple Development identity before running the maintaine
 
 Opening the single main window automatically prepares the persistent Viewer identities, creates an ephemeral pairing code, and publishes the mandatory-TLS peer-to-peer Bonjour listener. Closing the last window stops the runtime. The application does not install a menu-bar agent or daemon.
 
+After admission, the Viewer owns up to 16 independent App sessions. It completes flow-policy negotiation, exchanges bounded bidirectional Events, retains requested policy and nicknames in bounded `UserDefaults` records, and presents per-device rate, queue, throughput, and drop telemetry. Peer-declared installation and Bundle identifiers remain unauthenticated hints.
+
 Identity lifecycle, pairing, listener replacement, admission limits, recovery, sandbox, privacy behavior, and the three-phase stable-signer XCTest command sequence are documented in [Viewer-Foundation.md](../Documentation/Viewer-Foundation.md).
+
+Session ownership, logical correlation, policy negotiation, queue atomicity, receive backpressure, preferences, and the operational workspace are documented in [Viewer-MultiDevice-Flow-Control.md](../Documentation/Viewer-MultiDevice-Flow-Control.md).

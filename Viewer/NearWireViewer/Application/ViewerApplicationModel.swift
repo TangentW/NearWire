@@ -15,6 +15,8 @@ final class ViewerApplicationModel: ObservableObject {
 
   @Published private(set) var status: Status = .stopped
   @Published private(set) var pendingApps: [ViewerPendingAppSummary] = []
+  @Published private(set) var sessions: [ViewerSessionSnapshot] = []
+  @Published var selectedRoute: ViewerLogicalRoute?
   @Published var showsFullIdentityResetConfirmation = false
   @Published var requiresApproval: Bool {
     didSet {
@@ -35,6 +37,8 @@ final class ViewerApplicationModel: ObservableObject {
   private var preparingListener: ViewerListenerGeneration?
   private var isPaused = false
   private var pendingCoalescer: ViewerPendingCoalescer?
+  private var sessionCoalescer: ViewerSessionSnapshotCoalescer?
+  private var sessionManager: ViewerMultiDeviceSessionManager?
   private lazy var admissionManager = ViewerAdmissionManager(onPending: { _ in })
 
   init(
@@ -96,6 +100,30 @@ final class ViewerApplicationModel: ObservableObject {
     admissionManager.reject(id)
   }
 
+  func disconnectSelectedDevice() {
+    guard let id = selectedSession?.connectionID else { return }
+    sessionManager?.disconnect(connectionID: id)
+  }
+
+  func updateSelectedRates(appUplink: String, appDownlink: String) -> Bool {
+    guard let id = selectedSession?.connectionID,
+      let uplink = Double(appUplink), let downlink = Double(appDownlink),
+      let policy = try? ViewerRatePolicy(appUplink: uplink, appDownlink: downlink)
+    else { return false }
+    sessionManager?.updatePolicy(connectionID: id, policy: policy)
+    return true
+  }
+
+  func updateSelectedNickname(_ nickname: String) -> Bool {
+    guard let route = selectedRoute else { return false }
+    return sessionManager?.setNickname(nickname.isEmpty ? nil : nickname, route: route) ?? false
+  }
+
+  var selectedSession: ViewerSessionSnapshot? {
+    guard let selectedRoute else { return nil }
+    return sessions.first { $0.route == selectedRoute }
+  }
+
   func retry() {
     guard case .failed = status else { return }
     let cleanup = beginStopRuntime()
@@ -139,16 +167,34 @@ final class ViewerApplicationModel: ObservableObject {
     activeListener = nil
     preparingListener = nil
     pendingApps = []
+    sessions = []
+    selectedRoute = nil
     isPaused = false
     shutdownTask = nil
     status = .starting
     pendingCoalescer?.deactivate()
+    sessionCoalescer?.deactivate()
     let pendingCoalescer = ViewerPendingCoalescer { [weak self] pending in
       guard let self, self.runtimeToken == token, self.pendingApps != pending else { return }
       self.pendingApps = pending
     }
     self.pendingCoalescer = pendingCoalescer
-    admissionManager = makeAdmissionManager(pendingCoalescer: pendingCoalescer)
+    let sessionCoalescer = ViewerSessionSnapshotCoalescer { [weak self] snapshots in
+      guard let self, self.runtimeToken == token else { return }
+      self.sessions = snapshots
+      if let selected = self.selectedRoute, snapshots.contains(where: { $0.route == selected }) {
+        return
+      }
+      self.selectedRoute = snapshots.first?.route
+    }
+    self.sessionCoalescer = sessionCoalescer
+    let handoffOwner = dependencies.makeHandoffOwner()
+    sessionManager = handoffOwner as? ViewerMultiDeviceSessionManager
+    sessionManager?.setSnapshotHandler { snapshots in sessionCoalescer.submit(snapshots) }
+    admissionManager = makeAdmissionManager(
+      pendingCoalescer: pendingCoalescer,
+      handoffOwner: handoffOwner
+    )
     admissionManager.setRequiresApproval(requiresApproval)
 
     let loadIdentity = dependencies.loadIdentity
@@ -186,6 +232,8 @@ final class ViewerApplicationModel: ObservableObject {
     status = .stopping
     pendingCoalescer?.deactivate()
     pendingCoalescer = nil
+    sessionCoalescer?.deactivate()
+    sessionCoalescer = nil
     let receipt = admissionManager.stop()
     preparingListener?.admissionIngress.deactivate()
     activeListener?.admissionIngress.deactivate()
@@ -195,6 +243,9 @@ final class ViewerApplicationModel: ObservableObject {
     activeListener = nil
     preparedIdentity = nil
     pendingApps = []
+    sessions = []
+    selectedRoute = nil
+    sessionManager = nil
     isPaused = false
     let timeout = dependencies.cleanupTimeoutNanoseconds
     let scheduler = dependencies.scheduler
@@ -293,11 +344,12 @@ final class ViewerApplicationModel: ObservableObject {
   }
 
   private func makeAdmissionManager(
-    pendingCoalescer: ViewerPendingCoalescer
+    pendingCoalescer: ViewerPendingCoalescer,
+    handoffOwner: any ViewerAdmissionHandoffOwning
   ) -> ViewerAdmissionManager {
     ViewerAdmissionManager(
       onPending: { pending in pendingCoalescer.submit(pending) },
-      handoffOwner: dependencies.makeHandoffOwner(),
+      handoffOwner: handoffOwner,
       scheduler: dependencies.scheduler
     )
   }

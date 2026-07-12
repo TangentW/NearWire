@@ -104,6 +104,7 @@ import Foundation
   public let policy: EventQueuePolicy
   public let accountedByteCount: Int
   public let enqueuedAtNanoseconds: UInt64
+  public let expirationDeadlineNanoseconds: UInt64?
 
   public init(
     id: EventID,
@@ -112,7 +113,8 @@ import Foundation
     ttl: EventTTL = .default,
     policy: EventQueuePolicy = .normal,
     accountedByteCount: Int,
-    enqueuedAtNanoseconds: UInt64
+    enqueuedAtNanoseconds: UInt64,
+    expirationDeadlineNanoseconds: UInt64? = nil
   ) throws {
     guard accountedByteCount > 0 else {
       throw FlowControlError(
@@ -128,6 +130,7 @@ import Foundation
     self.policy = policy
     self.accountedByteCount = accountedByteCount
     self.enqueuedAtNanoseconds = enqueuedAtNanoseconds
+    self.expirationDeadlineNanoseconds = expirationDeadlineNanoseconds
   }
 }
 

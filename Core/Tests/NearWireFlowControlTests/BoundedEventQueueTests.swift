@@ -428,6 +428,25 @@ final class BoundedEventQueueTests: XCTestCase {
     XCTAssertEqual(expired.expiredEventIDs, [replacement.id])
   }
 
+  func testExactExpirationDeadlineOverridesMillisecondTTLWithoutExtension() throws {
+    var queue = BoundedEventQueue<String>()
+    let event = try makeTestEvent(
+      1,
+      ttlMilliseconds: 1,
+      enqueuedAt: 1_000_000_000,
+      expirationDeadline: 1_000_500_000
+    )
+    _ = try queue.enqueue(event, nowOnQueueClockNanoseconds: 1_000_000_000)
+
+    XCTAssertEqual(
+      try queue.snapshot(nowOnQueueClockNanoseconds: 1_000_499_999).eventCount,
+      1
+    )
+    let expired = try queue.snapshot(nowOnQueueClockNanoseconds: 1_000_500_000)
+    XCTAssertEqual(expired.eventCount, 0)
+    XCTAssertEqual(expired.expiredEventIDs, [event.id])
+  }
+
   func testAlreadyExpiredIncomingEventIsReportedWithoutBufferingOrOverflow() throws {
     var queue = BoundedEventQueue<String>()
     let stale = try makeTestEvent(1, ttlMilliseconds: 1)
@@ -934,6 +953,41 @@ final class BoundedEventQueueTests: XCTestCase {
     XCTAssertEqual(queue.statistics.clearedSessionEnded, 2)
     XCTAssertEqual(queue.eventCount, 0)
     XCTAssertEqual(flowControlSaturatedSum(UInt64.max, 1), UInt64.max)
+  }
+
+  func testOldestWaitUsesLiveEnqueueNodesAfterReplacementAndPriorityRemoval() throws {
+    let key = try KeepLatestKey("latest")
+    var queue = BoundedEventQueue<String>()
+    _ = try queue.enqueue(
+      makeTestEvent(
+        1,
+        priority: .normal,
+        policy: .keepLatest(key),
+        enqueuedAt: 10
+      ),
+      nowOnQueueClockNanoseconds: 10
+    )
+    let low = try makeTestEvent(2, priority: .low, enqueuedAt: 20)
+    _ = try queue.enqueue(low, nowOnQueueClockNanoseconds: 20)
+    let replacement = try makeTestEvent(
+      3,
+      priority: .critical,
+      policy: .keepLatest(key),
+      enqueuedAt: 30
+    )
+    _ = try queue.enqueue(replacement, nowOnQueueClockNanoseconds: 30)
+
+    XCTAssertEqual(try queue.oldestWaitNanoseconds(atNanoseconds: 40), 20)
+    let removed = try queue.dequeue(
+      maximumCount: 1,
+      maximumBytes: 10,
+      nowOnQueueClockNanoseconds: 40
+    )
+    XCTAssertEqual(removed.events.map(\.id), [replacement.id])
+    XCTAssertEqual(try queue.oldestWaitNanoseconds(atNanoseconds: 50), 30)
+
+    _ = queue.clear(reason: .ownerRequested)
+    XCTAssertNil(try queue.oldestWaitNanoseconds(atNanoseconds: 50))
   }
 
   func testHardBoundFillAndSingleEventDrainRemainFIFO() throws {

@@ -5,11 +5,96 @@ import Foundation
 
 protocol ViewerAdmissionChannel: Sendable {
   func admitSend(_ data: Data) throws
+  func admitSend(
+    _ data: Data,
+    reservingPendingSendCount: Int,
+    reservingPendingSendBytes: Int
+  ) throws
+  func canAdmitSend(
+    byteCount: Int,
+    reservingPendingSendCount: Int,
+    reservingPendingSendBytes: Int
+  ) -> Bool
+  func claimReceivePause() -> SecureReceivePauseToken?
+  var receiveChunkBytes: Int { get }
   func start() async throws
   func cancel() async
 }
 
-extension SecureByteChannel: ViewerAdmissionChannel {}
+extension ViewerAdmissionChannel {
+  func admitSend(
+    _ data: Data,
+    reservingPendingSendCount: Int,
+    reservingPendingSendBytes: Int
+  ) throws {
+    try admitSend(data)
+  }
+
+  func canAdmitSend(
+    byteCount: Int,
+    reservingPendingSendCount: Int,
+    reservingPendingSendBytes: Int
+  ) -> Bool { true }
+
+  func claimReceivePause() -> SecureReceivePauseToken? { nil }
+  var receiveChunkBytes: Int { SecureTransportLimits.default.receiveChunkBytes }
+}
+
+extension SecureByteChannel: ViewerAdmissionChannel {
+  nonisolated var receiveChunkBytes: Int { limits.receiveChunkBytes }
+}
+
+struct ViewerAdmissionSessionContext: Sendable {
+  let connectionID: UUID
+  let appHello: WireHello
+  let viewerHello: WireHello
+  let negotiation: WireNegotiationResult
+  let receiveChunkBytes: Int
+}
+
+struct ViewerSessionIngressLimits: Sendable {
+  static let maximumFramesPerTurn = 64
+  static let maximumRetainedInputBytes = 19 * 1_024 * 1_024
+  static let `default` = ViewerSessionIngressLimits(
+    maximumFramesPerTurn: maximumFramesPerTurn,
+    maximumRetainedInputBytes: 2 * 1_024 * 1_024
+  )
+
+  let maximumFramesPerTurn: Int
+  let maximumRetainedInputBytes: Int
+
+  init(maximumFramesPerTurn: Int, maximumRetainedInputBytes: Int) {
+    precondition((1...Self.maximumFramesPerTurn).contains(maximumFramesPerTurn))
+    precondition((1...Self.maximumRetainedInputBytes).contains(maximumRetainedInputBytes))
+    self.maximumFramesPerTurn = maximumFramesPerTurn
+    self.maximumRetainedInputBytes = maximumRetainedInputBytes
+  }
+}
+
+protocol ViewerAdmissionSessionReceiving: AnyObject, Sendable {
+  var ingressLimits: ViewerSessionIngressLimits { get }
+  func beginIngressTurn(receiptNanoseconds: UInt64)
+  func receiveSessionFrame(
+    _ frame: WireFrame,
+    receiptNanoseconds: UInt64
+  ) throws -> WireFrameDeliveryDecision
+  func decoderDidProgress(
+    _ progress: WireFrameDecoderProgress,
+    receiptNanoseconds: UInt64
+  ) -> ViewerDecoderProgressDisposition
+  func sessionMailboxMadeProgress(completed: ViewerSessionSendCompletionKind)
+  func sessionTransportTerminated()
+}
+
+enum ViewerSessionSendCompletionKind: Equatable, Sendable {
+  case ordinary
+  case localDropSummary
+}
+
+enum ViewerDecoderProgressDisposition: Equatable, Sendable {
+  case continueReceiving
+  case terminalWithoutResume
+}
 
 protocol ViewerIncomingConnection: Sendable {
   func makeAdmissionChannel(
@@ -36,6 +121,14 @@ struct ViewerAdmissionScheduler: Sendable {
 
   let now: @Sendable () -> UInt64
   let sleep: @Sendable (UInt64) async throws -> Void
+
+  func sleep(untilNanoseconds deadline: UInt64) async throws {
+    while true {
+      let current = now()
+      guard current < deadline else { return }
+      try await sleep(deadline - current)
+    }
+  }
 }
 
 enum ViewerCleanupOutcome: Equatable, Sendable {
@@ -142,7 +235,7 @@ final class ViewerAdmissionBudget: @unchecked Sendable {
 }
 
 final class ViewerAdmissionHandle: @unchecked Sendable {
-  fileprivate let connectionCore: ViewerAdmissionConnectionCore
+  let connectionCore: ViewerAdmissionConnectionCore
   private let cleanup: ViewerAdmissionAttemptCleanup
   private let lock = NSLock()
   private var consumed = false
@@ -193,6 +286,7 @@ final class ViewerAdmissionConnectionCore: @unchecked Sendable {
     case awaitingReady
     case awaitingHello
     case awaitingConsumer
+    case sessionAttached
     case terminal
   }
 
@@ -205,26 +299,38 @@ final class ViewerAdmissionConnectionCore: @unchecked Sendable {
   private let queue: DispatchQueue
   private let queueKey = DispatchSpecificKey<UUID>()
   private let queueValue = UUID()
+  private let connectionID: UUID
   private let viewerHelloFrame: Data
   private let viewerHello: WireHello
+  private let nowNanoseconds: @Sendable () -> UInt64
   private let onHello: @Sendable (ViewerPendingAppSummary) -> Void
   private let onTerminal: @Sendable () -> Void
   private var channel: (any ViewerAdmissionChannel)?
   private var decoder = WireFrameDecoder()
   private let codec = WirePreHandshakeCodec()
   private var negotiatedResult: WireNegotiationResult?
+  private var appHello: WireHello?
+  private weak var sessionReceiver: (any ViewerAdmissionSessionReceiving)?
+  private var receivePauseToken: SecureReceivePauseToken?
+  private var retainedReceiptNanoseconds: UInt64?
+  private var continuationScheduled = false
   private var state: State = .awaitingReady
   private var cleanupState: CleanupState = .open
   private var cleanupWaiters: [CheckedContinuation<Void, Never>] = []
   private var startRequested = false
   private var terminalNotified = false
+  private var sendCompletionKinds: [ViewerSessionSendCompletionKind] = []
 
   init(
     id: UUID,
     viewerInstallationID: EndpointID,
+    nowNanoseconds: @escaping @Sendable () -> UInt64 = {
+      DispatchTime.now().uptimeNanoseconds
+    },
     onHello: @escaping @Sendable (ViewerPendingAppSummary) -> Void,
     onTerminal: @escaping @Sendable () -> Void
   ) throws {
+    connectionID = id
     queue = DispatchQueue(label: "com.nearwire.viewer.admission.\(id.uuidString)")
     viewerHello = try WireHello(
       productVersion: WireProductVersion("0.1.0"),
@@ -232,6 +338,7 @@ final class ViewerAdmissionConnectionCore: @unchecked Sendable {
       installationID: viewerInstallationID
     )
     viewerHelloFrame = try WirePreHandshakeCodec().encode(viewerHello)
+    self.nowNanoseconds = nowNanoseconds
     self.onHello = onHello
     self.onTerminal = onTerminal
     queue.setSpecific(key: queueKey, value: queueValue)
@@ -253,6 +360,98 @@ final class ViewerAdmissionConnectionCore: @unchecked Sendable {
       handle(event)
     } else {
       queue.sync { handle(event) }
+    }
+  }
+
+  func pendingSessionContext() throws -> ViewerAdmissionSessionContext {
+    try performSync {
+      guard state == .awaitingConsumer, cleanupState == .open,
+        let appHello, let negotiatedResult, let channel
+      else { throw CoreError.invalidState }
+      return ViewerAdmissionSessionContext(
+        connectionID: connectionID,
+        appHello: appHello,
+        viewerHello: viewerHello,
+        negotiation: negotiatedResult,
+        receiveChunkBytes: channel.receiveChunkBytes
+      )
+    }
+  }
+
+  func attachSession(_ receiver: any ViewerAdmissionSessionReceiving) throws {
+    try performSync {
+      guard state == .awaitingConsumer, cleanupState == .open,
+        sessionReceiver == nil, appHello != nil, negotiatedResult != nil
+      else { throw CoreError.invalidState }
+      sessionReceiver = receiver
+      state = .sessionAttached
+    }
+  }
+
+  func continueAttachedInput() {
+    queue.async { [weak self] in
+      guard let self, self.state == .sessionAttached, self.cleanupState == .open,
+        self.receivePauseToken != nil
+      else { return }
+      if self.retainedReceiptNanoseconds != nil {
+        self.scheduleInputContinuation()
+      } else {
+        self.resolveReceivePause(resume: true)
+      }
+    }
+  }
+
+  func performSessionOperation(_ operation: @escaping @Sendable () -> Void) {
+    queue.async { [weak self] in
+      guard let self, self.state == .sessionAttached, self.cleanupState == .open else { return }
+      operation()
+    }
+  }
+
+  func performSynchronousSessionOperation<T>(_ operation: () throws -> T) throws -> T {
+    try performSync {
+      guard state == .sessionAttached, cleanupState == .open else {
+        throw CoreError.invalidState
+      }
+      return try operation()
+    }
+  }
+
+  func closeSession() {
+    queue.async { [weak self] in self?.beginCancellation() }
+  }
+
+  func admitSessionSend(
+    _ data: Data,
+    reservingPendingSendCount: Int = 0,
+    reservingPendingSendBytes: Int = 0,
+    completionKind: ViewerSessionSendCompletionKind = .ordinary
+  ) throws {
+    try performSync {
+      guard state == .sessionAttached, cleanupState == .open, let channel else {
+        throw CoreError.invalidState
+      }
+      try channel.admitSend(
+        data,
+        reservingPendingSendCount: reservingPendingSendCount,
+        reservingPendingSendBytes: reservingPendingSendBytes
+      )
+      sendCompletionKinds.append(completionKind)
+    }
+  }
+
+  func canAdmitSessionSend(
+    byteCount: Int,
+    reservingPendingSendCount: Int,
+    reservingPendingSendBytes: Int
+  ) -> Bool {
+    performSync {
+      guard state == .sessionAttached, cleanupState == .open, let channel else { return false }
+      return channel.canAdmitSend(
+        byteCount: byteCount,
+        reservingPendingSendCount: reservingPendingSendCount,
+        reservingPendingSendBytes: reservingPendingSendBytes
+      )
     }
   }
 
@@ -314,6 +513,7 @@ final class ViewerAdmissionConnectionCore: @unchecked Sendable {
         guard state == .awaitingReady, let channel else { return }
         do {
           try channel.admitSend(viewerHelloFrame)
+          sendCompletionKinds.append(.ordinary)
           state = .awaitingHello
         } catch {
           beginCancellation()
@@ -322,33 +522,161 @@ final class ViewerAdmissionConnectionCore: @unchecked Sendable {
         finishWithoutCancellation()
       }
     case .received(let bytes):
-      guard state == .awaitingHello else {
-        beginCancellation()
-        return
-      }
-      do {
-        try decoder.consume(
-          bytes,
-          preflightLane: { lane in
-            guard lane == .control else { throw CoreError.invalidPeer }
-          },
-          onFrame: { [self] frame in
-            guard state == .awaitingHello else { throw CoreError.invalidState }
-            guard case .hello(let hello) = try codec.decode(frame: frame), hello.role == .app else {
-              throw CoreError.invalidPeer
-            }
-            negotiatedResult = try WireNegotiator.negotiate(local: viewerHello, remote: hello)
-            state = .awaitingConsumer
-            onHello(Self.summary(from: hello))
-          }
-        )
-      } catch {
-        beginCancellation()
-      }
+      handleReceivedBytes(bytes)
     case .terminated:
       finishWithoutCancellation()
     case .sendCompleted:
-      break
+      let completed = sendCompletionKinds.isEmpty ? .ordinary : sendCompletionKinds.removeFirst()
+      sessionReceiver?.sessionMailboxMadeProgress(completed: completed)
+    }
+  }
+
+  private func handleReceivedBytes(_ bytes: Data) {
+    guard state == .awaitingHello || state == .sessionAttached else {
+      beginCancellation()
+      return
+    }
+    let receipt = nowNanoseconds()
+    serviceInput(bytes, receiptNanoseconds: receipt, isContinuation: false)
+  }
+
+  private func serviceInput(
+    _ bytes: Data,
+    receiptNanoseconds: UInt64,
+    isContinuation: Bool
+  ) {
+    guard cleanupState == .open, state == .awaitingHello || state == .sessionAttached else {
+      resolveReceivePause(resume: false)
+      return
+    }
+    let limits = sessionReceiver?.ingressLimits ?? .default
+    let maximumCompletedFrames = state == .awaitingHello ? 1 : limits.maximumFramesPerTurn
+    guard bytes.count <= limits.maximumRetainedInputBytes else {
+      beginCancellation()
+      return
+    }
+    let decoderLimit = limits.maximumRetainedInputBytes - bytes.count
+    guard decoderLimit > 0 else {
+      beginCancellation()
+      return
+    }
+    sessionReceiver?.beginIngressTurn(receiptNanoseconds: receiptNanoseconds)
+    do {
+      let progress = try decoder.consumeResumable(
+        bytes,
+        maximumCompletedFrames: maximumCompletedFrames,
+        maximumRetainedBytes: decoderLimit,
+        preflightLane: { [self] lane in
+          if state != .sessionAttached, lane != .control { throw CoreError.invalidPeer }
+        },
+        onFrame: { [self] frame in
+          switch state {
+          case .awaitingHello:
+            guard case .hello(let hello) = try codec.decode(frame: frame), hello.role == .app else {
+              throw CoreError.invalidPeer
+            }
+            appHello = hello
+            negotiatedResult = try WireNegotiator.negotiate(local: viewerHello, remote: hello)
+            state = .awaitingConsumer
+            onHello(Self.summary(from: hello))
+            return .consume
+          case .sessionAttached:
+            guard let sessionReceiver else { throw CoreError.invalidState }
+            return try sessionReceiver.receiveSessionFrame(
+              frame,
+              receiptNanoseconds: receiptNanoseconds
+            )
+          default:
+            throw CoreError.invalidState
+          }
+        }
+      )
+      let disposition =
+        sessionReceiver?.decoderDidProgress(
+          progress,
+          receiptNanoseconds: receiptNanoseconds
+        ) ?? .continueReceiving
+      if disposition == .terminalWithoutResume {
+        beginCancellation()
+        return
+      }
+      applyDecoderProgress(
+        progress,
+        receiptNanoseconds: receiptNanoseconds,
+        isContinuation: isContinuation
+      )
+    } catch {
+      beginCancellation()
+    }
+  }
+
+  private func applyDecoderProgress(
+    _ progress: WireFrameDecoderProgress,
+    receiptNanoseconds: UInt64,
+    isContinuation: Bool
+  ) {
+    if state == .awaitingConsumer {
+      retainedReceiptNanoseconds =
+        progress == .pausedOnCompleteFrame ? receiptNanoseconds : nil
+      if receivePauseToken == nil {
+        guard let token = channel?.claimReceivePause() else {
+          beginCancellation()
+          return
+        }
+        receivePauseToken = token
+      }
+      return
+    }
+    switch progress {
+    case .pausedOnCompleteFrame:
+      retainedReceiptNanoseconds = receiptNanoseconds
+      if !isContinuation {
+        guard let token = channel?.claimReceivePause() else {
+          beginCancellation()
+          return
+        }
+        receivePauseToken = token
+      } else if receivePauseToken == nil {
+        beginCancellation()
+        return
+      }
+      scheduleInputContinuation()
+    case .needsMoreBytes, .drained:
+      retainedReceiptNanoseconds = nil
+      resolveReceivePause(resume: true)
+    }
+  }
+
+  private func scheduleInputContinuation() {
+    guard !continuationScheduled else { return }
+    continuationScheduled = true
+    queue.async { [weak self] in
+      guard let self else { return }
+      self.continuationScheduled = false
+      guard self.cleanupState == .open, self.receivePauseToken != nil else {
+        self.resolveReceivePause(resume: false)
+        return
+      }
+      guard self.state != .awaitingConsumer else { return }
+      guard let receipt = self.retainedReceiptNanoseconds,
+        self.state == .sessionAttached
+      else {
+        self.resolveReceivePause(resume: false)
+        return
+      }
+      self.serviceInput(Data(), receiptNanoseconds: receipt, isContinuation: true)
+    }
+  }
+
+  private func resolveReceivePause(resume: Bool) {
+    continuationScheduled = false
+    retainedReceiptNanoseconds = nil
+    let token = receivePauseToken
+    receivePauseToken = nil
+    if resume {
+      token?.resume()
+    } else {
+      token?.cancel()
     }
   }
 
@@ -370,8 +698,14 @@ final class ViewerAdmissionConnectionCore: @unchecked Sendable {
   }
 
   private func finishTerminalState() {
+    let sessionReceiver = sessionReceiver
+    self.sessionReceiver = nil
+    resolveReceivePause(resume: false)
+    decoder = WireFrameDecoder()
+    sendCompletionKinds.removeAll(keepingCapacity: false)
     state = .terminal
     channel = nil
+    sessionReceiver?.sessionTransportTerminated()
     guard !terminalNotified else { return }
     terminalNotified = true
     onTerminal()
@@ -396,6 +730,13 @@ final class ViewerAdmissionConnectionCore: @unchecked Sendable {
       installationAlias: "App \(alias)",
       compatibilityStatus: "Compatible"
     )
+  }
+
+  private func performSync<T>(_ operation: () throws -> T) rethrows -> T {
+    if DispatchQueue.getSpecific(key: queueKey) == queueValue {
+      return try operation()
+    }
+    return try queue.sync(execute: operation)
   }
 }
 
@@ -725,6 +1066,7 @@ final class ViewerAdmissionManager: @unchecked Sendable {
       let core = try ViewerAdmissionConnectionCore(
         id: attemptID,
         viewerInstallationID: viewerInstallationID,
+        nowNanoseconds: scheduler.now,
         onHello: { [weak self] summary in self?.receivedHello(summary, attemptID: attemptID) },
         onTerminal: { [weak self] in self?.terminal(attemptID: attemptID) }
       )
@@ -772,12 +1114,11 @@ final class ViewerAdmissionManager: @unchecked Sendable {
         attempt.cleanup.beginCoreCleanup(attempt.core, cancel: true)
         return
       }
-      let now = scheduler.now()
-      let elapsed = now >= claimedAt ? now - claimedAt : deadlineNanoseconds
-      let remainingDeadline = elapsed < deadlineNanoseconds ? deadlineNanoseconds - elapsed : 1
+      let (candidateDeadline, overflow) = claimedAt.addingReportingOverflow(deadlineNanoseconds)
+      let absoluteDeadline = overflow ? UInt64.max : candidateDeadline
       let deadline = Task { [weak self, scheduler] in
         do {
-          try await scheduler.sleep(remainingDeadline)
+          try await scheduler.sleep(untilNanoseconds: absoluteDeadline)
         } catch {
           return
         }
@@ -872,8 +1213,8 @@ final class ViewerAdmissionManager: @unchecked Sendable {
       return
     }
     attempts.removeValue(forKey: attemptID)
-    transferLocked(attempt)
     lock.unlock()
+    transfer(attempt)
   }
 
   private func terminal(attemptID: UUID) {
@@ -908,11 +1249,12 @@ final class ViewerAdmissionManager: @unchecked Sendable {
     }
     attempts.removeValue(forKey: entry.key)
     let pending = pendingSummariesLocked()
-    if handoff {
-      transferLocked(entry.value)
-    }
     lock.unlock()
-    if !handoff { finish([entry.value]) }
+    if handoff {
+      transfer(entry.value)
+    } else {
+      finish([entry.value])
+    }
     onPending(pending)
   }
 
@@ -943,7 +1285,7 @@ final class ViewerAdmissionManager: @unchecked Sendable {
     }
   }
 
-  private func transferLocked(_ attempt: Attempt) {
+  private func transfer(_ attempt: Attempt) {
     attempt.deadline?.cancel()
     let handle = ViewerAdmissionHandle(
       connectionCore: attempt.core,

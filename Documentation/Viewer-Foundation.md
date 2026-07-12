@@ -75,7 +75,7 @@ The 33rd connection is rejected before channel construction, decoding, deadline 
 
 Incoming listener callbacks first cross a synchronous generation gate. Stale, paused, stopped, or over-capacity arrivals are rejected before any `MainActor` task is created, and a claim that finishes after its generation was cancelled cannot reinsert itself. Channel events are synchronously backpressured into the connection core's serial decoder, avoiding a second unbounded input queue. Pending-device UI delivery keeps only the latest snapshot, delivers one snapshot per main-actor turn, and is deactivated with its runtime generation so stale rows cannot return after stop or restart.
 
-One connection core owns the secure channel callback, Viewer Hello send, continuous frame decoder, negotiation result, and terminal gate. Approval transfers only an opaque consumer right that retains the same core. One handoff owner atomically serializes transfer and shutdown; the foundation placeholder owner closes and awaits every accepted handoff. The next Viewer change extends this owner with acknowledgement, policy, and active session operations.
+One connection core owns the secure channel callback, Viewer Hello send, continuous frame decoder, negotiation result, and terminal gate. Approval transfers only an opaque consumer right that retains the same core. The multi-device owner now extends that same core with acknowledgement, policy, and active session operations; it does not install a second callback or decoder.
 
 ## Recovery
 
@@ -94,6 +94,6 @@ The application sandbox contains only the incoming network-server entitlement re
 
 The built Info.plist advertises `_nearwire._tcp` and explains local-network use. `PrivacyInfo.xcprivacy` declares linked Device ID for App functionality with tracking disabled because `vid` is published and the complete installation ID is sent in Viewer Hello. It contains no tracking domains. The app-local approval preference uses `UserDefaults`, so the manifest declares only the required `NSPrivacyAccessedAPICategoryUserDefaults` reason `CA92.1`; it contains no unused Required Reason category.
 
-## Next Change Boundary
+## Active Session Boundary
 
-`viewer-multidevice-flow-control` consumes the existing opaque handoff and adds active device sessions, Hello acknowledgement, requested and effective directional rates, bounded queues, telemetry, and device isolation. It must not replace the identity store, listener generation model, secure-channel callback owner, or continuous decoder introduced here.
+`viewer-multidevice-flow-control` consumes the existing opaque handoff and adds active device sessions, Hello acknowledgement, requested and effective directional rates, bounded queues, telemetry, and device isolation without replacing the identity store, listener generation model, secure-channel callback owner, or continuous decoder introduced here. See [Viewer-MultiDevice-Flow-Control.md](Viewer-MultiDevice-Flow-Control.md).

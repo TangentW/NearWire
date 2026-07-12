@@ -10,6 +10,17 @@ import Foundation
   }
 }
 
+@_spi(NearWireInternal) public enum WireFrameDeliveryDecision: Equatable, Sendable {
+  case consume
+  case pause
+}
+
+@_spi(NearWireInternal) public enum WireFrameDecoderProgress: Equatable, Sendable {
+  case drained
+  case needsMoreBytes
+  case pausedOnCompleteFrame
+}
+
 @_spi(NearWireInternal) public enum WireFrameEncoder {
   public static func encode(
     lane: WireLane,
@@ -52,13 +63,21 @@ import Foundation
 }
 
 @_spi(NearWireInternal) public struct WireFrameDecoder: Sendable {
+  private enum ConsumptionMode: Equatable, Sendable {
+    case legacy
+    case resumable
+  }
+
   public let limits: WireFrameLimits
 
   private var prefix: [UInt8] = []
   private var declaredLength: Int?
   private var lane: WireLane?
   private var payload = Data()
+  private var resumableInput = Data()
+  private var resumableFrame: WireFrame?
   private var terminalError: WireProtocolError?
+  private var consumptionMode: ConsumptionMode?
 
   public init(limits: WireFrameLimits = .default) {
     self.limits = limits
@@ -67,9 +86,194 @@ import Foundation
 
   public var isAtFrameBoundary: Bool {
     prefix.isEmpty && declaredLength == nil && lane == nil && payload.isEmpty
+      && resumableInput.isEmpty && resumableFrame == nil
   }
 
   public var isFailed: Bool { terminalError != nil }
+
+  public var retainedByteCount: Int {
+    var count = prefix.count + payload.count + resumableInput.count
+    if lane != nil { count += 1 }
+    if let resumableFrame {
+      let (frameBytes, overflow) = resumableFrame.payload.count.addingReportingOverflow(5)
+      let (total, totalOverflow) = count.addingReportingOverflow(frameBytes)
+      count = overflow || totalOverflow ? Int.max : total
+    }
+    return count
+  }
+
+  /// Incrementally decodes bounded input and can pause before delivering a complete frame.
+  ///
+  /// A paused frame and every later byte remain owned by this value in wire order. Supplying
+  /// empty input continues previously retained work. The caller must bound the transient input
+  /// `Data` separately when computing its complete cross-layer retention budget.
+  public mutating func consumeResumable(
+    _ bytes: Data,
+    maximumCompletedFrames: Int,
+    maximumRetainedBytes: Int,
+    preflightLane: (WireLane) throws -> Void = { _ in },
+    onFrame: (WireFrame) throws -> WireFrameDeliveryDecision
+  ) throws -> WireFrameDecoderProgress {
+    if let terminalError {
+      throw WireProtocolError(
+        code: .decoderFailed,
+        path: terminalError.path,
+        message: "Frame decoder is terminal after a prior error.",
+        disposition: .connectionTerminal
+      )
+    }
+    guard maximumCompletedFrames > 0, maximumRetainedBytes > 0 else {
+      throw WireProtocolError(
+        code: .invalidConfiguration,
+        path: "resumableDecoderLimits",
+        message: "Resumable decoder bounds must be positive."
+      )
+    }
+    try activate(.resumable)
+    let (prospectiveBytes, overflow) = retainedByteCount.addingReportingOverflow(bytes.count)
+    guard !overflow, prospectiveBytes <= maximumRetainedBytes else {
+      let error = WireProtocolError(
+        code: .frameTooLarge,
+        path: "retainedInput",
+        message: "Retained frame input exceeds the active bound.",
+        disposition: .connectionTerminal
+      )
+      terminalError = error
+      throw error
+    }
+
+    do {
+      resumableInput.append(bytes)
+      var completedFrames = 0
+      var index = resumableInput.startIndex
+
+      func retainedResult(
+        _ result: WireFrameDecoderProgress,
+        input: inout Data,
+        through index: Data.Index
+      ) -> WireFrameDecoderProgress {
+        if index > input.startIndex {
+          input.removeSubrange(input.startIndex..<index)
+        }
+        return result
+      }
+
+      while true {
+        if let frame = resumableFrame {
+          guard completedFrames < maximumCompletedFrames else {
+            return retainedResult(
+              .pausedOnCompleteFrame,
+              input: &resumableInput,
+              through: index
+            )
+          }
+          let decision: WireFrameDeliveryDecision
+          do {
+            decision = try onFrame(frame)
+          } catch {
+            throw WireProtocolError(
+              code: .callbackFailed,
+              path: "$",
+              message: "Frame consumer rejected a decoded frame."
+            )
+          }
+          guard decision == .consume else {
+            return retainedResult(
+              .pausedOnCompleteFrame,
+              input: &resumableInput,
+              through: index
+            )
+          }
+          resumableFrame = nil
+          completedFrames += 1
+          continue
+        }
+
+        guard index < resumableInput.endIndex else {
+          let result: WireFrameDecoderProgress =
+            prefix.isEmpty && declaredLength == nil && lane == nil && payload.isEmpty
+            ? .drained : .needsMoreBytes
+          return retainedResult(result, input: &resumableInput, through: index)
+        }
+
+        if prefix.count < 4 {
+          let needed = 4 - prefix.count
+          let available = resumableInput.distance(from: index, to: resumableInput.endIndex)
+          let count = min(needed, available)
+          let end = resumableInput.index(index, offsetBy: count)
+          prefix.append(contentsOf: resumableInput[index..<end])
+          index = end
+          if prefix.count < 4 { continue }
+          try parsePrefix()
+        }
+
+        if lane == nil {
+          guard index < resumableInput.endIndex else { continue }
+          let rawLane = resumableInput[index]
+          index = resumableInput.index(after: index)
+          guard let decodedLane = WireLane(rawValue: rawLane) else {
+            throw WireProtocolError(
+              code: .invalidLane,
+              path: "lane",
+              message: "Frame uses an unknown lane byte."
+            )
+          }
+          guard let declaredLength else {
+            throw WireProtocolError(
+              code: .decoderFailed,
+              path: "length",
+              message: "Frame decoder lost its declared length."
+            )
+          }
+          let payloadLength = declaredLength - 1
+          guard payloadLength <= limits.maximumPayloadBytes(for: decodedLane) else {
+            throw WireProtocolError(
+              code: .frameTooLarge,
+              path: "length",
+              message: "Frame exceeds its lane-specific payload limit."
+            )
+          }
+          try preflightLane(decodedLane)
+          lane = decodedLane
+          payload.reserveCapacity(payloadLength)
+        }
+
+        guard let declaredLength, let lane else {
+          throw WireProtocolError(
+            code: .decoderFailed,
+            path: "$",
+            message: "Frame decoder entered an invalid state."
+          )
+        }
+        let payloadLength = declaredLength - 1
+        let needed = payloadLength - payload.count
+        let available = resumableInput.distance(from: index, to: resumableInput.endIndex)
+        let count = min(needed, available)
+        if count > 0 {
+          let end = resumableInput.index(index, offsetBy: count)
+          payload.append(contentsOf: resumableInput[index..<end])
+          index = end
+        }
+
+        if payload.count == payloadLength {
+          resumableFrame = WireFrame(lane: lane, payload: payload)
+          resetFrameState()
+        }
+      }
+    } catch let error as WireProtocolError {
+      let terminal = error.asConnectionTerminal()
+      terminalError = terminal
+      throw terminal
+    } catch {
+      let wrapped = WireProtocolError(
+        code: .decoderFailed,
+        message: "Frame decoding failed.",
+        disposition: .connectionTerminal
+      )
+      terminalError = wrapped
+      throw wrapped
+    }
+  }
 
   public mutating func consume(
     _ bytes: Data,
@@ -106,6 +310,7 @@ import Foundation
         message: "Completed-frame bound must be positive."
       )
     }
+    try activate(.legacy)
 
     do {
       var index = bytes.startIndex
@@ -241,6 +446,24 @@ import Foundation
       )
     }
     declaredLength = Int(value)
+  }
+
+  private mutating func activate(_ requestedMode: ConsumptionMode) throws {
+    guard let currentMode = consumptionMode, currentMode != requestedMode else {
+      consumptionMode = requestedMode
+      return
+    }
+    guard isAtFrameBoundary else {
+      let error = WireProtocolError(
+        code: .invalidConfiguration,
+        path: "decoderMode",
+        message: "A frame decoder cannot switch consumption APIs while bytes are retained.",
+        disposition: .connectionTerminal
+      )
+      terminalError = error
+      throw error
+    }
+    consumptionMode = requestedMode
   }
 
   private mutating func resetFrameState() {

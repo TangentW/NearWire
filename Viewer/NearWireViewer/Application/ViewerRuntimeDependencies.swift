@@ -38,7 +38,12 @@ struct ViewerRuntimeDependencies: @unchecked Sendable {
       generatePairingCode: { try ViewerPairingCodeGenerator.live.generate() },
       cleanupTimeoutNanoseconds: ViewerAdmissionManager.cleanupTimeoutNanoseconds,
       scheduler: .live,
-      makeHandoffOwner: { ViewerPlaceholderHandoffOwner() }
+      makeHandoffOwner: {
+        ViewerMultiDeviceSessionManager(
+          scheduler: .live,
+          preferences: ViewerDevicePreferences()
+        )
+      }
     )
   }()
 
@@ -200,5 +205,65 @@ final class ViewerPendingCoalescer: @unchecked Sendable {
       await Task.yield()
       self?.drainOne()
     }
+  }
+}
+
+final class ViewerSessionSnapshotCoalescer: @unchecked Sendable {
+  typealias Delivery = @MainActor @Sendable ([ViewerSessionSnapshot]) -> Void
+
+  private let lock = NSLock()
+  private let delivery: Delivery
+  private var latest: [ViewerSessionSnapshot]?
+  private var taskScheduled = false
+  private var active = true
+
+  init(delivery: @escaping Delivery) { self.delivery = delivery }
+
+  func submit(_ snapshots: [ViewerSessionSnapshot]) {
+    lock.lock()
+    guard active else {
+      lock.unlock()
+      return
+    }
+    latest = snapshots
+    guard !taskScheduled else {
+      lock.unlock()
+      return
+    }
+    taskScheduled = true
+    lock.unlock()
+    scheduleDrain()
+  }
+
+  func deactivate() {
+    lock.lock()
+    active = false
+    latest = nil
+    lock.unlock()
+  }
+
+  private func scheduleDrain() {
+    Task { @MainActor [weak self] in
+      await Task.yield()
+      self?.drainOne()
+    }
+  }
+
+  @MainActor
+  private func drainOne() {
+    lock.lock()
+    guard active, let snapshots = latest else {
+      taskScheduled = false
+      lock.unlock()
+      return
+    }
+    latest = nil
+    lock.unlock()
+    delivery(snapshots)
+    lock.lock()
+    let continues = active && latest != nil
+    if !continues { taskScheduled = false }
+    lock.unlock()
+    if continues { scheduleDrain() }
   }
 }

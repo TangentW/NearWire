@@ -62,6 +62,90 @@ final class SecureByteChannelTests: XCTestCase {
     XCTAssertEqual(recorder.received, [Data("one".utf8), Data("two".utf8)])
   }
 
+  func testReceivePausePreventsRearmUntilTokenResumes() async throws {
+    let driver = FakeSecureConnectionDriver()
+    let received = expectation(description: "received")
+    let channelBox = SecureChannelBox()
+    let tokenBox = ReceivePauseTokenBox()
+    let channel = SecureByteChannel(driver: driver) { event in
+      guard case .received = event else { return }
+      tokenBox.set(channelBox.channel?.claimReceivePause())
+      received.fulfill()
+    }
+    channelBox.channel = channel
+
+    try await channel.start()
+    driver.emitState(.ready)
+    await waitUntil { driver.receiveMaximumLengths.count == 1 }
+    driver.completeNextReceive(data: Data("paused".utf8), isComplete: false, failed: false)
+    await fulfillment(of: [received], timeout: 1)
+    XCTAssertNotNil(tokenBox.token)
+    XCTAssertEqual(driver.receiveMaximumLengths.count, 1)
+
+    tokenBox.take()?.resume()
+    await waitUntil { driver.receiveMaximumLengths.count == 2 }
+    XCTAssertEqual(driver.receiveMaximumLengths.count, 2)
+    await channel.cancel()
+  }
+
+  func testImmediateDriverCannotOvertakePausedDelivery() async throws {
+    let driver = ImmediateSecureConnectionDriver()
+    let received = expectation(description: "received")
+    let terminal = expectation(description: "terminal")
+    let channelBox = SecureChannelBox()
+    let tokenBox = ReceivePauseTokenBox()
+    let channel = SecureByteChannel(driver: driver) { event in
+      switch event {
+      case .received:
+        tokenBox.set(channelBox.channel?.claimReceivePause())
+        received.fulfill()
+      case .terminated:
+        terminal.fulfill()
+      default:
+        break
+      }
+    }
+    channelBox.channel = channel
+
+    try await channel.start()
+    await fulfillment(of: [received], timeout: 1)
+    XCTAssertEqual(driver.receiveCount, 1)
+    tokenBox.take()?.resume()
+    await fulfillment(of: [terminal], timeout: 1)
+    XCTAssertEqual(driver.receiveCount, 2)
+  }
+
+  func testTerminalInvalidatesPausedTokenWithoutRearm() async throws {
+    let driver = FakeSecureConnectionDriver()
+    let received = expectation(description: "received")
+    let terminal = expectation(description: "terminal")
+    let channelBox = SecureChannelBox()
+    let tokenBox = ReceivePauseTokenBox()
+    let channel = SecureByteChannel(driver: driver) { event in
+      switch event {
+      case .received:
+        tokenBox.set(channelBox.channel?.claimReceivePause())
+        received.fulfill()
+      case .terminated:
+        terminal.fulfill()
+      default:
+        break
+      }
+    }
+    channelBox.channel = channel
+
+    try await channel.start()
+    driver.emitState(.ready)
+    await waitUntil { driver.receiveMaximumLengths.count == 1 }
+    driver.completeNextReceive(data: Data("paused".utf8), isComplete: false, failed: false)
+    await fulfillment(of: [received], timeout: 1)
+    await channel.cancel()
+    await fulfillment(of: [terminal], timeout: 1)
+    tokenBox.take()?.resume()
+    await Task.yield()
+    XCTAssertEqual(driver.receiveMaximumLengths.count, 1)
+  }
+
   func testSendsAreFIFOAndBackpressureIsAtomic() async throws {
     let driver = FakeSecureConnectionDriver()
     let ready = expectation(description: "ready")
@@ -846,6 +930,49 @@ final class SecureByteChannelTests: XCTestCase {
 
     XCTAssertEqual(driver.sentData.first?.count, payloadBytes + 5)
     await channel.cancel()
+  }
+}
+
+private final class SecureChannelBox: @unchecked Sendable {
+  private let lock = NSLock()
+  private var storage: SecureByteChannel?
+
+  var channel: SecureByteChannel? {
+    get {
+      lock.lock()
+      defer { lock.unlock() }
+      return storage
+    }
+    set {
+      lock.lock()
+      storage = newValue
+      lock.unlock()
+    }
+  }
+}
+
+private final class ReceivePauseTokenBox: @unchecked Sendable {
+  private let lock = NSLock()
+  private var storage: SecureReceivePauseToken?
+
+  var token: SecureReceivePauseToken? {
+    lock.lock()
+    defer { lock.unlock() }
+    return storage
+  }
+
+  func set(_ token: SecureReceivePauseToken?) {
+    lock.lock()
+    storage = token
+    lock.unlock()
+  }
+
+  func take() -> SecureReceivePauseToken? {
+    lock.lock()
+    let token = storage
+    storage = nil
+    lock.unlock()
+    return token
   }
 }
 

@@ -12,6 +12,33 @@ import Network
   case terminated(SecureTransportError)
 }
 
+@_spi(NearWireInternal) public final class SecureReceivePauseToken: @unchecked Sendable {
+  private let lock = NSLock()
+  private var resolution: (@Sendable (Bool) -> Void)?
+
+  public init(resolution: @escaping @Sendable (Bool) -> Void) {
+    self.resolution = resolution
+  }
+
+  public func resume() {
+    resolve(shouldResume: true)
+  }
+
+  public func cancel() {
+    resolve(shouldResume: false)
+  }
+
+  private func resolve(shouldResume: Bool) {
+    lock.lock()
+    let resolution = self.resolution
+    self.resolution = nil
+    lock.unlock()
+    resolution?(shouldResume)
+  }
+
+  deinit { cancel() }
+}
+
 @_spi(NearWireInternal) public struct SecureByteChannelCapacitySnapshot: Equatable, Sendable {
   public let isAccepting: Bool
   public let availablePendingSendCount: Int
@@ -62,6 +89,7 @@ protocol SecureConnectionDriving: AnyObject, Sendable {
   private let eventHandler: EventHandler
   private nonisolated let callbackIngress = SecureCallbackIngress()
   private nonisolated let sendMailbox: SecureSendMailbox
+  private nonisolated let receivePauseGate = SecureReceivePauseGate()
   private var activeReceiveToken: UInt64?
   private var nextReceiveToken: UInt64 = 0
   private var generation: UInt64 = 0
@@ -150,6 +178,25 @@ protocol SecureConnectionDriving: AnyObject, Sendable {
     sendMailbox.capacitySnapshot
   }
 
+  /// Claims one receive pause while the current `.received` callback is executing.
+  ///
+  /// A successful claim prevents the channel from rearming its driver receive after that callback.
+  /// The returned token must be resumed or cancelled exactly once; repeated resolution is ignored.
+  public nonisolated func claimReceivePause() -> SecureReceivePauseToken? {
+    guard let claim = receivePauseGate.claimCurrentDelivery() else { return nil }
+    return SecureReceivePauseToken { [weak self] shouldResume in
+      guard let self else { return }
+      let schedulesReceive = receivePauseGate.resolve(
+        claim: claim,
+        shouldResume: shouldResume
+      )
+      guard schedulesReceive else { return }
+      callbackIngress.submit { [weak self] in
+        await self?.resumeReceiveIfCurrent(generation: claim.generation)
+      }
+    }
+  }
+
   public nonisolated func canAdmitSend(
     byteCount: Int,
     reservingPendingSendCount: Int,
@@ -214,7 +261,7 @@ protocol SecureConnectionDriving: AnyObject, Sendable {
   }
 
   private func requestReceiveIfPossible() {
-    guard state == .ready, activeReceiveToken == nil else { return }
+    guard state == .ready, activeReceiveToken == nil, !receivePauseGate.isPaused else { return }
     guard nextReceiveToken != UInt64.max else {
       fail(
         code: .arithmeticOverflow,
@@ -259,12 +306,15 @@ protocol SecureConnectionDriving: AnyObject, Sendable {
       fail(code: .driverFailure, path: "receive", message: "Network receive failed.")
       return
     }
+    var deliveryDisposition = SecureReceivePauseGate.DeliveryDisposition.rearm
     if let data, !data.isEmpty {
       guard data.count <= limits.receiveChunkBytes else {
         fail(code: .invalidDelivery, path: "receive", message: "Driver exceeded receive bound.")
         return
       }
+      let deliveryID = receivePauseGate.beginDelivery(generation: callbackGeneration)
       eventHandler(.received(data))
+      deliveryDisposition = receivePauseGate.finishDelivery(deliveryID)
     } else if !isComplete {
       fail(code: .invalidDelivery, path: "receive", message: "Driver returned no receive progress.")
       return
@@ -273,6 +323,13 @@ protocol SecureConnectionDriving: AnyObject, Sendable {
       fail(code: .endOfStream, path: "receive", message: "Secure byte stream ended.")
       return
     }
+    if deliveryDisposition == .rearm {
+      requestReceiveIfPossible()
+    }
+  }
+
+  private func resumeReceiveIfCurrent(generation callbackGeneration: UInt64) {
+    guard callbackGeneration == generation, !isTerminal else { return }
     requestReceiveIfPossible()
   }
 
@@ -340,6 +397,7 @@ protocol SecureConnectionDriving: AnyObject, Sendable {
   private func finish(state terminalState: SecureTransportState, error: SecureTransportError) {
     guard !isTerminal else { return }
     generation += 1
+    receivePauseGate.invalidate()
     activeReceiveToken = nil
     sendMailbox.setAccepting(false)
     sendMailbox.clear()
@@ -351,6 +409,99 @@ protocol SecureConnectionDriving: AnyObject, Sendable {
     eventHandler(.terminated(error))
   }
 
+}
+
+private final class SecureReceivePauseGate: @unchecked Sendable {
+  struct Claim: Sendable {
+    let generation: UInt64
+    let id: UUID
+  }
+
+  enum DeliveryDisposition: Equatable {
+    case rearm
+    case paused
+    case suppress
+  }
+
+  private struct Delivery {
+    let id: UUID
+    let generation: UInt64
+    var claim: Claim?
+    var resolution: Bool?
+  }
+
+  private let lock = NSLock()
+  private var delivery: Delivery?
+  private var pausedClaim: Claim?
+  private var invalidated = false
+
+  var isPaused: Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    return pausedClaim != nil
+  }
+
+  func beginDelivery(generation: UInt64) -> UUID {
+    lock.lock()
+    defer { lock.unlock() }
+    precondition(delivery == nil && pausedClaim == nil && !invalidated)
+    let id = UUID()
+    delivery = Delivery(id: id, generation: generation, claim: nil, resolution: nil)
+    return id
+  }
+
+  func claimCurrentDelivery() -> Claim? {
+    lock.lock()
+    defer { lock.unlock() }
+    guard !invalidated, var delivery, delivery.claim == nil else { return nil }
+    let claim = Claim(generation: delivery.generation, id: UUID())
+    delivery.claim = claim
+    self.delivery = delivery
+    return claim
+  }
+
+  func finishDelivery(_ id: UUID) -> DeliveryDisposition {
+    lock.lock()
+    defer { lock.unlock() }
+    guard !invalidated, let delivery, delivery.id == id else {
+      self.delivery = nil
+      return .suppress
+    }
+    self.delivery = nil
+    guard let claim = delivery.claim else { return .rearm }
+    if let resolution = delivery.resolution {
+      return resolution ? .rearm : .suppress
+    }
+    pausedClaim = claim
+    return .paused
+  }
+
+  func resolve(claim: Claim, shouldResume: Bool) -> Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    guard !invalidated else { return false }
+    if var delivery, delivery.claim?.id == claim.id,
+      delivery.claim?.generation == claim.generation
+    {
+      guard delivery.resolution == nil else { return false }
+      delivery.resolution = shouldResume
+      self.delivery = delivery
+      return false
+    }
+    guard pausedClaim?.id == claim.id, pausedClaim?.generation == claim.generation else {
+      return false
+    }
+    pausedClaim = nil
+    return shouldResume
+  }
+
+  func invalidate() {
+    lock.lock()
+    invalidated = true
+    delivery = nil
+    pausedClaim = nil
+    lock.unlock()
+  }
 }
 
 private final class SecureSendMailbox: @unchecked Sendable {

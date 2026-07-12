@@ -90,6 +90,134 @@ final class WireFrameTests: XCTestCase {
     }
   }
 
+  func testResumableDecoderRetainsOrderedFrameAndSuffixAcrossTurns() throws {
+    let first = try WireFrameEncoder.encode(lane: .control, payload: Data("{\"n\":1}".utf8))
+    let second = try WireFrameEncoder.encode(lane: .event, payload: Data("{\"n\":2}".utf8))
+    let third = try WireFrameEncoder.encode(lane: .control, payload: Data("{\"n\":3}".utf8))
+    var decoder = WireFrameDecoder()
+    var frames: [WireFrame] = []
+
+    let paused = try decoder.consumeResumable(
+      first + second + third,
+      maximumCompletedFrames: 2,
+      maximumRetainedBytes: 1_024
+    ) { frame in
+      frames.append(frame)
+      return .consume
+    }
+    XCTAssertEqual(paused, .pausedOnCompleteFrame)
+    XCTAssertEqual(frames.map(\.lane), [.control, .event])
+    XCTAssertEqual(decoder.retainedByteCount, third.count)
+    XCTAssertFalse(decoder.isAtFrameBoundary)
+
+    let drained = try decoder.consumeResumable(
+      Data(),
+      maximumCompletedFrames: 2,
+      maximumRetainedBytes: 1_024
+    ) { frame in
+      frames.append(frame)
+      return .consume
+    }
+    XCTAssertEqual(drained, .drained)
+    XCTAssertEqual(frames.map(\.lane), [.control, .event, .control])
+    XCTAssertEqual(decoder.retainedByteCount, 0)
+    XCTAssertTrue(decoder.isAtFrameBoundary)
+  }
+
+  func testResumableDecoderDecisionPauseAndPartialTailAreDistinct() throws {
+    let frame = try WireFrameEncoder.encode(lane: .control, payload: Data("{}".utf8))
+    var decoder = WireFrameDecoder()
+    var shouldPause = true
+    var delivered = 0
+
+    let paused = try decoder.consumeResumable(
+      frame + Data(frame.prefix(3)),
+      maximumCompletedFrames: 8,
+      maximumRetainedBytes: 1_024
+    ) { _ in
+      if shouldPause { return .pause }
+      delivered += 1
+      return .consume
+    }
+    XCTAssertEqual(paused, .pausedOnCompleteFrame)
+    XCTAssertEqual(delivered, 0)
+    shouldPause = false
+
+    let needsMore = try decoder.consumeResumable(
+      Data(),
+      maximumCompletedFrames: 8,
+      maximumRetainedBytes: 1_024
+    ) { _ in
+      delivered += 1
+      return .consume
+    }
+    XCTAssertEqual(needsMore, .needsMoreBytes)
+    XCTAssertEqual(delivered, 1)
+    XCTAssertEqual(decoder.retainedByteCount, 3)
+
+    let drained = try decoder.consumeResumable(
+      Data(frame.dropFirst(3)),
+      maximumCompletedFrames: 8,
+      maximumRetainedBytes: 1_024
+    ) { _ in
+      delivered += 1
+      return .consume
+    }
+    XCTAssertEqual(drained, .drained)
+    XCTAssertEqual(delivered, 2)
+    XCTAssertEqual(decoder.retainedByteCount, 0)
+  }
+
+  func testResumableDecoderRejectsRetainedInputOverflowTerminally() throws {
+    var decoder = WireFrameDecoder()
+    let partial = Data([0, 0, 0])
+    XCTAssertEqual(
+      try decoder.consumeResumable(
+        partial,
+        maximumCompletedFrames: 1,
+        maximumRetainedBytes: 3
+      ) { _ in .consume },
+      .needsMoreBytes
+    )
+    assertWireError(.frameTooLarge) {
+      _ = try decoder.consumeResumable(
+        Data([2]),
+        maximumCompletedFrames: 1,
+        maximumRetainedBytes: 3
+      ) { _ in .consume }
+    }
+    XCTAssertTrue(decoder.isFailed)
+  }
+
+  func testDecoderCannotSwitchConsumptionAPIsWhileBytesAreRetained() throws {
+    let first = try WireFrameEncoder.encode(lane: .control, payload: Data("{}".utf8))
+    let second = try WireFrameEncoder.encode(lane: .event, payload: Data("[]".utf8))
+    var resumable = WireFrameDecoder()
+    XCTAssertEqual(
+      try resumable.consumeResumable(
+        first + second,
+        maximumCompletedFrames: 1,
+        maximumRetainedBytes: 1_024
+      ) { _ in .consume },
+      .pausedOnCompleteFrame
+    )
+    assertWireError(.invalidConfiguration) {
+      try resumable.consume(first) { _ in
+        XCTFail("Later legacy bytes must not overtake retained resumable work.")
+      }
+    }
+
+    var legacy = WireFrameDecoder()
+    try legacy.consume(Data(first.prefix(3))) { _ in }
+    assertWireError(.invalidConfiguration) {
+      _ = try legacy.consumeResumable(
+        Data(first.dropFirst(3)),
+        maximumCompletedFrames: 1,
+        maximumRetainedBytes: 1_024
+      ) { _ in .consume }
+    }
+  }
+
   func testInvalidLengthUnknownLaneAndTerminalReuse() throws {
     var short = WireFrameDecoder()
     XCTAssertThrowsError(try short.consume(Data([0, 0, 0, 1])) { _ in }) { error in

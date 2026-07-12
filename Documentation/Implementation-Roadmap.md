@@ -82,6 +82,8 @@ Implemented: the single-window macOS 13 application automatically prepares separ
 
 Implement multi-device sessions, device identity and nicknames, one-to-many connection management, requested and effective rates, Bundle-ID preferences, queue telemetry, and device isolation tests.
 
+Implemented: the Viewer owns at most 16 exact connection sessions through cleanup, rejects duplicate unauthenticated logical routes, retains 64 short-lived recent rows, negotiates conservative directional policy, exchanges bounded bidirectional Events with atomic mailbox admission and receive backpressure, persists only bounded requested preferences and nicknames, and presents content-free per-device telemetry.
+
 ### 18. `viewer-local-store-search`
 
 Implement SQLite persistence, automatic sessions, 3 GiB and seven-day defaults, transactional cleanup, pinned-session protection, search indexing, JSON-path filters, pagination, and streaming JSON export.

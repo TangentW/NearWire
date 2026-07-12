@@ -19,6 +19,10 @@
 		10000000000000000000000A /* ViewerIdentityStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000D /* ViewerIdentityStore.swift */; };
 		10000000000000000000000B /* ViewerAdmission.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000E /* ViewerAdmission.swift */; };
 		10000000000000000000000C /* ViewerRuntimeDependencies.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000F /* ViewerRuntimeDependencies.swift */; };
+		10000000000000000000000D /* ViewerDevicePreferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000010 /* ViewerDevicePreferences.swift */; };
+		10000000000000000000000E /* ViewerMultiDeviceSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000011 /* ViewerMultiDeviceSession.swift */; };
+		10000000000000000000000F /* ViewerMultiDeviceSessionManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000012 /* ViewerMultiDeviceSessionManager.swift */; };
+		100000000000000000000010 /* ViewerFlowControlTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000013 /* ViewerFlowControlTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -47,6 +51,10 @@
 		20000000000000000000000D /* ViewerIdentityStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewerIdentityStore.swift; sourceTree = "<group>"; };
 		20000000000000000000000E /* ViewerAdmission.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewerAdmission.swift; sourceTree = "<group>"; };
 		20000000000000000000000F /* ViewerRuntimeDependencies.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewerRuntimeDependencies.swift; sourceTree = "<group>"; };
+		200000000000000000000010 /* ViewerDevicePreferences.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewerDevicePreferences.swift; sourceTree = "<group>"; };
+		200000000000000000000011 /* ViewerMultiDeviceSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewerMultiDeviceSession.swift; sourceTree = "<group>"; };
+		200000000000000000000012 /* ViewerMultiDeviceSessionManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewerMultiDeviceSessionManager.swift; sourceTree = "<group>"; };
+		200000000000000000000013 /* ViewerFlowControlTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewerFlowControlTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -84,6 +92,7 @@
 				50000000000000000000000A /* Admission */,
 				500000000000000000000004 /* Application */,
 				500000000000000000000005 /* Identity */,
+				50000000000000000000000B /* Session */,
 				500000000000000000000006 /* UI */,
 				500000000000000000000007 /* Resources */,
 			);
@@ -95,9 +104,10 @@
 		500000000000000000000005 /* Identity */ = {isa = PBXGroup; children = (20000000000000000000000C /* ViewerCertificateBuilder.swift */, 20000000000000000000000D /* ViewerIdentityStore.swift */, 200000000000000000000004 /* ViewerPairingCodeGenerator.swift */,); path = Identity; sourceTree = "<group>"; };
 		500000000000000000000006 /* UI */ = {isa = PBXGroup; children = (200000000000000000000005 /* ViewerRootView.swift */,); path = UI; sourceTree = "<group>"; };
 		500000000000000000000007 /* Resources */ = {isa = PBXGroup; children = (200000000000000000000007 /* Info.plist */, 200000000000000000000008 /* NearWireViewer.entitlements */, 200000000000000000000006 /* PrivacyInfo.xcprivacy */,); path = Resources; sourceTree = "<group>"; };
-		500000000000000000000008 /* NearWireViewerTests */ = {isa = PBXGroup; children = (200000000000000000000009 /* ViewerFoundationTests.swift */,); path = NearWireViewerTests; sourceTree = "<group>"; };
+		500000000000000000000008 /* NearWireViewerTests */ = {isa = PBXGroup; children = (200000000000000000000009 /* ViewerFoundationTests.swift */, 200000000000000000000013 /* ViewerFlowControlTests.swift */,); path = NearWireViewerTests; sourceTree = "<group>"; };
 		500000000000000000000009 /* Products */ = {isa = PBXGroup; children = (20000000000000000000000A /* NearWire.app */, 20000000000000000000000B /* NearWireViewerTests.xctest */,); name = Products; sourceTree = "<group>"; };
 		50000000000000000000000A /* Admission */ = {isa = PBXGroup; children = (20000000000000000000000E /* ViewerAdmission.swift */,); path = Admission; sourceTree = "<group>"; };
+		50000000000000000000000B /* Session */ = {isa = PBXGroup; children = (200000000000000000000010 /* ViewerDevicePreferences.swift */, 200000000000000000000011 /* ViewerMultiDeviceSession.swift */, 200000000000000000000012 /* ViewerMultiDeviceSessionManager.swift */,); path = Session; sourceTree = "<group>"; };
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
@@ -158,8 +168,8 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
-		400000000000000000000003 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (100000000000000000000001, 100000000000000000000002, 100000000000000000000003, 100000000000000000000004, 100000000000000000000005, 100000000000000000000009, 10000000000000000000000A, 10000000000000000000000B, 10000000000000000000000C,); runOnlyForDeploymentPostprocessing = 0; };
-		400000000000000000000004 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (100000000000000000000008,); runOnlyForDeploymentPostprocessing = 0; };
+		400000000000000000000003 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (100000000000000000000001, 100000000000000000000002, 100000000000000000000003, 100000000000000000000004, 100000000000000000000005, 100000000000000000000009, 10000000000000000000000A, 10000000000000000000000B, 10000000000000000000000C, 10000000000000000000000D, 10000000000000000000000E, 10000000000000000000000F,); runOnlyForDeploymentPostprocessing = 0; };
+		400000000000000000000004 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (100000000000000000000008, 100000000000000000000010,); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */

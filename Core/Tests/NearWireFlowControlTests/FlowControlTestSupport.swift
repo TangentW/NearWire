@@ -11,7 +11,8 @@ func makeTestEvent(
   ttlMilliseconds: UInt64 = 60_000,
   policy: EventQueuePolicy = .normal,
   bytes: Int = 1,
-  enqueuedAt: UInt64 = 0
+  enqueuedAt: UInt64 = 0,
+  expirationDeadline: UInt64? = nil
 ) throws -> PendingEvent<String> {
   let suffix = String(format: "%012d", number)
   return try PendingEvent(
@@ -21,7 +22,8 @@ func makeTestEvent(
     ttl: EventTTL(milliseconds: ttlMilliseconds),
     policy: policy,
     accountedByteCount: bytes,
-    enqueuedAtNanoseconds: enqueuedAt
+    enqueuedAtNanoseconds: enqueuedAt,
+    expirationDeadlineNanoseconds: expirationDeadline
   )
 }
 
