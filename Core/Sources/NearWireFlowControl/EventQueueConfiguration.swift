@@ -33,9 +33,35 @@ import Foundation
   }
 }
 
+extension KeepLatestKey: CustomReflectable, CustomStringConvertible,
+  CustomDebugStringConvertible
+{
+  public var description: String { "KeepLatestKey(redacted)" }
+  public var debugDescription: String { description }
+  public var customMirror: Mirror {
+    Mirror(self, children: [:], displayStyle: .struct)
+  }
+}
+
 @_spi(NearWireInternal) public enum EventQueuePolicy: Codable, Equatable, Hashable, Sendable {
   case normal
   case keepLatest(KeepLatestKey)
+}
+
+extension EventQueuePolicy: CustomReflectable, CustomStringConvertible,
+  CustomDebugStringConvertible
+{
+  public var description: String {
+    switch self {
+    case .normal: return "EventQueuePolicy.normal"
+    case .keepLatest: return "EventQueuePolicy.keepLatest(redacted)"
+    }
+  }
+
+  public var debugDescription: String { description }
+  public var customMirror: Mirror {
+    Mirror(self, children: [:], displayStyle: .enum)
+  }
 }
 
 @_spi(NearWireInternal) public struct EventQueueLimits: Equatable, Sendable {
@@ -135,3 +161,20 @@ import Foundation
 }
 
 extension PendingEvent: Equatable where Value: Equatable {}
+
+extension PendingEvent: CustomReflectable, CustomStringConvertible,
+  CustomDebugStringConvertible
+{
+  public var description: String {
+    "PendingEvent(redacted, bytes: \(accountedByteCount))"
+  }
+
+  public var debugDescription: String { description }
+  public var customMirror: Mirror {
+    Mirror(
+      self,
+      children: ["accountedByteCount": accountedByteCount],
+      displayStyle: .struct
+    )
+  }
+}

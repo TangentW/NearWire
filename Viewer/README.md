@@ -12,6 +12,8 @@ Opening the single main window automatically prepares the persistent Viewer iden
 
 After admission, the Viewer owns up to 16 independent App sessions. It completes flow-policy negotiation, exchanges bounded bidirectional Events, retains requested policy and nicknames in bounded `UserDefaults` records, and presents per-device rate, queue, throughput, and drop telemetry. Peer-declared installation and Bundle identifiers remain unauthenticated hints.
 
+The Viewer also records bounded local history through three serialized system-SQLite connections. Storage configuration and safe status are available in the main window. Local schema ownership, permissions, quota and retention semantics, gaps, recovery, query snapshots, and unencrypted JSON export disclosure are documented in [Viewer-Local-Store.md](../Documentation/Viewer-Local-Store.md).
+
 Identity lifecycle, pairing, listener replacement, admission limits, recovery, sandbox, privacy behavior, and the three-phase stable-signer XCTest command sequence are documented in [Viewer-Foundation.md](../Documentation/Viewer-Foundation.md).
 
 Session ownership, logical correlation, policy negotiation, queue atomicity, receive backpressure, preferences, and the operational workspace are documented in [Viewer-MultiDevice-Flow-Control.md](../Documentation/Viewer-MultiDevice-Flow-Control.md).

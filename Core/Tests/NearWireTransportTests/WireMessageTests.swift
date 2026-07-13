@@ -5,6 +5,34 @@ import XCTest
 @_spi(NearWireInternal) @testable import NearWireTransport
 
 final class WireMessageTests: XCTestCase {
+  func testHelloDiagnosticsDoNotExposePeerIdentityOrText() throws {
+    let markers = [
+      "hello-installation-secret",
+      "Hello Display Secret",
+      "com.example.hello.secret",
+      "99.hello-secret",
+    ]
+    let hello = try WireHello(
+      productVersion: WireProductVersion("product-secret"),
+      role: .app,
+      installationID: try EndpointID(rawValue: markers[0]),
+      displayName: markers[1],
+      applicationIdentifier: markers[2],
+      applicationVersion: markers[3]
+    )
+
+    let surfaces = [
+      String(describing: hello),
+      String(reflecting: hello),
+      "\(hello)",
+      Mirror(reflecting: hello).children.map { String(reflecting: $0.value) }.joined(),
+    ]
+    for marker in markers {
+      XCTAssertFalse(surfaces.contains { $0.contains(marker) })
+    }
+    XCTAssertTrue(Mirror(reflecting: hello).children.isEmpty)
+  }
+
   private struct WrongLanePing: WireMessagePayload {
     static let messageType = WireMessageType.ping
     static let lane = WireLane.event

@@ -1,11 +1,156 @@
 import Foundation
 @_spi(NearWireInternal) import NearWireCore
+@_spi(NearWireInternal) import NearWireFlowControl
 @_spi(NearWireInternal) import NearWireTransport
 import XCTest
 
 @testable import NearWireViewer
 
 final class ViewerFlowControlTests: XCTestCase {
+  func testActiveViewerEventOwnersHaveContentFreeReflection() throws {
+    let secret = "nearwire-viewer-active-owner-secret"
+    let draft = try EventDraft(
+      type: EventType.user("test.viewer.reflection"),
+      content: .object(["secret": .string(secret)])
+    )
+    let appID = try EndpointID(rawValue: "reflection-app")
+    let viewerID = try EndpointID(rawValue: "reflection-viewer")
+    let envelope = try EventEnvelope(
+      id: EventID(),
+      type: EventType.user("test.viewer.reflection"),
+      content: .object(["secret": .string(secret)]),
+      createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+      monotonicTimestampNanoseconds: 1_000,
+      source: EventEndpoint(role: .app, id: appID),
+      target: EventEndpoint(role: .viewer, id: viewerID),
+      direction: .appToViewer,
+      sessionEpoch: SessionEpoch(),
+      sequence: EventSequence(0),
+      priority: .normal,
+      ttl: .default,
+      causality: EventCausality()
+    )
+    let received = try WireEventRecord(
+      envelope: envelope,
+      remainingTTLNanoseconds: 1_000_000_000
+    ).receiverEvent(receivedAtNanoseconds: 2_000)
+    let queueID = EventID()
+    let draftPending = try PendingEvent(
+      id: EventID(),
+      value: draft,
+      accountedByteCount: 128,
+      enqueuedAtNanoseconds: 0
+    )
+    let receivedPending = try PendingEvent(
+      id: queueID,
+      value: received,
+      accountedByteCount: received.deterministicEncodedByteCount,
+      enqueuedAtNanoseconds: 0
+    )
+    var draftQueue = BoundedEventQueue<EventDraft>()
+    var receivedQueue = BoundedEventQueue<WireReceivedEvent>()
+    _ = try draftQueue.enqueue(draftPending, nowOnQueueClockNanoseconds: 0)
+    _ = try receivedQueue.enqueue(receivedPending, nowOnQueueClockNanoseconds: 0)
+    let item = ViewerUplinkHandoff.Item(queueID: queueID, event: received)
+    let payload = ViewerUplinkPayload(item)
+    let handoff = ViewerUplinkHandoff()
+
+    let forbidden = [secret, queueID.rawValue]
+    let values: [Any] = [draftQueue, receivedQueue, item, payload, handoff]
+    for value in values {
+      let diagnostics = [String(describing: value), String(reflecting: value), "\(value)"]
+      for marker in forbidden {
+        XCTAssertFalse(diagnostics.contains { $0.contains(marker) })
+        XCTAssertFalse(
+          Mirror(reflecting: value).children.contains {
+            String(reflecting: $0.value).contains(marker)
+          }
+        )
+      }
+    }
+  }
+
+  func testAdmissionAndActiveSessionRootsHaveClosedReflection() throws {
+    let markers = [
+      "viewer-root-installation-secret",
+      "Viewer Root Display Secret",
+      "com.example.viewer.root.secret",
+      "77.viewer-root-secret",
+    ]
+    let appHello = try WireHello(
+      productVersion: WireProductVersion("1.0"),
+      role: .app,
+      installationID: try EndpointID(rawValue: markers[0]),
+      displayName: markers[1],
+      applicationIdentifier: markers[2],
+      applicationVersion: markers[3]
+    )
+    let owner = FlowReflectionHandoffOwner()
+    let pending = FlowPendingBox()
+    let admission = ViewerAdmissionManager(
+      onPending: { pending.set($0) },
+      handoffOwner: owner
+    )
+    admission.setRequiresApproval(true)
+    let generation = UUID()
+    admission.activateGeneration(generation)
+    let connection = FlowIncomingConnection()
+    admission.admit(
+      connection,
+      generation: generation,
+      viewerInstallationID: try EndpointID(rawValue: "viewer-root-local")
+    )
+    connection.emit(.stateChanged(.ready))
+    connection.emit(.received(try WirePreHandshakeCodec().encode(appHello)))
+    waitUntil { pending.value.count == 1 }
+    assertClosedDiagnostics([admission], excluding: markers)
+
+    admission.accept(try XCTUnwrap(pending.value.first?.id))
+    waitUntil { owner.snapshot != nil }
+    let captured = try XCTUnwrap(owner.snapshot)
+    assertClosedDiagnostics(
+      [captured.context, captured.handle, captured.handle.connectionCore, captured.session],
+      excluding: markers
+    )
+
+    let activeManager = ViewerMultiDeviceSessionManager(
+      preferences: try isolatedPreferences()
+    )
+    let activeAdmission = ViewerAdmissionManager(
+      onPending: { _ in },
+      handoffOwner: activeManager
+    )
+    let activeGeneration = UUID()
+    activeAdmission.activateGeneration(activeGeneration)
+    let activeConnection = FlowIncomingConnection()
+    activeAdmission.admit(
+      activeConnection,
+      generation: activeGeneration,
+      viewerInstallationID: try EndpointID(rawValue: "viewer-root-manager")
+    )
+    activeConnection.emit(.stateChanged(.ready))
+    activeConnection.emit(.received(try WirePreHandshakeCodec().encode(appHello)))
+    waitUntil { activeManager.ownedSessionCount == 1 }
+    assertClosedDiagnostics([activeManager], excluding: markers)
+
+    _ = activeAdmission.stop()
+    _ = admission.stop()
+  }
+
+  func testViewerDownlinkPolicyReflectionRedactsKeepLatestKey() {
+    let secret = "nearwire-viewer-queue-secret"
+    let policy = ViewerDownlinkPolicy.keepLatest(secret)
+
+    XCTAssertFalse(String(describing: policy).contains(secret))
+    XCTAssertFalse(String(reflecting: policy).contains(secret))
+    XCTAssertFalse("\(policy)".contains(secret))
+    XCTAssertFalse(
+      Mirror(reflecting: policy).children.contains {
+        String(reflecting: $0.value).contains(secret)
+      }
+    )
+  }
+
   func testPreferencesApplyPrecedenceBoundsAndCorruptionRecovery() throws {
     let suite = "ViewerFlowControlTests.\(UUID().uuidString)"
     let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
@@ -486,6 +631,7 @@ final class ViewerFlowControlTests: XCTestCase {
     )
     let baseline = fixture.connection.channel.sentPayloads.count
     XCTAssertTrue(fixture.manager.send(draft, to: connectionID))
+    waitUntil { clock.pendingDeadlines.contains(1_500_000_000) }
     clock.advance(by: 500_000_000)
     waitUntil { fixture.snapshots.value.first?.downlinkCount == 1 }
     XCTAssertEqual(fixture.connection.channel.sentPayloads.count, baseline)
@@ -519,6 +665,7 @@ final class ViewerFlowControlTests: XCTestCase {
         to: connectionID
       )
     )
+    waitUntil { clock.pendingDeadlines.contains(1_500_000_000) }
     clock.advance(by: 500_000_000)
     waitUntil { fixture.snapshots.value.first?.downlinkCount == 1 }
     XCTAssertEqual(fixture.connection.channel.sentPayloads.count, baseline)
@@ -588,6 +735,8 @@ final class ViewerFlowControlTests: XCTestCase {
     let entered = DispatchSemaphore(value: 0)
     let release = DispatchSemaphore(value: 0)
     let delivered = FlowEventBox()
+    let journal = FlowJournalBox()
+    let sharedID = EventID()
     let fixture = try establishActiveSession(
       clock: clock,
       appIDRaw: "app-exact-ttl",
@@ -595,12 +744,13 @@ final class ViewerFlowControlTests: XCTestCase {
         delivered.append(event)
         entered.signal()
         _ = release.wait(timeout: .now() + 5)
-      }
+      },
+      journal: journal
     )
 
     func record(sequence: UInt64, ttl: UInt64) throws -> WireEventRecord {
       let envelope = try EventEnvelope(
-        id: EventID(),
+        id: sharedID,
         type: EventType.user("test.exact-ttl"),
         content: .object(["sequence": .integer(Int64(sequence))]),
         createdAt: Date(timeIntervalSince1970: 1_700_000_000),
@@ -640,8 +790,84 @@ final class ViewerFlowControlTests: XCTestCase {
     waitUntil { fixture.snapshots.value.first?.uplinkCount == 0 }
     XCTAssertEqual(fixture.snapshots.value.first?.expiredEvents, 1)
     XCTAssertEqual(delivered.value.count, 1)
+    waitUntil {
+      journal.uplinkTerminals.contains {
+        $0.wireSequence == 1 && $0.disposition == .expired
+      }
+    }
+    XCTAssertEqual(
+      journal.uplinkTerminals.filter { $0.wireSequence == 0 }.map(\.disposition),
+      [.consumerAccepted]
+    )
+    XCTAssertEqual(
+      journal.uplinkTerminals.filter { $0.wireSequence == 1 }.map(\.disposition),
+      [.expired]
+    )
     XCTAssertEqual(fixture.snapshots.value.first?.state, .active)
     release.signal()
+    _ = fixture.admission.stop()
+  }
+
+  func testDropJournalPublishesMonotonicCumulativeLocalAndRemoteSamples() throws {
+    let clock = FlowManualScheduler(startNanoseconds: 1_000_000_000)
+    let journal = FlowJournalBox()
+    let fixture = try establishActiveSession(
+      clock: clock,
+      appIDRaw: "app-cumulative-drops",
+      journal: journal
+    )
+    let connectionID = try XCTUnwrap(fixture.snapshots.value.first?.connectionID)
+    let draft = try EventDraft(
+      type: EventType.user("test.cumulative-drops"),
+      content: .object(["value": .integer(1)])
+    )
+
+    XCTAssertTrue(
+      fixture.manager.send(draft, to: connectionID, policy: .keepLatest("same-key"))
+    )
+    XCTAssertTrue(
+      fixture.manager.send(draft, to: connectionID, policy: .keepLatest("same-key"))
+    )
+    XCTAssertTrue(
+      fixture.manager.send(draft, to: connectionID, policy: .keepLatest("same-key"))
+    )
+    waitUntil {
+      journal.dropSamples.filter { $0.reason == .localCoalesced }.map(\.count) == [1, 2]
+    }
+
+    func sendRemote(overflow: UInt64, expired: UInt64 = 0, coalesced: UInt64 = 0) throws {
+      fixture.connection.emit(
+        .received(
+          try fixture.codec.encode(
+            WireDropSummaryPayload(
+              overflowDropped: overflow,
+              expired: expired,
+              coalesced: coalesced
+            ),
+            phase: .active
+          )
+        )
+      )
+    }
+
+    try sendRemote(overflow: 2)
+    try sendRemote(overflow: 3)
+    try sendRemote(overflow: 0)
+    try sendRemote(overflow: UInt64.max)
+    try sendRemote(overflow: 1)
+    waitUntil {
+      journal.dropSamples.filter { $0.reason == .remoteOverflow }.map(\.count)
+        == [2, 5, UInt64.max]
+    }
+    XCTAssertEqual(fixture.snapshots.value.first?.remoteDroppedEvents, UInt64.max)
+    XCTAssertEqual(
+      journal.dropSamples.filter { $0.reason == .localCoalesced }.map(\.count),
+      [1, 2]
+    )
+    XCTAssertEqual(
+      journal.dropSamples.filter { $0.reason == .remoteOverflow }.map(\.count),
+      [2, 5, UInt64.max]
+    )
     _ = fixture.admission.stop()
   }
 
@@ -707,6 +933,86 @@ final class ViewerFlowControlTests: XCTestCase {
     release.signal()
     _ = first.admission.stop()
     _ = second.admission.stop()
+  }
+
+  func testDuplicatePeerEventIdentifiersRetainIndependentJournalOwnership() throws {
+    let clock = FlowManualScheduler(startNanoseconds: 1_000_000_000)
+    let entered = DispatchSemaphore(value: 0)
+    let release = DispatchSemaphore(value: 0)
+    let journal = FlowJournalBox()
+    let fixture = try establishActiveSession(
+      clock: clock,
+      appIDRaw: "app-duplicate-peer-event-id",
+      uplinkSink: { _, _ in
+        entered.signal()
+        _ = release.wait(timeout: .now() + 5)
+      },
+      journal: journal
+    )
+    let sharedID = EventID()
+
+    func record(sequence: UInt64) throws -> WireEventRecord {
+      let envelope = try EventEnvelope(
+        id: sharedID,
+        type: EventType.user("test.duplicate-peer-event-id"),
+        content: .object(["sequence": .integer(Int64(sequence))]),
+        createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+        monotonicTimestampNanoseconds: 1_000_000_000,
+        source: EventEndpoint(role: .app, id: fixture.appID),
+        target: EventEndpoint(role: .viewer, id: fixture.viewerID),
+        direction: .appToViewer,
+        sessionEpoch: fixture.acknowledgement.sessionEpoch,
+        sequence: EventSequence(sequence),
+        priority: .normal,
+        ttl: .default,
+        causality: EventCausality()
+      )
+      return try WireEventRecord(
+        envelope: envelope,
+        remainingTTLNanoseconds: 10_000_000_000
+      )
+    }
+
+    fixture.connection.emit(
+      .received(
+        try fixture.codec.encode(
+          WireEventBatchPayload(
+            records: [try record(sequence: 0), try record(sequence: 1)],
+            limits: fixture.codec.limits
+          ),
+          phase: .active
+        )
+      )
+    )
+
+    XCTAssertEqual(entered.wait(timeout: .now() + 1), .success)
+    waitUntil {
+      journal.uplinkCommits.count == 2
+        && journal.uplinkTerminals.contains {
+          $0.wireSequence == 0 && $0.disposition == .consumerAccepted
+        }
+    }
+    XCTAssertEqual(journal.uplinkCommits.map(\.eventID), [sharedID, sharedID])
+
+    fixture.manager.disconnect(
+      connectionID: try XCTUnwrap(fixture.snapshots.value.first?.connectionID)
+    )
+    waitUntil {
+      journal.uplinkTerminals.contains {
+        $0.wireSequence == 1 && $0.disposition == .sessionEnded
+      }
+    }
+    XCTAssertEqual(
+      journal.uplinkTerminals.filter { $0.wireSequence == 0 }.map(\.disposition),
+      [.consumerAccepted]
+    )
+    XCTAssertEqual(
+      journal.uplinkTerminals.filter { $0.wireSequence == 1 }.map(\.disposition),
+      [.sessionEnded]
+    )
+
+    release.signal()
+    _ = fixture.admission.stop()
   }
 
   func testDropSummariesCoalesceWhileOneSummaryOwnsTheReservedControlSlot() throws {
@@ -1123,7 +1429,8 @@ final class ViewerFlowControlTests: XCTestCase {
   private func establishActiveSession(
     clock: FlowManualScheduler,
     appIDRaw: String,
-    uplinkSink: @escaping @Sendable (UUID, WireReceivedEvent) -> Void = { _, _ in }
+    uplinkSink: @escaping @Sendable (UUID, WireReceivedEvent) -> Void = { _, _ in },
+    journal: any ViewerSessionJournaling = ViewerNoopSessionJournal()
   ) throws -> FlowActiveFixture {
     let snapshots = FlowSnapshotBox()
     let suite = "ViewerFlowControlTests.fixture.\(UUID().uuidString)"
@@ -1133,7 +1440,8 @@ final class ViewerFlowControlTests: XCTestCase {
       scheduler: clock.scheduler,
       preferences: ViewerDevicePreferences(defaults: defaults),
       onSnapshots: { snapshots.set($0) },
-      uplinkSink: uplinkSink
+      uplinkSink: uplinkSink,
+      journal: journal
     )
     let admission = ViewerAdmissionManager(
       onPending: { _ in },
@@ -1221,6 +1529,31 @@ final class ViewerFlowControlTests: XCTestCase {
     return try XCTUnwrap(frames.first)
   }
 
+  private func assertClosedDiagnostics(
+    _ values: [Any],
+    excluding markers: [String],
+    file: StaticString = #filePath,
+    line: UInt = #line
+  ) {
+    for value in values {
+      let surfaces = [String(describing: value), String(reflecting: value), "\(value)"]
+      for marker in markers {
+        XCTAssertFalse(
+          surfaces.contains { $0.contains(marker) },
+          "Diagnostic surface exposed a forbidden marker.",
+          file: file,
+          line: line
+        )
+      }
+      XCTAssertTrue(
+        Mirror(reflecting: value).children.isEmpty,
+        "Root reflection must not expose owned implementation state.",
+        file: file,
+        line: line
+      )
+    }
+  }
+
   private func waitUntil(
     timeout: TimeInterval = 2,
     condition: @escaping () -> Bool
@@ -1244,6 +1577,55 @@ private struct FlowActiveFixture {
   let viewerID: EndpointID
 }
 
+private final class FlowReflectionHandoffOwner: ViewerAdmissionHandoffOwning, @unchecked Sendable {
+  struct Snapshot {
+    let handle: ViewerAdmissionHandle
+    let context: ViewerAdmissionSessionContext
+    let session: ViewerDeviceSession
+  }
+
+  private let lock = NSLock()
+  private var captured: Snapshot?
+
+  var snapshot: Snapshot? {
+    lock.lock()
+    defer { lock.unlock() }
+    return captured
+  }
+
+  func transfer(_ handle: ViewerAdmissionHandle) -> Bool {
+    do {
+      let context = try handle.connectionCore.pendingSessionContext()
+      let session = try ViewerDeviceSession(
+        handle: handle,
+        context: context,
+        requestedPolicy: .default,
+        nickname: nil,
+        scheduler: .live,
+        uplinkSink: { _ in },
+        onSnapshot: { _ in },
+        onTerminal: { _, _ in }
+      )
+      try handle.connectionCore.attachSession(session)
+      lock.lock()
+      captured = Snapshot(handle: handle, context: context, session: session)
+      lock.unlock()
+      session.start()
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  func beginShutdown() -> Task<Void, Never> {
+    let session = snapshot?.session
+    session?.disconnect(category: .viewerShutdown)
+    return Task {
+      await session?.cancelAndWaitForCleanup()
+    }
+  }
+}
+
 private struct FlowContinuationOutcome: Equatable {
   let state: ViewerSessionState
   let receivedEvents: UInt64
@@ -1257,6 +1639,112 @@ private struct FlowContinuationOutcome: Equatable {
   let cancellationCount: Int
   let pauseClaims: Int
   let pauseResumes: Int
+}
+
+private final class FlowJournalBox: ViewerSessionJournaling, @unchecked Sendable {
+  struct UplinkCommit: Equatable {
+    let eventID: EventID
+    let wireSequence: UInt64
+    let disposition: ViewerStoredDisposition
+  }
+
+  struct UplinkTerminal: Equatable {
+    let wireSequence: UInt64
+    let disposition: ViewerStoredDisposition
+  }
+
+  private let lock = NSLock()
+  private var commits: [UplinkCommit] = []
+  private var terminals: [UplinkTerminal] = []
+  private var drops: [ViewerDropJournalSample] = []
+
+  var uplinkCommits: [UplinkCommit] {
+    lock.lock()
+    defer { lock.unlock() }
+    return commits
+  }
+
+  var uplinkTerminals: [UplinkTerminal] {
+    lock.lock()
+    defer { lock.unlock() }
+    return terminals
+  }
+
+  var dropSamples: [ViewerDropJournalSample] {
+    lock.lock()
+    defer { lock.unlock() }
+    return drops
+  }
+
+  func runtimeStarted(logicalID: UUID, wallMilliseconds: Int64, monotonicNanoseconds: UInt64) {}
+  func sessionStarted(runtimeLogicalID: UUID, _ context: ViewerAdmissionSessionContext) {}
+
+  func uplinkCommitted(
+    runtimeLogicalID: UUID,
+    connectionID: UUID,
+    event: WireReceivedEvent,
+    initialDisposition: ViewerStoredDisposition
+  ) {
+    lock.lock()
+    commits.append(
+      UplinkCommit(
+        eventID: event.envelope.id,
+        wireSequence: event.envelope.sequence.rawValue,
+        disposition: initialDisposition
+      )
+    )
+    lock.unlock()
+  }
+
+  func uplinkTerminated(
+    runtimeLogicalID: UUID,
+    connectionID: UUID,
+    direction: EventDirection,
+    wireSequence: UInt64,
+    disposition: ViewerStoredDisposition,
+    monotonicNanoseconds: UInt64
+  ) {
+    lock.lock()
+    terminals.append(
+      UplinkTerminal(wireSequence: wireSequence, disposition: disposition)
+    )
+    lock.unlock()
+  }
+
+  func transportAdmitted(
+    runtimeLogicalID: UUID,
+    connectionID: UUID,
+    events: [ViewerDownlinkJournalEvent],
+    monotonicNanoseconds: UInt64
+  ) {}
+  func policyChanged(
+    runtimeLogicalID: UUID,
+    connectionID: UUID,
+    policy: ViewerRatePolicy,
+    monotonicNanoseconds: UInt64
+  ) {}
+  func dropsChanged(
+    runtimeLogicalID: UUID,
+    connectionID: UUID,
+    samples: [ViewerDropJournalSample],
+    monotonicNanoseconds: UInt64
+  ) {
+    lock.lock()
+    drops.append(contentsOf: samples)
+    lock.unlock()
+  }
+  func sessionEnded(
+    runtimeLogicalID: UUID,
+    connectionID: UUID,
+    wallMilliseconds: Int64,
+    monotonicNanoseconds: UInt64
+  ) {}
+  func retryStorage() {}
+  func runtimeEnded(
+    logicalID: UUID,
+    wallMilliseconds: Int64,
+    monotonicNanoseconds: UInt64
+  ) async {}
 }
 
 private final class FlowManualScheduler: @unchecked Sendable {

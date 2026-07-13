@@ -1,9 +1,44 @@
 import Foundation
+import Network
 import XCTest
 
 @_spi(NearWireInternal) @testable import NearWireTransport
 
 final class SecureByteChannelTests: XCTestCase {
+  func testActiveTransportOwnersHaveContentFreeReflection() async throws {
+    let secret = "nearwire-transport-reflection-secret"
+    let bytes = Data(secret.utf8)
+    let channel = SecureByteChannel(driver: FakeSecureConnectionDriver()) { _ in }
+    try await channel.start()
+    try channel.admitSend(bytes)
+
+    let connection = NWConnection(
+      to: .hostPort(host: NWEndpoint.Host(secret), port: 9),
+      using: .tcp
+    )
+    let incoming = SecureViewerIncomingConnection(
+      connection: connection,
+      limits: .default,
+      admissionGate: SecureViewerAdmissionGate()
+    )
+    let values: [Any] = [
+      SecureByteChannelEvent.received(bytes),
+      channel,
+      incoming,
+      SecureViewerListenerEvent.incoming(incoming),
+    ]
+
+    for value in values {
+      XCTAssertFalse(String(describing: value).contains(secret))
+      XCTAssertFalse(String(reflecting: value).contains(secret))
+      XCTAssertFalse("\(value)".contains(secret))
+      XCTAssertTrue(Mirror(reflecting: value).children.isEmpty)
+    }
+
+    incoming.reject()
+    await channel.cancel()
+  }
+
   func testStartIsSingleShotAndCancelBeforeReadyIsTerminal() async throws {
     let driver = FakeSecureConnectionDriver()
     let terminal = expectation(description: "terminal")

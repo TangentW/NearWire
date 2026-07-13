@@ -2,7 +2,9 @@ import Foundation
 @_spi(NearWireInternal) import NearWireCore
 @_spi(NearWireInternal) import NearWireTransport
 
-final class ViewerMultiDeviceSessionManager: ViewerAdmissionHandoffOwning, @unchecked Sendable {
+final class ViewerMultiDeviceSessionManager: ViewerAdmissionHandoffOwning, @unchecked Sendable,
+  CustomReflectable, CustomStringConvertible, CustomDebugStringConvertible
+{
   typealias SnapshotHandler = @Sendable ([ViewerSessionSnapshot]) -> Void
 
   private struct Entry {
@@ -30,6 +32,8 @@ final class ViewerMultiDeviceSessionManager: ViewerAdmissionHandoffOwning, @unch
   private let preferences: ViewerDevicePreferences
   private var onSnapshots: SnapshotHandler
   private let uplinkSink: @Sendable (UUID, WireReceivedEvent) -> Void
+  private let journal: any ViewerSessionJournaling
+  private let runtimeLogicalID: UUID
   private var entries: [UUID: Entry] = [:]
   private var liveRoutes: [ViewerLogicalRoute: UUID] = [:]
   private var recentRows: [ViewerLogicalRoute: RecentRow] = [:]
@@ -44,12 +48,21 @@ final class ViewerMultiDeviceSessionManager: ViewerAdmissionHandoffOwning, @unch
     scheduler: ViewerAdmissionScheduler = .live,
     preferences: ViewerDevicePreferences = ViewerDevicePreferences(),
     onSnapshots: @escaping SnapshotHandler = { _ in },
-    uplinkSink: @escaping @Sendable (UUID, WireReceivedEvent) -> Void = { _, _ in }
+    uplinkSink: @escaping @Sendable (UUID, WireReceivedEvent) -> Void = { _, _ in },
+    journal: any ViewerSessionJournaling = ViewerNoopSessionJournal()
   ) {
     self.scheduler = scheduler
     self.preferences = preferences
     self.onSnapshots = onSnapshots
     self.uplinkSink = uplinkSink
+    self.journal = journal
+    let runtimeLogicalID = UUID()
+    self.runtimeLogicalID = runtimeLogicalID
+    journal.runtimeStarted(
+      logicalID: runtimeLogicalID,
+      wallMilliseconds: Int64((Date().timeIntervalSince1970 * 1_000).rounded()),
+      monotonicNanoseconds: scheduler.now()
+    )
   }
 
   func setSnapshotHandler(_ handler: @escaping SnapshotHandler) {
@@ -69,6 +82,7 @@ final class ViewerMultiDeviceSessionManager: ViewerAdmissionHandoffOwning, @unch
     )
     let requested = preferences.requestedPolicy(for: route)
     let nickname = preferences.nickname(for: route)
+    let runtimeLogicalID = self.runtimeLogicalID
     let provisional = Self.provisionalSnapshot(
       context: context,
       route: route,
@@ -85,6 +99,48 @@ final class ViewerMultiDeviceSessionManager: ViewerAdmissionHandoffOwning, @unch
         scheduler: scheduler,
         uplinkSink: { [weak self] event in
           self?.uplinkSink(context.connectionID, event)
+        },
+        uplinkJournal: { [journal] event, disposition in
+          journal.uplinkCommitted(
+            runtimeLogicalID: runtimeLogicalID,
+            connectionID: context.connectionID,
+            event: event,
+            initialDisposition: disposition
+          )
+        },
+        uplinkDispositionJournal: { [journal] direction, wireSequence, disposition, monotonic in
+          journal.uplinkTerminated(
+            runtimeLogicalID: runtimeLogicalID,
+            connectionID: context.connectionID,
+            direction: direction,
+            wireSequence: wireSequence,
+            disposition: disposition,
+            monotonicNanoseconds: monotonic
+          )
+        },
+        downlinkJournal: { [journal] events, monotonicNanoseconds in
+          journal.transportAdmitted(
+            runtimeLogicalID: runtimeLogicalID,
+            connectionID: context.connectionID,
+            events: events,
+            monotonicNanoseconds: monotonicNanoseconds
+          )
+        },
+        policyJournal: { [journal] policy, monotonicNanoseconds in
+          journal.policyChanged(
+            runtimeLogicalID: runtimeLogicalID,
+            connectionID: context.connectionID,
+            policy: policy,
+            monotonicNanoseconds: monotonicNanoseconds
+          )
+        },
+        dropJournal: { [journal] samples, monotonicNanoseconds in
+          journal.dropsChanged(
+            runtimeLogicalID: runtimeLogicalID,
+            connectionID: context.connectionID,
+            samples: samples,
+            monotonicNanoseconds: monotonicNanoseconds
+          )
         },
         onSnapshot: { [weak self] snapshot in self?.update(snapshot) },
         onTerminal: { [weak self] id, category in self?.terminal(id, category: category) }
@@ -131,6 +187,7 @@ final class ViewerMultiDeviceSessionManager: ViewerAdmissionHandoffOwning, @unch
     let handler = onSnapshots
     lock.unlock()
     handler(snapshots)
+    journal.sessionStarted(runtimeLogicalID: runtimeLogicalID, context)
     session.start()
     return true
   }
@@ -146,9 +203,16 @@ final class ViewerMultiDeviceSessionManager: ViewerAdmissionHandoffOwning, @unch
     expiryWake?.cancel()
     expiryWake = nil
     let sessions = entries.values.map(\.session)
+    let journal = journal
+    let runtimeLogicalID = self.runtimeLogicalID
     let task = Task<Void, Never> { [weak self] in
       guard let self else { return }
       await self.waitForShutdown()
+      await journal.runtimeEnded(
+        logicalID: runtimeLogicalID,
+        wallMilliseconds: Int64((Date().timeIntervalSince1970 * 1_000).rounded()),
+        monotonicNanoseconds: scheduler.now()
+      )
     }
     shutdownTask = task
     let snapshots = snapshotsLocked()
@@ -272,6 +336,12 @@ final class ViewerMultiDeviceSessionManager: ViewerAdmissionHandoffOwning, @unch
     let handler = onSnapshots
     lock.unlock()
     handler(snapshots)
+    journal.sessionEnded(
+      runtimeLogicalID: runtimeLogicalID,
+      connectionID: connectionID,
+      wallMilliseconds: Int64((Date().timeIntervalSince1970 * 1_000).rounded()),
+      monotonicNanoseconds: scheduler.now()
+    )
     Task { [weak self] in
       await session.cancelAndWaitForCleanup()
       self?.cleanupCompleted(connectionID: connectionID, generation: generation)
@@ -489,4 +559,8 @@ final class ViewerMultiDeviceSessionManager: ViewerAdmissionHandoffOwning, @unch
       terminalCategory: terminal ?? value.terminalCategory
     )
   }
+
+  var description: String { "ViewerMultiDeviceSessionManager(redacted)" }
+  var debugDescription: String { description }
+  var customMirror: Mirror { Mirror(self, children: [:], displayStyle: .class) }
 }

@@ -215,6 +215,14 @@ import Foundation
   }
 }
 
+extension WireHello: CustomReflectable, CustomStringConvertible,
+  CustomDebugStringConvertible
+{
+  public var description: String { "WireHello(redacted)" }
+  public var debugDescription: String { description }
+  public var customMirror: Mirror { Mirror(self, children: [:], displayStyle: .struct) }
+}
+
 @_spi(NearWireInternal)
 public struct WireHelloAcknowledgement: Equatable, Sendable, WireMessagePayload {
   public static let messageType = WireMessageType.helloAcknowledged

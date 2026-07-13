@@ -30,12 +30,38 @@ import Foundation
   public let statistics: EventQueueStatistics
 }
 
+extension EventQueueSnapshot: CustomReflectable, CustomStringConvertible,
+  CustomDebugStringConvertible
+{
+  public var description: String {
+    "EventQueueSnapshot(count: \(eventCount), bytes: \(accountedByteCount), redacted)"
+  }
+  public var debugDescription: String { description }
+  public var customMirror: Mirror {
+    Mirror(
+      self,
+      children: ["eventCount": eventCount, "accountedByteCount": accountedByteCount],
+      displayStyle: .struct
+    )
+  }
+}
+
 @_spi(NearWireInternal) public struct EventEnqueueResult: Equatable, Sendable {
   public let eventID: EventID
   public let isBuffered: Bool
   public let coalescedEventID: EventID?
   public let overflowDroppedEventIDs: [EventID]
   public let expiredEventIDs: [EventID]
+}
+
+extension EventEnqueueResult: CustomReflectable, CustomStringConvertible,
+  CustomDebugStringConvertible
+{
+  public var description: String { "EventEnqueueResult(redacted)" }
+  public var debugDescription: String { description }
+  public var customMirror: Mirror {
+    Mirror(self, children: [:], displayStyle: .struct)
+  }
 }
 
 @_spi(NearWireInternal) public struct EventDequeueResult<Value: Sendable>: Sendable {
@@ -45,6 +71,22 @@ import Foundation
 }
 
 extension EventDequeueResult: Equatable where Value: Equatable {}
+
+extension EventDequeueResult: CustomReflectable, CustomStringConvertible,
+  CustomDebugStringConvertible
+{
+  public var description: String {
+    "EventDequeueResult(count: \(events.count), bytes: \(accountedByteCount), redacted)"
+  }
+  public var debugDescription: String { description }
+  public var customMirror: Mirror {
+    Mirror(
+      self,
+      children: ["eventCount": events.count, "accountedByteCount": accountedByteCount],
+      displayStyle: .struct
+    )
+  }
+}
 
 @_spi(NearWireInternal) public enum EventOfferDecision: Equatable, Sendable {
   case remove
@@ -66,12 +108,41 @@ extension EventDequeueResult: Equatable where Value: Equatable {}
 
 extension EventOfferResult: Equatable where Value: Equatable {}
 
+extension EventOfferResult: CustomReflectable, CustomStringConvertible,
+  CustomDebugStringConvertible
+{
+  public var description: String {
+    "EventOfferResult(count: \(removedEvents.count), bytes: \(accountedByteCount), redacted)"
+  }
+  public var debugDescription: String { description }
+  public var customMirror: Mirror {
+    Mirror(
+      self,
+      children: [
+        "removedEventCount": removedEvents.count,
+        "accountedByteCount": accountedByteCount,
+      ],
+      displayStyle: .struct
+    )
+  }
+}
+
 @_spi(NearWireInternal) public struct EventQueueSchedulingObservation: Equatable, Sendable {
   public let expiredEventIDs: [EventID]
   public let dueWorkRemains: Bool
   public let nextExpirationDeadlineNanoseconds: UInt64?
   public let nextFairCandidateID: EventID?
   public let stoppedByAuthorization: Bool
+}
+
+extension EventQueueSchedulingObservation: CustomReflectable, CustomStringConvertible,
+  CustomDebugStringConvertible
+{
+  public var description: String { "EventQueueSchedulingObservation(redacted)" }
+  public var debugDescription: String { description }
+  public var customMirror: Mirror {
+    Mirror(self, children: [:], displayStyle: .struct)
+  }
 }
 
 @_spi(NearWireInternal) public struct EventActiveOfferResult<Value: Sendable>: Sendable {
@@ -89,6 +160,22 @@ extension EventOfferResult: Equatable where Value: Equatable {}
 
 extension EventActiveOfferResult: Equatable where Value: Equatable {}
 
+extension EventActiveOfferResult: CustomReflectable, CustomStringConvertible,
+  CustomDebugStringConvertible
+{
+  public var description: String {
+    "EventActiveOfferResult(count: \(removedEvents.count), redacted)"
+  }
+  public var debugDescription: String { description }
+  public var customMirror: Mirror {
+    Mirror(
+      self,
+      children: ["removedEventCount": removedEvents.count],
+      displayStyle: .struct
+    )
+  }
+}
+
 @_spi(NearWireInternal) public enum EventQueueClearReason: Sendable {
   case ownerRequested
   case sessionEnded
@@ -97,6 +184,22 @@ extension EventActiveOfferResult: Equatable where Value: Equatable {}
 @_spi(NearWireInternal) public struct EventQueueClearResult: Equatable, Sendable {
   public let reason: EventQueueClearReason
   public let removedEventIDs: [EventID]
+}
+
+extension EventQueueClearResult: CustomReflectable, CustomStringConvertible,
+  CustomDebugStringConvertible
+{
+  public var description: String {
+    "EventQueueClearResult(count: \(removedEventIDs.count), redacted)"
+  }
+  public var debugDescription: String { description }
+  public var customMirror: Mirror {
+    Mirror(
+      self,
+      children: ["removedEventCount": removedEventIDs.count],
+      displayStyle: .struct
+    )
+  }
 }
 
 private struct FlowControlMinHeap<Element: Comparable & Sendable>: Sendable {
@@ -1046,6 +1149,22 @@ private struct EnqueueHeapNode: Comparable, Sendable {
       )
     }
     return deadline
+  }
+}
+
+extension BoundedEventQueue: CustomReflectable, CustomStringConvertible,
+  CustomDebugStringConvertible
+{
+  public var description: String {
+    "BoundedEventQueue(count: \(eventCount), bytes: \(accountedByteCount), redacted)"
+  }
+  public var debugDescription: String { description }
+  public var customMirror: Mirror {
+    Mirror(
+      self,
+      children: ["eventCount": eventCount, "accountedByteCount": accountedByteCount],
+      displayStyle: .struct
+    )
   }
 }
 

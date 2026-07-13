@@ -89,6 +89,14 @@ struct WireMessage: Equatable, Sendable {
   }
 }
 
+extension WireMessage: CustomReflectable, CustomStringConvertible, CustomDebugStringConvertible {
+  var description: String { "WireMessage(redacted, type: \(type.rawValue))" }
+  var debugDescription: String { description }
+  var customMirror: Mirror {
+    Mirror(self, children: ["type": type.rawValue], displayStyle: .struct)
+  }
+}
+
 protocol WireMessagePayload: Sendable {
   static var messageType: WireMessageType { get }
   static var lane: WireLane { get }
@@ -520,6 +528,16 @@ enum WireMessageCodec {
 
   public var version: WireProtocolVersion { message.version }
   public var type: WireMessageType { message.type }
+}
+
+extension WireAdmittedMessage: CustomReflectable, CustomStringConvertible,
+  CustomDebugStringConvertible
+{
+  public var description: String { "WireAdmittedMessage(redacted, type: \(type.rawValue))" }
+  public var debugDescription: String { description }
+  public var customMirror: Mirror {
+    Mirror(self, children: ["type": type.rawValue], displayStyle: .struct)
+  }
 }
 
 @_spi(NearWireInternal) public enum WireSessionPhase: String, Codable, Sendable {

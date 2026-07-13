@@ -82,12 +82,44 @@ import Foundation
 
 extension EventBatch: Equatable where Value: Equatable {}
 
+extension EventBatch: CustomReflectable, CustomStringConvertible,
+  CustomDebugStringConvertible
+{
+  public var description: String {
+    "EventBatch(count: \(events.count), bytes: \(accountedByteCount), redacted)"
+  }
+  public var debugDescription: String { description }
+  public var customMirror: Mirror {
+    Mirror(
+      self,
+      children: ["eventCount": events.count, "accountedByteCount": accountedByteCount],
+      displayStyle: .struct
+    )
+  }
+}
+
 @_spi(NearWireInternal) public struct EventBatchAttempt<Value: Sendable>: Sendable {
   public let batch: EventBatch<Value>?
   public let expiredEventIDs: [EventID]
 }
 
 extension EventBatchAttempt: Equatable where Value: Equatable {}
+
+extension EventBatchAttempt: CustomReflectable, CustomStringConvertible,
+  CustomDebugStringConvertible
+{
+  public var description: String {
+    "EventBatchAttempt(count: \(batch?.events.count ?? 0), redacted)"
+  }
+  public var debugDescription: String { description }
+  public var customMirror: Mirror {
+    Mirror(
+      self,
+      children: ["eventCount": batch?.events.count ?? 0],
+      displayStyle: .struct
+    )
+  }
+}
 
 @_spi(NearWireInternal) public struct EventBatchScheduler: Equatable, Sendable {
   public let limits: EventBatchLimits

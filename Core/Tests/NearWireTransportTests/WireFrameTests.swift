@@ -332,7 +332,7 @@ final class WireFrameTests: XCTestCase {
       XCTAssertEqual(wireError?.code, .phaseViolation)
       XCTAssertEqual(wireError?.disposition, .connectionTerminal)
     }
-    XCTAssertEqual(retainedPayloadByteCount(decoder), 0)
+    XCTAssertEqual(decoder.retainedByteCount, MemoryLayout<UInt32>.size)
     assertWireError(.decoderFailed) {
       try decoder.consume(encoded) { _ in }
     }
@@ -380,12 +380,5 @@ final class WireFrameTests: XCTestCase {
       WireFrameEncoder.encode(lane: .control, payload: Data("{}".utf8))
     ) { _ in }
     XCTAssertNoThrow(try complete.finish())
-  }
-
-  private func retainedPayloadByteCount(_ decoder: WireFrameDecoder) -> Int {
-    for child in Mirror(reflecting: decoder).children where child.label == "payload" {
-      return (child.value as? Data)?.count ?? -1
-    }
-    return -1
   }
 }

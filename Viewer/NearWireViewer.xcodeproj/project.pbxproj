@@ -23,6 +23,16 @@
 		10000000000000000000000E /* ViewerMultiDeviceSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000011 /* ViewerMultiDeviceSession.swift */; };
 		10000000000000000000000F /* ViewerMultiDeviceSessionManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000012 /* ViewerMultiDeviceSessionManager.swift */; };
 		100000000000000000000010 /* ViewerFlowControlTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000013 /* ViewerFlowControlTests.swift */; };
+		100000000000000000000011 /* ViewerSQLite.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000014 /* ViewerSQLite.swift */; };
+		100000000000000000000012 /* libsqlite3.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = 200000000000000000000015 /* libsqlite3.tbd */; };
+		100000000000000000000013 /* ViewerStoreSchema.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000016 /* ViewerStoreSchema.swift */; };
+		100000000000000000000014 /* ViewerStoragePreferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000017 /* ViewerStoragePreferences.swift */; };
+		100000000000000000000015 /* ViewerStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000018 /* ViewerStoreTests.swift */; };
+		100000000000000000000016 /* ViewerEventStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000019 /* ViewerEventStore.swift */; };
+		100000000000000000000017 /* ViewerStoreMaintenance.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000001A /* ViewerStoreMaintenance.swift */; };
+		100000000000000000000018 /* ViewerStoreQuery.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000001B /* ViewerStoreQuery.swift */; };
+		100000000000000000000019 /* ViewerStoreExport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000001C /* ViewerStoreExport.swift */; };
+		10000000000000000000001A /* ViewerStoreCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000001D /* ViewerStoreCoordinator.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -55,6 +65,17 @@
 		200000000000000000000011 /* ViewerMultiDeviceSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewerMultiDeviceSession.swift; sourceTree = "<group>"; };
 		200000000000000000000012 /* ViewerMultiDeviceSessionManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewerMultiDeviceSessionManager.swift; sourceTree = "<group>"; };
 		200000000000000000000013 /* ViewerFlowControlTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewerFlowControlTests.swift; sourceTree = "<group>"; };
+		200000000000000000000014 /* ViewerSQLite.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewerSQLite.swift; sourceTree = "<group>"; };
+		200000000000000000000015 /* libsqlite3.tbd */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.text-based-dylib-definition; name = libsqlite3.tbd; path = usr/lib/libsqlite3.tbd; sourceTree = SDKROOT; };
+		200000000000000000000016 /* ViewerStoreSchema.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewerStoreSchema.swift; sourceTree = "<group>"; };
+		200000000000000000000017 /* ViewerStoragePreferences.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewerStoragePreferences.swift; sourceTree = "<group>"; };
+		200000000000000000000018 /* ViewerStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewerStoreTests.swift; sourceTree = "<group>"; };
+		200000000000000000000019 /* ViewerEventStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewerEventStore.swift; sourceTree = "<group>"; };
+		20000000000000000000001A /* ViewerStoreMaintenance.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewerStoreMaintenance.swift; sourceTree = "<group>"; };
+		20000000000000000000001B /* ViewerStoreQuery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewerStoreQuery.swift; sourceTree = "<group>"; };
+		20000000000000000000001C /* ViewerStoreExport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewerStoreExport.swift; sourceTree = "<group>"; };
+		20000000000000000000001D /* ViewerStoreCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewerStoreCoordinator.swift; sourceTree = "<group>"; };
+		20000000000000000000001E /* ViewerSQLiteBridge.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = ViewerSQLiteBridge.h; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -63,6 +84,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				100000000000000000000007 /* NearWireCore in Frameworks */,
+				100000000000000000000012 /* libsqlite3.tbd in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -81,6 +103,7 @@
 			children = (
 				500000000000000000000002 /* NearWireViewer */,
 				500000000000000000000008 /* NearWireViewerTests */,
+				200000000000000000000015 /* libsqlite3.tbd */,
 				500000000000000000000009 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -93,6 +116,7 @@
 				500000000000000000000004 /* Application */,
 				500000000000000000000005 /* Identity */,
 				50000000000000000000000B /* Session */,
+				50000000000000000000000C /* Store */,
 				500000000000000000000006 /* UI */,
 				500000000000000000000007 /* Resources */,
 			);
@@ -104,10 +128,11 @@
 		500000000000000000000005 /* Identity */ = {isa = PBXGroup; children = (20000000000000000000000C /* ViewerCertificateBuilder.swift */, 20000000000000000000000D /* ViewerIdentityStore.swift */, 200000000000000000000004 /* ViewerPairingCodeGenerator.swift */,); path = Identity; sourceTree = "<group>"; };
 		500000000000000000000006 /* UI */ = {isa = PBXGroup; children = (200000000000000000000005 /* ViewerRootView.swift */,); path = UI; sourceTree = "<group>"; };
 		500000000000000000000007 /* Resources */ = {isa = PBXGroup; children = (200000000000000000000007 /* Info.plist */, 200000000000000000000008 /* NearWireViewer.entitlements */, 200000000000000000000006 /* PrivacyInfo.xcprivacy */,); path = Resources; sourceTree = "<group>"; };
-		500000000000000000000008 /* NearWireViewerTests */ = {isa = PBXGroup; children = (200000000000000000000009 /* ViewerFoundationTests.swift */, 200000000000000000000013 /* ViewerFlowControlTests.swift */,); path = NearWireViewerTests; sourceTree = "<group>"; };
+		500000000000000000000008 /* NearWireViewerTests */ = {isa = PBXGroup; children = (200000000000000000000009 /* ViewerFoundationTests.swift */, 200000000000000000000013 /* ViewerFlowControlTests.swift */, 200000000000000000000018 /* ViewerStoreTests.swift */,); path = NearWireViewerTests; sourceTree = "<group>"; };
 		500000000000000000000009 /* Products */ = {isa = PBXGroup; children = (20000000000000000000000A /* NearWire.app */, 20000000000000000000000B /* NearWireViewerTests.xctest */,); name = Products; sourceTree = "<group>"; };
 		50000000000000000000000A /* Admission */ = {isa = PBXGroup; children = (20000000000000000000000E /* ViewerAdmission.swift */,); path = Admission; sourceTree = "<group>"; };
 		50000000000000000000000B /* Session */ = {isa = PBXGroup; children = (200000000000000000000010 /* ViewerDevicePreferences.swift */, 200000000000000000000011 /* ViewerMultiDeviceSession.swift */, 200000000000000000000012 /* ViewerMultiDeviceSessionManager.swift */,); path = Session; sourceTree = "<group>"; };
+		50000000000000000000000C /* Store */ = {isa = PBXGroup; children = (20000000000000000000001E /* ViewerSQLiteBridge.h */, 200000000000000000000014 /* ViewerSQLite.swift */, 200000000000000000000016 /* ViewerStoreSchema.swift */, 200000000000000000000017 /* ViewerStoragePreferences.swift */, 200000000000000000000019 /* ViewerEventStore.swift */, 20000000000000000000001A /* ViewerStoreMaintenance.swift */, 20000000000000000000001B /* ViewerStoreQuery.swift */, 20000000000000000000001C /* ViewerStoreExport.swift */, 20000000000000000000001D /* ViewerStoreCoordinator.swift */,); path = Store; sourceTree = "<group>"; };
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
@@ -168,8 +193,8 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
-		400000000000000000000003 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (100000000000000000000001, 100000000000000000000002, 100000000000000000000003, 100000000000000000000004, 100000000000000000000005, 100000000000000000000009, 10000000000000000000000A, 10000000000000000000000B, 10000000000000000000000C, 10000000000000000000000D, 10000000000000000000000E, 10000000000000000000000F,); runOnlyForDeploymentPostprocessing = 0; };
-		400000000000000000000004 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (100000000000000000000008, 100000000000000000000010,); runOnlyForDeploymentPostprocessing = 0; };
+		400000000000000000000003 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (100000000000000000000001, 100000000000000000000002, 100000000000000000000003, 100000000000000000000004, 100000000000000000000005, 100000000000000000000009, 10000000000000000000000A, 10000000000000000000000B, 10000000000000000000000C, 10000000000000000000000D, 10000000000000000000000E, 10000000000000000000000F, 100000000000000000000011, 100000000000000000000013, 100000000000000000000014, 100000000000000000000016, 100000000000000000000017, 100000000000000000000018, 100000000000000000000019, 10000000000000000000001A,); runOnlyForDeploymentPostprocessing = 0; };
+		400000000000000000000004 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (100000000000000000000008, 100000000000000000000010, 100000000000000000000015,); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -179,8 +204,8 @@
 /* Begin XCBuildConfiguration section */
 		A00000000000000000000001 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {CLANG_ENABLE_MODULES = YES; MACOSX_DEPLOYMENT_TARGET = 13.0; SDKROOT = macosx; SWIFT_VERSION = 5.0;}; name = Debug; };
 		A00000000000000000000002 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {CLANG_ENABLE_MODULES = YES; MACOSX_DEPLOYMENT_TARGET = 13.0; SDKROOT = macosx; SWIFT_VERSION = 5.0;}; name = Release; };
-		A00000000000000000000003 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_ENTITLEMENTS = NearWireViewer/Resources/NearWireViewer.entitlements; CODE_SIGN_IDENTITY = "Apple Development"; CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 1; ENABLE_APP_SANDBOX = YES; ENABLE_HARDENED_RUNTIME = YES; ENABLE_TESTABILITY = YES; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = NearWireViewer/Resources/Info.plist; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks"; MARKETING_VERSION = 0.1.0; PRODUCT_BUNDLE_IDENTIFIER = com.nearwire.viewer; PRODUCT_MODULE_NAME = NearWireViewer; PRODUCT_NAME = NearWire; SWIFT_EMIT_LOC_STRINGS = YES; SWIFT_OPTIMIZATION_LEVEL = "-Onone"; SWIFT_STRICT_CONCURRENCY = complete;}; name = Debug; };
-		A00000000000000000000004 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_ENTITLEMENTS = NearWireViewer/Resources/NearWireViewer.entitlements; CODE_SIGN_IDENTITY = "Apple Development"; CODE_SIGN_INJECT_BASE_ENTITLEMENTS = NO; CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 1; ENABLE_APP_SANDBOX = YES; ENABLE_HARDENED_RUNTIME = YES; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = NearWireViewer/Resources/Info.plist; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks"; MARKETING_VERSION = 0.1.0; PRODUCT_BUNDLE_IDENTIFIER = com.nearwire.viewer; PRODUCT_MODULE_NAME = NearWireViewer; PRODUCT_NAME = NearWire; SWIFT_COMPILATION_MODE = wholemodule; SWIFT_EMIT_LOC_STRINGS = YES; SWIFT_STRICT_CONCURRENCY = complete;}; name = Release; };
+		A00000000000000000000003 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_ENTITLEMENTS = NearWireViewer/Resources/NearWireViewer.entitlements; CODE_SIGN_IDENTITY = "Apple Development"; CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 1; ENABLE_APP_SANDBOX = YES; ENABLE_HARDENED_RUNTIME = YES; ENABLE_TESTABILITY = YES; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = NearWireViewer/Resources/Info.plist; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks"; MARKETING_VERSION = 0.1.0; PRODUCT_BUNDLE_IDENTIFIER = com.nearwire.viewer; PRODUCT_MODULE_NAME = NearWireViewer; PRODUCT_NAME = NearWire; SWIFT_EMIT_LOC_STRINGS = YES; SWIFT_OBJC_BRIDGING_HEADER = NearWireViewer/Store/ViewerSQLiteBridge.h; SWIFT_OPTIMIZATION_LEVEL = "-Onone"; SWIFT_STRICT_CONCURRENCY = complete;}; name = Debug; };
+		A00000000000000000000004 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_ENTITLEMENTS = NearWireViewer/Resources/NearWireViewer.entitlements; CODE_SIGN_IDENTITY = "Apple Development"; CODE_SIGN_INJECT_BASE_ENTITLEMENTS = NO; CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 1; ENABLE_APP_SANDBOX = YES; ENABLE_HARDENED_RUNTIME = YES; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = NearWireViewer/Resources/Info.plist; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks"; MARKETING_VERSION = 0.1.0; PRODUCT_BUNDLE_IDENTIFIER = com.nearwire.viewer; PRODUCT_MODULE_NAME = NearWireViewer; PRODUCT_NAME = NearWire; SWIFT_COMPILATION_MODE = wholemodule; SWIFT_EMIT_LOC_STRINGS = YES; SWIFT_OBJC_BRIDGING_HEADER = NearWireViewer/Store/ViewerSQLiteBridge.h; SWIFT_STRICT_CONCURRENCY = complete;}; name = Release; };
 		A00000000000000000000005 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {BUNDLE_LOADER = "$(TEST_HOST)"; GENERATE_INFOPLIST_FILE = YES; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @loader_path/../Frameworks @executable_path/../Frameworks"; PRODUCT_BUNDLE_IDENTIFIER = com.nearwire.viewer.tests; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_OPTIMIZATION_LEVEL = "-Onone"; SWIFT_STRICT_CONCURRENCY = complete; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/NearWire.app/Contents/MacOS/NearWire";}; name = Debug; };
 		A00000000000000000000006 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {BUNDLE_LOADER = "$(TEST_HOST)"; GENERATE_INFOPLIST_FILE = YES; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @loader_path/../Frameworks @executable_path/../Frameworks"; PRODUCT_BUNDLE_IDENTIFIER = com.nearwire.viewer.tests; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_STRICT_CONCURRENCY = complete; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/NearWire.app/Contents/MacOS/NearWire";}; name = Release; };
 /* End XCBuildConfiguration section */

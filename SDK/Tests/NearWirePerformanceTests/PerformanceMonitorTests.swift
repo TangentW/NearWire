@@ -265,7 +265,6 @@ final class PerformanceMonitorTests: XCTestCase {
           didReceive = true
           await probe.increment()
         }
-        if Task.isCancelled { break }
       }
     }
     let secondTask = Task {
@@ -276,7 +275,6 @@ final class PerformanceMonitorTests: XCTestCase {
           didReceive = true
           await probe.increment()
         }
-        if Task.isCancelled { break }
       }
     }
     try await waitUntil("initial stream values") { await probe.value == 2 }

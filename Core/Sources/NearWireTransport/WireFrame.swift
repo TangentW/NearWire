@@ -10,6 +10,14 @@ import Foundation
   }
 }
 
+extension WireFrame: CustomReflectable, CustomStringConvertible, CustomDebugStringConvertible {
+  public var description: String { "WireFrame(redacted, bytes: \(payload.count))" }
+  public var debugDescription: String { description }
+  public var customMirror: Mirror {
+    Mirror(self, children: ["byteCount": payload.count], displayStyle: .struct)
+  }
+}
+
 @_spi(NearWireInternal) public enum WireFrameDeliveryDecision: Equatable, Sendable {
   case consume
   case pause
@@ -471,5 +479,15 @@ import Foundation
     declaredLength = nil
     lane = nil
     payload.removeAll(keepingCapacity: true)
+  }
+}
+
+extension WireFrameDecoder: CustomReflectable, CustomStringConvertible,
+  CustomDebugStringConvertible
+{
+  public var description: String { "WireFrameDecoder(redacted)" }
+  public var debugDescription: String { description }
+  public var customMirror: Mirror {
+    Mirror(self, children: [:], displayStyle: .struct)
   }
 }

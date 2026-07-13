@@ -4,6 +4,90 @@ import XCTest
 @_spi(NearWireInternal) @testable import NearWireFlowControl
 
 final class BoundedEventQueueTests: XCTestCase {
+  func testActiveQueueOwnersAndResultsHaveContentFreeReflection() throws {
+    let secret = "nearwire-queue-secret"
+    let key = try KeepLatestKey(secret)
+    let policy = EventQueuePolicy.keepLatest(key)
+    let draft = try EventDraft(
+      type: EventType.user("test.reflection"),
+      content: .object(["secret": .string(secret)])
+    )
+    let pending = try PendingEvent(
+      id: EventID(),
+      value: draft,
+      policy: policy,
+      accountedByteCount: secret.utf8.count,
+      enqueuedAtNanoseconds: 0
+    )
+    var queue = BoundedEventQueue<EventDraft>()
+    let enqueue = try queue.enqueue(pending, nowOnQueueClockNanoseconds: 0)
+    let snapshot = try queue.snapshot(nowOnQueueClockNanoseconds: 0)
+    let scheduling = try queue.observeActiveSchedule(
+      nowOnQueueClockNanoseconds: 0,
+      maximumServiceUnits: 1,
+      authorizeExpiration: { _, _ in false }
+    )
+
+    var dequeueQueue = queue
+    let dequeue = try dequeueQueue.dequeue(
+      maximumCount: 1,
+      maximumBytes: 1_024,
+      nowOnQueueClockNanoseconds: 0
+    )
+    let batch = try XCTUnwrap(
+      EventBatch(events: dequeue.events, accountedByteCount: dequeue.accountedByteCount)
+    )
+    let batchAttempt = EventBatchAttempt(batch: batch, expiredEventIDs: [])
+
+    var offerQueue = queue
+    let offer = try offerQueue.offer(
+      maximumCount: 1,
+      maximumBytes: 1_024,
+      nowOnQueueClockNanoseconds: 0,
+      decision: { _ in .remove }
+    )
+    let activeOffer = EventActiveOfferResult(
+      removedEvents: [pending],
+      expiredEventIDs: [pending.id],
+      acceptedAccountedByteCount: pending.accountedByteCount,
+      acceptedEventCount: 1,
+      serviceUnits: 1,
+      dueWorkRemains: false,
+      eligibleWorkRemains: false,
+      nextExpirationDeadlineNanoseconds: nil,
+      nextFairCandidateID: pending.id,
+      stoppedOnCandidate: false
+    )
+    var clearQueue = queue
+    let clear = clearQueue.clear(reason: .ownerRequested)
+
+    let values: [Any] = [
+      key,
+      policy,
+      pending,
+      queue,
+      enqueue,
+      snapshot,
+      scheduling,
+      dequeue,
+      offer,
+      activeOffer,
+      clear,
+      batch,
+      batchAttempt,
+    ]
+    for value in values {
+      XCTAssertFalse(String(describing: value).contains(secret))
+      XCTAssertFalse(String(reflecting: value).contains(secret))
+      XCTAssertFalse("\(value)".contains(secret))
+      XCTAssertFalse(
+        Mirror(reflecting: value).children.contains {
+          String(reflecting: $0.value).contains(secret)
+        }
+      )
+    }
+  }
+
   func testDefaultAndInvalidConfiguration() throws {
     XCTAssertEqual(EventQueueLimits.default.maximumEventCount, 1_000)
     XCTAssertEqual(EventQueueLimits.default.maximumTotalBytes, 4 * 1_024 * 1_024)

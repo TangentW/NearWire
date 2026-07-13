@@ -89,7 +89,8 @@ import Foundation
     return WireReceivedEvent(
       envelope: envelope,
       receivedAtNanoseconds: receivedAtNanoseconds,
-      deadlineNanoseconds: deadline
+      deadlineNanoseconds: deadline,
+      deterministicEncodedByteCount: try deterministicEncodedByteCount()
     )
   }
 
@@ -337,10 +338,21 @@ import Foundation
   }
 }
 
+extension WireEventRecord: CustomReflectable, CustomStringConvertible,
+  CustomDebugStringConvertible
+{
+  public var description: String { "WireEventRecord(redacted)" }
+  public var debugDescription: String { description }
+  public var customMirror: Mirror {
+    Mirror(self, children: [:], displayStyle: .struct)
+  }
+}
+
 @_spi(NearWireInternal) public struct WireReceivedEvent: Equatable, Sendable {
   public let envelope: EventEnvelope
   public let receivedAtNanoseconds: UInt64
   public let deadlineNanoseconds: UInt64
+  public let deterministicEncodedByteCount: Int
 
   public func isExpired(nowOnReceiverClockNanoseconds now: UInt64) throws -> Bool {
     guard now >= receivedAtNanoseconds else {
@@ -351,6 +363,23 @@ import Foundation
       )
     }
     return now >= deadlineNanoseconds
+  }
+}
+
+extension WireReceivedEvent: CustomReflectable, CustomStringConvertible,
+  CustomDebugStringConvertible
+{
+  public var description: String {
+    "WireReceivedEvent(redacted, bytes: \(deterministicEncodedByteCount))"
+  }
+
+  public var debugDescription: String { description }
+  public var customMirror: Mirror {
+    Mirror(
+      self,
+      children: ["deterministicEncodedByteCount": deterministicEncodedByteCount],
+      displayStyle: .struct
+    )
   }
 }
 
@@ -390,6 +419,16 @@ import Foundation
         message: "Wire event exceeds the negotiated event limit."
       )
     }
+  }
+}
+
+extension WireEventPayload: CustomReflectable, CustomStringConvertible,
+  CustomDebugStringConvertible
+{
+  public var description: String { "WireEventPayload(redacted)" }
+  public var debugDescription: String { description }
+  public var customMirror: Mirror {
+    Mirror(self, children: [:], displayStyle: .struct)
   }
 }
 
@@ -501,6 +540,16 @@ import Foundation
         )
       }
     }
+  }
+}
+
+extension WireEventBatchPayload: CustomReflectable, CustomStringConvertible,
+  CustomDebugStringConvertible
+{
+  public var description: String { "WireEventBatchPayload(redacted, count: \(records.count))" }
+  public var debugDescription: String { description }
+  public var customMirror: Mirror {
+    Mirror(self, children: ["count": records.count], displayStyle: .struct)
   }
 }
 

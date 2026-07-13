@@ -135,6 +135,16 @@ import Foundation
   }
 }
 
+extension EventEnvelope: CustomReflectable, CustomStringConvertible,
+  CustomDebugStringConvertible
+{
+  public var description: String { "EventEnvelope(redacted)" }
+  public var debugDescription: String { description }
+  public var customMirror: Mirror {
+    Mirror(self, children: [:], displayStyle: .struct)
+  }
+}
+
 @_spi(NearWireInternal) public struct EventEnvelopeContext: Equatable, Hashable, Sendable {
   public let source: EventEndpoint
   public let target: EventEndpoint
@@ -158,6 +168,16 @@ import Foundation
     self.sessionEpoch = sessionEpoch
     self.sequence = sequence
     self.schemaVersion = schemaVersion
+  }
+}
+
+extension EventEnvelopeContext: CustomReflectable, CustomStringConvertible,
+  CustomDebugStringConvertible
+{
+  public var description: String { "EventEnvelopeContext(redacted)" }
+  public var debugDescription: String { description }
+  public var customMirror: Mirror {
+    Mirror(self, children: [:], displayStyle: .struct)
   }
 }
 

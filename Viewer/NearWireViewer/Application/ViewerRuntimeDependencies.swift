@@ -20,6 +20,8 @@ struct ViewerPreparedIdentity: @unchecked Sendable {
 struct ViewerRuntimeDependencies: @unchecked Sendable {
   static let live: ViewerRuntimeDependencies = {
     let store = ViewerIdentityStore.live
+    let storeRuntime = ViewerStoreRuntime()
+    let journal: any ViewerSessionJournaling = storeRuntime
     return ViewerRuntimeDependencies(
       loadIdentity: {
         let identity = try store.loadOrCreate()
@@ -41,9 +43,27 @@ struct ViewerRuntimeDependencies: @unchecked Sendable {
       makeHandoffOwner: {
         ViewerMultiDeviceSessionManager(
           scheduler: .live,
-          preferences: ViewerDevicePreferences()
+          preferences: ViewerDevicePreferences(),
+          uplinkSink: { _, _ in },
+          journal: journal
         )
-      }
+      },
+      loadStorageConfiguration: {
+        storeRuntime.loadConfiguration()
+      },
+      saveStorageConfiguration: { value in
+        storeRuntime.saveConfiguration(value)
+      },
+      loadStoreStatus: {
+        storeRuntime.status()
+      },
+      observeStoreStatus: { handler in
+        storeRuntime.observeStatus(handler)
+      },
+      runStoreCleanup: {
+        storeRuntime.runCleanup()
+      },
+      retryStore: { storeRuntime.retryStorage() }
     )
   }()
 
@@ -54,6 +74,12 @@ struct ViewerRuntimeDependencies: @unchecked Sendable {
   let cleanupTimeoutNanoseconds: UInt64
   let scheduler: ViewerAdmissionScheduler
   let makeHandoffOwner: @Sendable () -> any ViewerAdmissionHandoffOwning
+  let loadStorageConfiguration: @Sendable () -> ViewerStorageConfiguration
+  let saveStorageConfiguration: @Sendable (ViewerStorageConfiguration) -> Void
+  let loadStoreStatus: @Sendable () -> ViewerStoreStatus
+  let observeStoreStatus: @Sendable (@escaping @Sendable () -> Void) -> Void
+  let runStoreCleanup: @Sendable () -> Void
+  let retryStore: @Sendable () -> Void
 
   init(
     loadIdentity: @escaping @Sendable () throws -> ViewerPreparedIdentity,
@@ -64,7 +90,24 @@ struct ViewerRuntimeDependencies: @unchecked Sendable {
     scheduler: ViewerAdmissionScheduler = .live,
     makeHandoffOwner: @escaping @Sendable () -> any ViewerAdmissionHandoffOwning = {
       ViewerPlaceholderHandoffOwner()
-    }
+    },
+    loadStorageConfiguration: @escaping @Sendable () -> ViewerStorageConfiguration = { .default },
+    saveStorageConfiguration: @escaping @Sendable (ViewerStorageConfiguration) -> Void = { _ in },
+    loadStoreStatus: @escaping @Sendable () -> ViewerStoreStatus = {
+      ViewerStoreStatus(
+        state: .unavailable,
+        capacityBytes: ViewerStorageConfiguration.defaultCapacityBytes,
+        logicalQuotaBytes: 0,
+        allocatedFootprintBytes: 0,
+        oldestHistoryMilliseconds: nil,
+        pinnedQuotaBytes: 0,
+        estimatedRetainedDurationMilliseconds: nil,
+        lastCleanupCategory: .none
+      )
+    },
+    observeStoreStatus: @escaping @Sendable (@escaping @Sendable () -> Void) -> Void = { _ in },
+    runStoreCleanup: @escaping @Sendable () -> Void = {},
+    retryStore: @escaping @Sendable () -> Void = {}
   ) {
     self.loadIdentity = loadIdentity
     self.resetTLSIdentity = resetTLSIdentity
@@ -73,6 +116,12 @@ struct ViewerRuntimeDependencies: @unchecked Sendable {
     self.cleanupTimeoutNanoseconds = cleanupTimeoutNanoseconds
     self.scheduler = scheduler
     self.makeHandoffOwner = makeHandoffOwner
+    self.loadStorageConfiguration = loadStorageConfiguration
+    self.saveStorageConfiguration = saveStorageConfiguration
+    self.loadStoreStatus = loadStoreStatus
+    self.observeStoreStatus = observeStoreStatus
+    self.runStoreCleanup = runStoreCleanup
+    self.retryStore = retryStore
   }
 }
 

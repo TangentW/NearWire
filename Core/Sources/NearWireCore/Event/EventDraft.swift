@@ -77,3 +77,13 @@ import Foundation
     case causality
   }
 }
+
+extension EventDraft: CustomReflectable, CustomStringConvertible,
+  CustomDebugStringConvertible
+{
+  public var description: String { "EventDraft(redacted)" }
+  public var debugDescription: String { description }
+  public var customMirror: Mirror {
+    Mirror(self, children: [:], displayStyle: .struct)
+  }
+}

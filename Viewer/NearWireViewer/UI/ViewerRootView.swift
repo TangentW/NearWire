@@ -41,6 +41,7 @@ struct ViewerRootView: View {
       .font(.caption).foregroundStyle(.secondary)
       Toggle("Require approval for new devices", isOn: $model.requiresApproval)
         .accessibilityHint("New devices wait for explicit acceptance before session handoff.")
+      ViewerStorageSettings(model: model)
     }
     .padding(20)
   }
@@ -151,6 +152,74 @@ struct ViewerRootView: View {
   private var isPaused: Bool {
     guard case .listening(_, let paused) = model.status else { return false }
     return paused
+  }
+}
+
+private struct ViewerStorageSettings: View {
+  @ObservedObject var model: ViewerApplicationModel
+  @State private var capacityGiB: String = ""
+  @State private var retentionDays: String = ""
+  @State private var validationMessage: String?
+
+  var body: some View {
+    DisclosureGroup("Local storage") {
+      VStack(alignment: .leading, spacing: 10) {
+        HStack {
+          TextField("Capacity in GiB", text: $capacityGiB)
+            .frame(width: 140)
+            .accessibilityLabel("Local history capacity in GiB")
+          TextField("History retention in days", text: $retentionDays)
+            .frame(width: 190)
+            .accessibilityLabel("Local history retention in days")
+          Button("Save") {
+            validationMessage =
+              model.updateStorage(
+                capacityGiB: capacityGiB,
+                historyRetentionDays: retentionDays
+              ) ? nil : "Capacity or history retention is outside the supported range."
+          }
+          Button("Clean Up Now") { model.cleanUpStorage() }
+          Button("Retry Storage") { model.retryStorage() }
+            .disabled(model.storeStatus.state == .available)
+        }
+        Text(
+          "State: \(model.storeStatus.state.rawValue) · Last cleanup: \(model.storeStatus.lastCleanupCategory.rawValue) · Logical quota: \(format(model.storeStatus.logicalQuotaBytes)) / \(format(model.storeStatus.capacityBytes)) · Allocated files: \(format(model.storeStatus.allocatedFootprintBytes)) · Pinned estimate: \(format(model.storeStatus.pinnedQuotaBytes))"
+        )
+        .font(.caption).foregroundStyle(.secondary)
+        Text(oldestHistorySummary)
+          .font(.caption).foregroundStyle(.secondary)
+        Text(
+          "History retention is separate from Event TTL. Deletion is logical first; secure_delete reduces remnants but does not guarantee secure erasure from storage media or backups."
+        )
+        .font(.caption).foregroundStyle(.secondary)
+        if let validationMessage {
+          Text(validationMessage).foregroundStyle(.red).font(.caption)
+        }
+      }
+      .padding(.top, 8)
+      .onAppear {
+        capacityGiB = String(model.storageConfiguration.capacityBytes / 1_024 / 1_024 / 1_024)
+        retentionDays = String(model.storageConfiguration.historyRetentionDays)
+        model.refreshStoreStatus()
+      }
+    }
+  }
+
+  private var oldestHistorySummary: String {
+    guard let milliseconds = model.storeStatus.oldestHistoryMilliseconds else {
+      return "Oldest retained history: none · Estimated retention: unavailable"
+    }
+    let date = Date(timeIntervalSince1970: TimeInterval(milliseconds) / 1_000)
+    let duration =
+      model.storeStatus.estimatedRetainedDurationMilliseconds
+      .map { String(format: "%.1f days", Double($0) / 86_400_000) }
+      ?? "unavailable"
+    return
+      "Oldest retained Event: \(date.formatted(date: .abbreviated, time: .shortened)) · Estimated retained duration: \(duration)"
+  }
+
+  private func format(_ bytes: Int64) -> String {
+    ByteCountFormatter.string(fromByteCount: bytes, countStyle: .binary)
   }
 }
 

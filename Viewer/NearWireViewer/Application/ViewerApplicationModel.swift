@@ -18,6 +18,8 @@ final class ViewerApplicationModel: ObservableObject {
   @Published private(set) var sessions: [ViewerSessionSnapshot] = []
   @Published var selectedRoute: ViewerLogicalRoute?
   @Published var showsFullIdentityResetConfirmation = false
+  @Published private(set) var storageConfiguration: ViewerStorageConfiguration
+  @Published private(set) var storeStatus: ViewerStoreStatus
   @Published var requiresApproval: Bool {
     didSet {
       preferences.setRequiresApproval(requiresApproval)
@@ -39,6 +41,7 @@ final class ViewerApplicationModel: ObservableObject {
   private var pendingCoalescer: ViewerPendingCoalescer?
   private var sessionCoalescer: ViewerSessionSnapshotCoalescer?
   private var sessionManager: ViewerMultiDeviceSessionManager?
+  private var storeStatusRefreshGeneration: UInt64 = 0
   private lazy var admissionManager = ViewerAdmissionManager(onPending: { _ in })
 
   init(
@@ -48,7 +51,23 @@ final class ViewerApplicationModel: ObservableObject {
     self.preferences = preferences
     self.dependencies = dependencies
     requiresApproval = preferences.requiresApproval()
+    let storageConfiguration = dependencies.loadStorageConfiguration()
+    self.storageConfiguration = storageConfiguration
+    storeStatus = ViewerStoreStatus(
+      state: .unavailable,
+      capacityBytes: storageConfiguration.capacityBytes,
+      logicalQuotaBytes: 0,
+      allocatedFootprintBytes: 0,
+      oldestHistoryMilliseconds: nil,
+      pinnedQuotaBytes: 0,
+      estimatedRetainedDurationMilliseconds: nil,
+      lastCleanupCategory: .none
+    )
     admissionManager.setRequiresApproval(requiresApproval)
+    dependencies.observeStoreStatus { [weak self] in
+      Task { @MainActor [weak self] in self?.refreshStoreStatus() }
+    }
+    refreshStoreStatus()
   }
 
   func openWindow() {
@@ -117,6 +136,49 @@ final class ViewerApplicationModel: ObservableObject {
   func updateSelectedNickname(_ nickname: String) -> Bool {
     guard let route = selectedRoute else { return false }
     return sessionManager?.setNickname(nickname.isEmpty ? nil : nickname, route: route) ?? false
+  }
+
+  func updateStorage(capacityGiB: String, historyRetentionDays: String) -> Bool {
+    guard let gibibytes = Int64(capacityGiB), let days = Int(historyRetentionDays),
+      gibibytes > 0
+    else { return false }
+    let (mebibytes, firstOverflow) = gibibytes.multipliedReportingOverflow(by: 1_024)
+    let (kibibytes, secondOverflow) = mebibytes.multipliedReportingOverflow(by: 1_024)
+    let (bytes, thirdOverflow) = kibibytes.multipliedReportingOverflow(by: 1_024)
+    guard !firstOverflow, !secondOverflow, !thirdOverflow,
+      let value = try? ViewerStorageConfiguration(
+        capacityBytes: bytes,
+        historyRetentionDays: days
+      )
+    else { return false }
+    dependencies.saveStorageConfiguration(value)
+    storageConfiguration = value
+    refreshStoreStatus()
+    return true
+  }
+
+  func cleanUpStorage() {
+    dependencies.runStoreCleanup()
+  }
+
+  func retryStorage() {
+    dependencies.retryStore()
+    refreshStoreStatus()
+  }
+
+  func refreshStoreStatus() {
+    storeStatusRefreshGeneration =
+      storeStatusRefreshGeneration == UInt64.max
+      ? 1 : storeStatusRefreshGeneration + 1
+    let generation = storeStatusRefreshGeneration
+    let load = dependencies.loadStoreStatus
+    Task { [weak self] in
+      let value = await Task.detached(operation: load).value
+      guard !Task.isCancelled, let self,
+        self.storeStatusRefreshGeneration == generation
+      else { return }
+      self.storeStatus = value
+    }
   }
 
   var selectedSession: ViewerSessionSnapshot? {

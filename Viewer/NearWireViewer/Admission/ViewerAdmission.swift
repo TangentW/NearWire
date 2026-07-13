@@ -52,6 +52,14 @@ struct ViewerAdmissionSessionContext: Sendable {
   let receiveChunkBytes: Int
 }
 
+extension ViewerAdmissionSessionContext: CustomReflectable, CustomStringConvertible,
+  CustomDebugStringConvertible
+{
+  var description: String { "ViewerAdmissionSessionContext(redacted)" }
+  var debugDescription: String { description }
+  var customMirror: Mirror { Mirror(self, children: [:], displayStyle: .struct) }
+}
+
 struct ViewerSessionIngressLimits: Sendable {
   static let maximumFramesPerTurn = 64
   static let maximumRetainedInputBytes = 19 * 1_024 * 1_024
@@ -136,8 +144,12 @@ enum ViewerCleanupOutcome: Equatable, Sendable {
   case timedOut
 }
 
-final class ViewerCleanupReceipt: @unchecked Sendable {
-  private final class Race: @unchecked Sendable {
+final class ViewerCleanupReceipt: @unchecked Sendable, CustomReflectable,
+  CustomStringConvertible, CustomDebugStringConvertible
+{
+  private final class Race: @unchecked Sendable, CustomReflectable,
+    CustomStringConvertible, CustomDebugStringConvertible
+  {
     private let lock = NSLock()
     private var continuation: CheckedContinuation<ViewerCleanupOutcome, Never>?
     private var result: ViewerCleanupOutcome?
@@ -165,6 +177,10 @@ final class ViewerCleanupReceipt: @unchecked Sendable {
       lock.unlock()
       continuation?.resume(returning: result)
     }
+
+    var description: String { "ViewerCleanupRace(redacted)" }
+    var debugDescription: String { description }
+    var customMirror: Mirror { Mirror(self, children: [:], displayStyle: .class) }
   }
 
   private let cleanup: Task<Void, Never>
@@ -195,9 +211,15 @@ final class ViewerCleanupReceipt: @unchecked Sendable {
       race.install(continuation)
     }
   }
+
+  var description: String { "ViewerCleanupReceipt(redacted)" }
+  var debugDescription: String { description }
+  var customMirror: Mirror { Mirror(self, children: [:], displayStyle: .class) }
 }
 
-final class ViewerAdmissionBudget: @unchecked Sendable {
+final class ViewerAdmissionBudget: @unchecked Sendable, CustomReflectable,
+  CustomStringConvertible, CustomDebugStringConvertible
+{
   struct Reservation: Hashable, Sendable {
     fileprivate let id: UUID
   }
@@ -232,9 +254,15 @@ final class ViewerAdmissionBudget: @unchecked Sendable {
     defer { lock.unlock() }
     return reservations.count
   }
+
+  var description: String { "ViewerAdmissionBudget(redacted)" }
+  var debugDescription: String { description }
+  var customMirror: Mirror { Mirror(self, children: [:], displayStyle: .class) }
 }
 
-final class ViewerAdmissionHandle: @unchecked Sendable {
+final class ViewerAdmissionHandle: @unchecked Sendable, CustomReflectable,
+  CustomStringConvertible, CustomDebugStringConvertible
+{
   let connectionCore: ViewerAdmissionConnectionCore
   private let cleanup: ViewerAdmissionAttemptCleanup
   private let lock = NSLock()
@@ -274,9 +302,15 @@ final class ViewerAdmissionHandle: @unchecked Sendable {
   }
 
   deinit { cancel() }
+
+  var description: String { "ViewerAdmissionHandle(redacted)" }
+  var debugDescription: String { description }
+  var customMirror: Mirror { Mirror(self, children: [:], displayStyle: .class) }
 }
 
-final class ViewerAdmissionConnectionCore: @unchecked Sendable {
+final class ViewerAdmissionConnectionCore: @unchecked Sendable, CustomReflectable,
+  CustomStringConvertible, CustomDebugStringConvertible
+{
   enum CoreError: Error {
     case invalidState
     case invalidPeer
@@ -738,9 +772,15 @@ final class ViewerAdmissionConnectionCore: @unchecked Sendable {
     }
     return try queue.sync(execute: operation)
   }
+
+  var description: String { "ViewerAdmissionConnectionCore(redacted)" }
+  var debugDescription: String { description }
+  var customMirror: Mirror { Mirror(self, children: [:], displayStyle: .class) }
 }
 
-private final class ViewerAdmissionWeakIngress: @unchecked Sendable {
+private final class ViewerAdmissionWeakIngress: @unchecked Sendable, CustomReflectable,
+  CustomStringConvertible, CustomDebugStringConvertible
+{
   private let lock = NSLock()
   private weak var core: ViewerAdmissionConnectionCore?
 
@@ -756,9 +796,15 @@ private final class ViewerAdmissionWeakIngress: @unchecked Sendable {
     lock.unlock()
     core?.receive(event)
   }
+
+  var description: String { "ViewerAdmissionWeakIngress(redacted)" }
+  var debugDescription: String { description }
+  var customMirror: Mirror { Mirror(self, children: [:], displayStyle: .class) }
 }
 
-private final class ViewerAdmissionCleanupRegistry: @unchecked Sendable {
+private final class ViewerAdmissionCleanupRegistry: @unchecked Sendable, CustomReflectable,
+  CustomStringConvertible, CustomDebugStringConvertible
+{
   private let lock = NSLock()
   private var owners: [UUID: ViewerAdmissionAttemptCleanup] = [:]
   private var waiters: [CheckedContinuation<Void, Never>] = []
@@ -794,9 +840,15 @@ private final class ViewerAdmissionCleanupRegistry: @unchecked Sendable {
       }
     }
   }
+
+  var description: String { "ViewerAdmissionCleanupRegistry(redacted)" }
+  var debugDescription: String { description }
+  var customMirror: Mirror { Mirror(self, children: [:], displayStyle: .class) }
 }
 
-private final class ViewerAdmissionAttemptCleanup: @unchecked Sendable {
+private final class ViewerAdmissionAttemptCleanup: @unchecked Sendable, CustomReflectable,
+  CustomStringConvertible, CustomDebugStringConvertible
+{
   private let lock = NSLock()
   private let onComplete: @Sendable () -> Void
   private var claimFinished = false
@@ -897,6 +949,10 @@ private final class ViewerAdmissionAttemptCleanup: @unchecked Sendable {
     completionPublished = true
     return true
   }
+
+  var description: String { "ViewerAdmissionAttemptCleanup(redacted)" }
+  var debugDescription: String { description }
+  var customMirror: Mirror { Mirror(self, children: [:], displayStyle: .class) }
 }
 
 protocol ViewerAdmissionHandoffOwning: Sendable {
@@ -904,7 +960,9 @@ protocol ViewerAdmissionHandoffOwning: Sendable {
   func beginShutdown() -> Task<Void, Never>
 }
 
-final class ViewerPlaceholderHandoffOwner: ViewerAdmissionHandoffOwning, @unchecked Sendable {
+final class ViewerPlaceholderHandoffOwner: ViewerAdmissionHandoffOwning, @unchecked Sendable,
+  CustomReflectable, CustomStringConvertible, CustomDebugStringConvertible
+{
   private let lock = NSLock()
   private var shuttingDown = false
   private var active: Set<UUID> = []
@@ -964,12 +1022,20 @@ final class ViewerPlaceholderHandoffOwner: ViewerAdmissionHandoffOwning, @unchec
       }
     }
   }
+
+  var description: String { "ViewerPlaceholderHandoffOwner(redacted)" }
+  var debugDescription: String { description }
+  var customMirror: Mirror { Mirror(self, children: [:], displayStyle: .class) }
 }
 
-final class ViewerAdmissionManager: @unchecked Sendable {
+final class ViewerAdmissionManager: @unchecked Sendable, CustomReflectable,
+  CustomStringConvertible, CustomDebugStringConvertible
+{
   typealias PendingHandler = @Sendable ([ViewerPendingAppSummary]) -> Void
 
-  private final class Attempt: @unchecked Sendable {
+  private final class Attempt: @unchecked Sendable, CustomReflectable,
+    CustomStringConvertible, CustomDebugStringConvertible
+  {
     let id: UUID
     let generation: UUID
     let reservation: ViewerAdmissionBudget.Reservation
@@ -991,6 +1057,10 @@ final class ViewerAdmissionManager: @unchecked Sendable {
       self.core = core
       self.cleanup = cleanup
     }
+
+    var description: String { "ViewerAdmissionAttempt(redacted)" }
+    var debugDescription: String { description }
+    var customMirror: Mirror { Mirror(self, children: [:], displayStyle: .class) }
   }
 
   static let maximumAttempts = 32
@@ -1297,4 +1367,16 @@ final class ViewerAdmissionManager: @unchecked Sendable {
       attempt.cleanup.beginCoreCleanup(attempt.core, cancel: true)
     }
   }
+
+  var description: String { "ViewerAdmissionManager(redacted)" }
+  var debugDescription: String { description }
+  var customMirror: Mirror { Mirror(self, children: [:], displayStyle: .class) }
+}
+
+extension ViewerAdmissionBudget.Reservation: CustomReflectable, CustomStringConvertible,
+  CustomDebugStringConvertible
+{
+  var description: String { "ViewerAdmissionReservation(redacted)" }
+  var debugDescription: String { description }
+  var customMirror: Mirror { Mirror(self, children: [:], displayStyle: .struct) }
 }

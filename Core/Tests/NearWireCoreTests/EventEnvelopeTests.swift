@@ -4,6 +4,32 @@ import XCTest
 @_spi(NearWireInternal) @testable import NearWireCore
 
 final class EventEnvelopeTests: XCTestCase {
+  func testEnvelopeAndContextReflectionAreContentFree() throws {
+    let secret = "nearwire-envelope-secret"
+    let draft = try EventDraft(
+      type: EventType.user("test.reflection"),
+      content: .object(["secret": .string(secret)])
+    )
+    let envelope = try makeEnvelope(content: .object(["secret": .string(secret)]))
+    let context = try EventEnvelopeContext(
+      source: envelope.source,
+      target: envelope.target,
+      direction: envelope.direction,
+      sessionEpoch: envelope.sessionEpoch,
+      sequence: envelope.sequence
+    )
+
+    for value: Any in [draft, envelope, context] {
+      XCTAssertFalse(String(describing: value).contains(secret))
+      XCTAssertFalse(String(reflecting: value).contains(secret))
+      XCTAssertFalse(
+        Mirror(reflecting: value).children.contains {
+          String(reflecting: $0.value).contains(secret)
+        }
+      )
+    }
+  }
+
   func testDraftCodableRoundTripUsesCompactContentAndCustomLimits() throws {
     let permissive = try EventValidationLimits(maximumTTLMilliseconds: 172_800_000)
     let correlation = try EventID(rawValue: "123e4567-e89b-12d3-a456-426614174000")

@@ -5,6 +5,40 @@ import XCTest
 @_spi(NearWireInternal) @testable import NearWireTransport
 
 final class WireEventTests: XCTestCase {
+  func testEventWireCarrierReflectionIsContentFree() throws {
+    let secret = "nearwire-wire-secret"
+    let envelope = try makeWireTestEvent(content: .object(["secret": .string(secret)]))
+    let record = try WireEventRecord(
+      envelope: envelope,
+      nowOnOriginClockNanoseconds: 1_250_000_000
+    )
+    let payload = WireEventPayload(record: record)
+    let batch = try WireEventBatchPayload(records: [record])
+    let encoded = try WireMessageCodec.encode(payload, version: .v1)
+    var frame: WireFrame?
+    var decoder = WireFrameDecoder()
+    try decoder.consume(encoded) { frame = $0 }
+    let decodedFrame = try XCTUnwrap(frame)
+    let message = try WireMessage.decode(from: decodedFrame)
+
+    let app = try makeHello(role: .app)
+    let viewer = try makeHello(role: .viewer)
+    let codec = try WireSessionCodec(
+      negotiation: WireNegotiator.negotiate(local: app, remote: viewer)
+    )
+    let admitted = try codec.decode(frame: decodedFrame, phase: .active)
+
+    for value: Any in [record, payload, batch, decodedFrame, decoder, message, admitted] {
+      XCTAssertFalse(String(describing: value).contains(secret))
+      XCTAssertFalse(String(reflecting: value).contains(secret))
+      XCTAssertFalse(
+        Mirror(reflecting: value).children.contains {
+          String(reflecting: $0.value).contains(secret)
+        }
+      )
+    }
+  }
+
   func testMaximumEventRecordBoundCoversAdversarialProductionEncodings() throws {
     let maximum = try WireEventRecord.maximumDeterministicEncodedByteCount()
     let values: [JSONValue] = [

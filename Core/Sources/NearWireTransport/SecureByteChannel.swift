@@ -12,6 +12,23 @@ import Network
   case terminated(SecureTransportError)
 }
 
+extension SecureByteChannelEvent: CustomReflectable, CustomStringConvertible,
+  CustomDebugStringConvertible
+{
+  public var description: String {
+    switch self {
+    case .stateChanged: return "SecureByteChannelEvent.stateChanged"
+    case .received(let data): return "SecureByteChannelEvent.received(bytes: \(data.count))"
+    case .sendCompleted(let byteCount):
+      return "SecureByteChannelEvent.sendCompleted(bytes: \(byteCount))"
+    case .terminated: return "SecureByteChannelEvent.terminated"
+    }
+  }
+
+  public var debugDescription: String { description }
+  public var customMirror: Mirror { Mirror(self, children: [:], displayStyle: .enum) }
+}
+
 @_spi(NearWireInternal) public final class SecureReceivePauseToken: @unchecked Sendable {
   private let lock = NSLock()
   private var resolution: (@Sendable (Bool) -> Void)?
@@ -37,6 +54,14 @@ import Network
   }
 
   deinit { cancel() }
+}
+
+extension SecureReceivePauseToken: CustomReflectable, CustomStringConvertible,
+  CustomDebugStringConvertible
+{
+  public var description: String { "SecureReceivePauseToken(redacted)" }
+  public var debugDescription: String { description }
+  public var customMirror: Mirror { Mirror(self, children: [:], displayStyle: .class) }
 }
 
 @_spi(NearWireInternal) public struct SecureByteChannelCapacitySnapshot: Equatable, Sendable {
@@ -411,7 +436,19 @@ protocol SecureConnectionDriving: AnyObject, Sendable {
 
 }
 
-private final class SecureReceivePauseGate: @unchecked Sendable {
+extension SecureByteChannel: CustomReflectable, CustomStringConvertible,
+  CustomDebugStringConvertible
+{
+  public nonisolated var description: String { "SecureByteChannel(redacted)" }
+  public nonisolated var debugDescription: String { description }
+  public nonisolated var customMirror: Mirror {
+    Mirror(self, children: [:], displayStyle: .class)
+  }
+}
+
+private final class SecureReceivePauseGate: @unchecked Sendable, CustomReflectable,
+  CustomStringConvertible, CustomDebugStringConvertible
+{
   struct Claim: Sendable {
     let generation: UInt64
     let id: UUID
@@ -502,12 +539,26 @@ private final class SecureReceivePauseGate: @unchecked Sendable {
     pausedClaim = nil
     lock.unlock()
   }
+
+  var description: String { "SecureReceivePauseGate(redacted)" }
+  var debugDescription: String { description }
+  var customMirror: Mirror { Mirror(self, children: [:], displayStyle: .class) }
 }
 
-private final class SecureSendMailbox: @unchecked Sendable {
-  struct Item: Sendable {
+private final class SecureSendMailbox: @unchecked Sendable, CustomReflectable,
+  CustomStringConvertible, CustomDebugStringConvertible
+{
+  struct Item: Sendable, CustomReflectable, CustomStringConvertible,
+    CustomDebugStringConvertible
+  {
     let token: UInt64
     let data: Data
+
+    var description: String { "SecureSendMailbox.Item(bytes: \(data.count))" }
+    var debugDescription: String { description }
+    var customMirror: Mirror {
+      Mirror(self, children: ["byteCount": data.count], displayStyle: .struct)
+    }
   }
 
   private let lock = NSLock()
@@ -735,6 +786,10 @@ private final class SecureSendMailbox: @unchecked Sendable {
       progressGeneration += 1
     }
   }
+
+  var description: String { "SecureSendMailbox(redacted)" }
+  var debugDescription: String { description }
+  var customMirror: Mirror { Mirror(self, children: [:], displayStyle: .class) }
 }
 
 @_spi(NearWireInternal) public enum SecureAppTransport {
@@ -766,6 +821,24 @@ private final class SecureSendMailbox: @unchecked Sendable {
   case incoming(SecureViewerIncomingConnection)
   case failed(SecureTransportError)
   case cancelled
+}
+
+extension SecureViewerListenerEvent: CustomReflectable, CustomStringConvertible,
+  CustomDebugStringConvertible
+{
+  public var description: String {
+    switch self {
+    case .ready: return "SecureViewerListenerEvent.ready"
+    case .serviceRegistered: return "SecureViewerListenerEvent.serviceRegistered"
+    case .serviceRemoved: return "SecureViewerListenerEvent.serviceRemoved"
+    case .incoming: return "SecureViewerListenerEvent.incoming"
+    case .failed: return "SecureViewerListenerEvent.failed"
+    case .cancelled: return "SecureViewerListenerEvent.cancelled"
+    }
+  }
+
+  public var debugDescription: String { description }
+  public var customMirror: Mirror { Mirror(self, children: [:], displayStyle: .enum) }
 }
 
 @_spi(NearWireInternal) public struct SecureViewerServiceAdvertisement: Equatable, Sendable {
@@ -832,7 +905,10 @@ private final class SecureSendMailbox: @unchecked Sendable {
   }
 }
 
-@_spi(NearWireInternal) public final class SecureViewerListener: @unchecked Sendable {
+@_spi(NearWireInternal)
+public final class SecureViewerListener: @unchecked Sendable,
+  CustomReflectable, CustomStringConvertible, CustomDebugStringConvertible
+{
   public typealias EventHandler = @Sendable (SecureViewerListenerEvent) -> Void
 
   private let listener: NWListener
@@ -1028,16 +1104,23 @@ private final class SecureSendMailbox: @unchecked Sendable {
     listener.cancel()
     handler?(.failed(error))
   }
+
+  public var description: String { "SecureViewerListener(redacted)" }
+  public var debugDescription: String { description }
+  public var customMirror: Mirror { Mirror(self, children: [:], displayStyle: .class) }
 }
 
-@_spi(NearWireInternal) public final class SecureViewerIncomingConnection: @unchecked Sendable {
+@_spi(NearWireInternal)
+public final class SecureViewerIncomingConnection: @unchecked Sendable,
+  CustomReflectable, CustomStringConvertible, CustomDebugStringConvertible
+{
   private let connection: NWConnection
   private let limits: SecureTransportLimits
   private let admissionGate: SecureViewerAdmissionGate
   private let lock = NSLock()
   private var claimed = false
 
-  fileprivate init(
+  init(
     connection: NWConnection,
     limits: SecureTransportLimits,
     admissionGate: SecureViewerAdmissionGate
@@ -1102,9 +1185,15 @@ private final class SecureSendMailbox: @unchecked Sendable {
     lock.unlock()
     connection.cancel()
   }
+
+  public var description: String { "SecureViewerIncomingConnection(redacted)" }
+  public var debugDescription: String { description }
+  public var customMirror: Mirror { Mirror(self, children: [:], displayStyle: .class) }
 }
 
-final class SecureViewerAdmissionGate: @unchecked Sendable {
+final class SecureViewerAdmissionGate: @unchecked Sendable, CustomReflectable,
+  CustomStringConvertible, CustomDebugStringConvertible
+{
   private let lock = NSLock()
   private var open = true
 
@@ -1127,9 +1216,15 @@ final class SecureViewerAdmissionGate: @unchecked Sendable {
     guard open else { return nil }
     return claim()
   }
+
+  var description: String { "SecureViewerAdmissionGate(redacted)" }
+  var debugDescription: String { description }
+  var customMirror: Mirror { Mirror(self, children: [:], displayStyle: .class) }
 }
 
-private final class SecureCallbackIngress: @unchecked Sendable {
+private final class SecureCallbackIngress: @unchecked Sendable, CustomReflectable,
+  CustomStringConvertible, CustomDebugStringConvertible
+{
   private let lock = NSLock()
   private var tail: Task<Void, Never>?
 
@@ -1143,6 +1238,10 @@ private final class SecureCallbackIngress: @unchecked Sendable {
     tail = task
     lock.unlock()
   }
+
+  var description: String { "SecureCallbackIngress(redacted)" }
+  var debugDescription: String { description }
+  var customMirror: Mirror { Mirror(self, children: [:], displayStyle: .class) }
 }
 
 enum SecureSendAdmission {

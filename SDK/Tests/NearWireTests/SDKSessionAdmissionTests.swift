@@ -995,7 +995,10 @@ final class SDKSessionAdmissionTests: XCTestCase {
 
     fixture.driver.completeNextSend()
     await sessionWaitUntil {
-      await attachment.transportCore.snapshot().outboundTurnStarts > blockedTurns
+      let snapshot = await attachment.transportCore.snapshot()
+      return snapshot.outboundTurnStarts > blockedTurns
+        && snapshot.isOutboundTransportBlocked
+        && !snapshot.hasOutboundDrain
     }
     let stillBlockedTurns = await attachment.transportCore.snapshot().outboundTurnStarts
     let stillBlockedEntries = operationEntries.snapshot.count
