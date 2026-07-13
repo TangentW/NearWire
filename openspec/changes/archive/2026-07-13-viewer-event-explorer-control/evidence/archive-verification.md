@@ -51,7 +51,13 @@ Configured distribution signing and inspection of entitlements embedded in a sig
 deferred by product-owner decision to Goal-level `release-hardening`. The archive does not claim
 that deferred gate passed.
 
-## Commit gate
+## Commit closure
 
-The archived source, canonical specifications, and preserved evidence are ready for the required
-change commit. Task 7.3 remains unchecked until that commit exists.
+The archived source, canonical specifications, and preserved evidence were committed as:
+
+```text
+ee08120 feat(viewer): add event explorer and control workspace
+```
+
+Task 7.3 was checked only after that commit existed. The Event Explorer change is therefore fully
+audited, archived, verified, and committed before `viewer-performance-dashboard` begins.

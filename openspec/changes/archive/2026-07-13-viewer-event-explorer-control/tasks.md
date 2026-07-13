@@ -52,4 +52,4 @@
 
 - [x] 7.1 Obtain independent architecture/API, correctness/testing, and security/performance/documentation implementation reviews and save each report.
 - [x] 7.2 Fix every actionable finding, rerun affected and complete validation, and repeat all three review dimensions until a fresh round reports zero unresolved findings.
-- [ ] 7.3 Complete a requirement-to-evidence audit, archive `viewer-event-explorer-control`, verify canonical specs and archived evidence, and commit the completed change before starting `viewer-performance-dashboard`.
+- [x] 7.3 Complete a requirement-to-evidence audit, archive `viewer-event-explorer-control`, verify canonical specs and archived evidence, and commit the completed change before starting `viewer-performance-dashboard`.
