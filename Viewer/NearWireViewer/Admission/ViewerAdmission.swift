@@ -189,6 +189,17 @@ final class ViewerCleanupReceipt: @unchecked Sendable, CustomReflectable,
     self.cleanup = cleanup
   }
 
+  func joining(_ other: Task<Void, Never>) -> ViewerCleanupReceipt {
+    let cleanup = self.cleanup
+    return ViewerCleanupReceipt(
+      cleanup: Task {
+        async let first: Void = cleanup.value
+        async let second: Void = other.value
+        _ = await (first, second)
+      }
+    )
+  }
+
   func wait(
     timeoutNanoseconds: UInt64,
     scheduler: ViewerAdmissionScheduler = .live
@@ -955,7 +966,7 @@ private final class ViewerAdmissionAttemptCleanup: @unchecked Sendable, CustomRe
   var customMirror: Mirror { Mirror(self, children: [:], displayStyle: .class) }
 }
 
-protocol ViewerAdmissionHandoffOwning: Sendable {
+protocol ViewerAdmissionHandoffOwning: AnyObject, Sendable {
   func transfer(_ handle: ViewerAdmissionHandle) -> Bool
   func beginShutdown() -> Task<Void, Never>
 }

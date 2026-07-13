@@ -9,7 +9,10 @@ struct NearWireViewerApp: App {
   var body: some Scene {
     Window("NearWire", id: "main") {
       ViewerRootView(model: model)
-        .frame(minWidth: 760, minHeight: 520)
+        .frame(
+          minWidth: ViewerWorkspaceLayout.minimumWindowWidth,
+          minHeight: ViewerWorkspaceLayout.minimumWindowHeight
+        )
         .onAppear {
           appDelegate.configure(model: model)
           if !ViewerLaunchContext.isRunningUnitTests {

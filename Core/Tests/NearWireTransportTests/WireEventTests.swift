@@ -5,6 +5,33 @@ import XCTest
 @_spi(NearWireInternal) @testable import NearWireTransport
 
 final class WireEventTests: XCTestCase {
+  func testRecordPrecomputesCanonicalContentAndCarriesItToReceiverAdmission() throws {
+    let content = JSONValue.object([
+      "nested": .array([.string("precomputed-content"), .integer(42)])
+    ])
+    let record = try WireEventRecord(
+      envelope: makeWireTestEvent(content: content),
+      nowOnOriginClockNanoseconds: 1_250_000_000
+    )
+    let canonicalContent = try content.deterministicData()
+    XCTAssertEqual(record.canonicalContentData, canonicalContent)
+    XCTAssertEqual(
+      record.precomputedDeterministicEncodedByteCount,
+      try record.jsonValue().deterministicData().count
+    )
+    XCTAssertEqual(
+      try record.deterministicEncodedByteCount(),
+      record.precomputedDeterministicEncodedByteCount
+    )
+
+    let received = try record.receiverEvent(receivedAtNanoseconds: 2_000_000_000)
+    XCTAssertEqual(received.canonicalContentData, canonicalContent)
+    XCTAssertEqual(
+      received.deterministicEncodedByteCount,
+      record.precomputedDeterministicEncodedByteCount
+    )
+  }
+
   func testEventWireCarrierReflectionIsContentFree() throws {
     let secret = "nearwire-wire-secret"
     let envelope = try makeWireTestEvent(content: .object(["secret": .string(secret)]))

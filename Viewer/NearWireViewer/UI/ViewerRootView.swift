@@ -1,16 +1,52 @@
 import SwiftUI
 
+enum ViewerWorkspaceRegion: String, CaseIterable, Equatable, Sendable {
+  case sourceAndDevices
+  case eventTimeline
+  case eventInspector
+  case controlComposer
+}
+
+enum ViewerWorkspaceLayout {
+  static let regions = ViewerWorkspaceRegion.allCases
+  static let minimumWindowWidth: CGFloat = 1_000
+  static let minimumWindowHeight: CGFloat = 640
+  static let sourceMinimumWidth: CGFloat = 220
+  static let sourceIdealWidth: CGFloat = 260
+  static let sourceMaximumWidth: CGFloat = 360
+  static let timelineMinimumWidth: CGFloat = 340
+  static let timelineIdealWidth: CGFloat = 500
+  static let inspectorMinimumWidth: CGFloat = 280
+  static let inspectorIdealWidth: CGFloat = 360
+  static let composerMinimumHeight: CGFloat = 240
+  static let composerIdealHeight: CGFloat = 300
+  static let composerMaximumHeight: CGFloat = 460
+}
+
 struct ViewerRootView: View {
   @ObservedObject var model: ViewerApplicationModel
+  @State private var showsDeviceDetails = false
 
   var body: some View {
     VStack(spacing: 0) {
       pairingHeader
       Divider()
       HSplitView {
-        deviceSidebar.frame(minWidth: 240, idealWidth: 280)
-        deviceWorkspace.frame(minWidth: 460)
+        sourceAndDeviceSidebar
+          .frame(
+            minWidth: ViewerWorkspaceLayout.sourceMinimumWidth,
+            idealWidth: ViewerWorkspaceLayout.sourceIdealWidth,
+            maxWidth: ViewerWorkspaceLayout.sourceMaximumWidth
+          )
+          .accessibilityIdentifier("nearwire.workspace.source-devices")
+        eventWorkspace
       }
+    }
+    .sheet(isPresented: $showsDeviceDetails) {
+      deviceDetailsSheet
+    }
+    .onChange(of: model.selectedRoute) { route in
+      if route == nil { showsDeviceDetails = false }
     }
   }
 
@@ -79,17 +115,59 @@ struct ViewerRootView: View {
     }
   }
 
-  private var deviceSidebar: some View {
-    VStack(alignment: .leading, spacing: 12) {
-      Text("Devices").font(.headline)
-      if model.sessions.isEmpty {
-        ViewerEmptyState(
-          title: "No Connected Devices",
-          systemImage: "iphone",
-          description: "Nearby Apps using this pairing code will appear here."
-        )
-      } else {
-        List(selection: $model.selectedRoute) {
+  @ViewBuilder
+  private var sourceAndDeviceSidebar: some View {
+    if let explorer = model.explorerController {
+      ViewerExplorerSidebarView(
+        application: model,
+        explorer: explorer,
+        showsDeviceDetails: $showsDeviceDetails
+      )
+    } else {
+      sourceAndDevicePlaceholder
+    }
+  }
+
+  private var sourceAndDevicePlaceholder: some View {
+    VStack(alignment: .leading, spacing: 0) {
+      HStack {
+        Text("Sources & Devices").font(.headline)
+        Spacer()
+        Text("\(model.sessions.count)")
+          .font(.caption.monospacedDigit())
+          .foregroundStyle(.secondary)
+          .accessibilityLabel("\(model.sessions.count) device rows")
+      }
+      .padding(.horizontal, 14)
+      .padding(.vertical, 12)
+      Divider()
+      List(selection: $model.selectedRoute) {
+        Section("Current Source") {
+          HStack(spacing: 10) {
+            Image(systemName: liveSourceIcon)
+              .foregroundStyle(liveSourceTint)
+              .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+              Text("Live")
+              Text(liveSourceStatus)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+          }
+          .accessibilityElement(children: .combine)
+          .accessibilityLabel("Live source, \(liveSourceStatus)")
+        }
+        Section("History") {
+          Text("Recorded sessions will appear here.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+        Section("Devices") {
+          if model.sessions.isEmpty {
+            Label("No connected or recent Apps", systemImage: "iphone.slash")
+              .font(.caption)
+              .foregroundStyle(.secondary)
+          }
           ForEach(model.sessions) { session in
             VStack(alignment: .leading, spacing: 5) {
               HStack {
@@ -112,35 +190,183 @@ struct ViewerRootView: View {
             .padding(.vertical, 3)
           }
         }
-      }
-      if !model.pendingApps.isEmpty {
-        Divider()
-        Text("Awaiting Approval").font(.headline)
-        ForEach(model.pendingApps) { app in
-          VStack(alignment: .leading, spacing: 6) {
-            Text(app.displayName).font(.headline)
-            Text(app.installationAlias).font(.caption).foregroundStyle(.secondary)
-            HStack {
-              Button("Reject") { model.reject(app.id) }
-              Button("Accept") { model.accept(app.id) }.buttonStyle(.borderedProminent)
+        if !model.pendingApps.isEmpty {
+          Section("Awaiting Approval") {
+            ForEach(model.pendingApps) { app in
+              VStack(alignment: .leading, spacing: 6) {
+                Text(app.displayName).font(.headline)
+                Text(app.installationAlias).font(.caption).foregroundStyle(.secondary)
+                Text(app.compatibilityStatus).font(.caption2).foregroundStyle(.secondary)
+                HStack {
+                  Button("Reject") { model.reject(app.id) }
+                  Button("Accept") { model.accept(app.id) }.buttonStyle(.borderedProminent)
+                }
+              }
+              .padding(.vertical, 3)
             }
           }
         }
       }
+      Divider()
+      Button {
+        showsDeviceDetails = true
+      } label: {
+        Label("Device Settings & Telemetry", systemImage: "slider.horizontal.3")
+          .frame(maxWidth: .infinity)
+      }
+      .buttonStyle(.bordered)
+      .disabled(model.selectedSession == nil)
+      .accessibilityHint(
+        "Opens nickname, rate, queue, throughput, Event counter, and disconnect controls."
+      )
+      .padding(12)
     }
-    .padding(16)
+  }
+
+  private var eventWorkspace: some View {
+    VSplitView {
+      HSplitView {
+        eventTimeline
+          .frame(
+            minWidth: ViewerWorkspaceLayout.timelineMinimumWidth,
+            idealWidth: ViewerWorkspaceLayout.timelineIdealWidth
+          )
+          .accessibilityIdentifier("nearwire.workspace.event-timeline")
+        eventInspector
+          .frame(
+            minWidth: ViewerWorkspaceLayout.inspectorMinimumWidth,
+            idealWidth: ViewerWorkspaceLayout.inspectorIdealWidth
+          )
+          .accessibilityIdentifier("nearwire.workspace.event-inspector")
+      }
+      controlComposer
+        .frame(
+          minHeight: ViewerWorkspaceLayout.composerMinimumHeight,
+          idealHeight: ViewerWorkspaceLayout.composerIdealHeight,
+          maxHeight: ViewerWorkspaceLayout.composerMaximumHeight
+        )
+        .accessibilityIdentifier("nearwire.workspace.control-composer")
+    }
+  }
+
+  private var eventTimeline: some View {
+    Group {
+      if let explorer = model.explorerController {
+        ViewerExplorerTimelineView(explorer: explorer)
+      } else {
+        VStack(spacing: 0) {
+          workspacePaneHeader(title: "Event Timeline", systemImage: "list.bullet.rectangle")
+          Divider()
+          ViewerEmptyState(
+            title: "Runtime Not Ready",
+            systemImage: "clock.arrow.circlepath",
+            description: "The Event explorer appears when the Viewer runtime starts."
+          )
+        }
+      }
+    }
+  }
+
+  private var eventInspector: some View {
+    Group {
+      if let explorer = model.explorerController {
+        ViewerExplorerInspectorView(explorer: explorer)
+      } else {
+        VStack(spacing: 0) {
+          workspacePaneHeader(title: "Event Inspector", systemImage: "sidebar.right")
+          Divider()
+          ViewerEmptyState(
+            title: "Select an Event",
+            systemImage: "doc.text.magnifyingglass",
+            description: "Event metadata and bounded content views appear here."
+          )
+        }
+      }
+    }
+  }
+
+  private var controlComposer: some View {
+    Group {
+      if let composer = model.composerController {
+        ViewerControlComposerView(controller: composer)
+      } else {
+        VStack(alignment: .leading, spacing: 10) {
+          HStack {
+            Label("Viewer → App Control", systemImage: "paperplane")
+              .font(.headline)
+            Spacer()
+            Text("\(activeSessionCount) active")
+              .font(.caption.monospacedDigit())
+              .foregroundStyle(.secondary)
+          }
+          Divider()
+          Text("The memory-only control composer appears when the Viewer runtime starts.")
+            .foregroundStyle(.secondary)
+          Text("Local queue admission is not a delivery or processing acknowledgement.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+        .padding(14)
+      }
+    }
+  }
+
+  private func workspacePaneHeader(title: String, systemImage: String) -> some View {
+    HStack {
+      Label(title, systemImage: systemImage).font(.headline)
+      Spacer()
+    }
+    .padding(.horizontal, 14)
+    .padding(.vertical, 12)
   }
 
   @ViewBuilder
-  private var deviceWorkspace: some View {
+  private var deviceDetailsSheet: some View {
     if let session = model.selectedSession {
-      ViewerDeviceDetail(model: model, session: session).id(session.route.storageKey)
+      ViewerDeviceDetail(model: model, session: session)
+        .id(session.route.storageKey)
+        .frame(minWidth: 620, minHeight: 620)
     } else {
       ViewerEmptyState(
-        title: "Select a Device",
-        systemImage: "rectangle.3.group",
-        description: "Choose a connected or recent App to inspect its bounded session telemetry."
+        title: "Device No Longer Available",
+        systemImage: "iphone.slash",
+        description: "Close this panel and choose another connected or recent App."
       )
+      .frame(width: 480, height: 320)
+    }
+  }
+
+  private var activeSessionCount: Int {
+    model.sessions.lazy.filter { $0.state == .active }.count
+  }
+
+  private var liveSourceStatus: String {
+    switch model.status {
+    case .stopped, .stopping:
+      return "No current runtime"
+    case .starting:
+      return "Starting"
+    case .failed:
+      return "Unavailable"
+    case .listening:
+      return model.storeStatus.state == .available
+        ? "Recording enabled" : "Live — not recording"
+    }
+  }
+
+  private var liveSourceIcon: String {
+    switch model.status {
+    case .listening: return "dot.radiowaves.left.and.right"
+    case .starting, .stopping: return "hourglass"
+    case .stopped, .failed: return "circle.dashed"
+    }
+  }
+
+  private var liveSourceTint: Color {
+    switch model.status {
+    case .listening: return .green
+    case .starting, .stopping: return .orange
+    case .stopped, .failed: return .secondary
     }
   }
 
@@ -182,10 +408,8 @@ private struct ViewerStorageSettings: View {
           Button("Retry Storage") { model.retryStorage() }
             .disabled(model.storeStatus.state == .available)
         }
-        Text(
-          "State: \(model.storeStatus.state.rawValue) · Last cleanup: \(model.storeStatus.lastCleanupCategory.rawValue) · Logical quota: \(format(model.storeStatus.logicalQuotaBytes)) / \(format(model.storeStatus.capacityBytes)) · Allocated files: \(format(model.storeStatus.allocatedFootprintBytes)) · Pinned estimate: \(format(model.storeStatus.pinnedQuotaBytes))"
-        )
-        .font(.caption).foregroundStyle(.secondary)
+        Text(storageStatusSummary)
+          .font(.caption).foregroundStyle(.secondary)
         Text(oldestHistorySummary)
           .font(.caption).foregroundStyle(.secondary)
         Text(
@@ -216,6 +440,12 @@ private struct ViewerStorageSettings: View {
       ?? "unavailable"
     return
       "Oldest retained Event: \(date.formatted(date: .abbreviated, time: .shortened)) · Estimated retained duration: \(duration)"
+  }
+
+  private var storageStatusSummary: String {
+    let state = model.storeStatus.migration?.message ?? model.storeStatus.state.rawValue
+    return
+      "State: \(state) · Last cleanup: \(model.storeStatus.lastCleanupCategory.rawValue) · Logical quota: \(format(model.storeStatus.logicalQuotaBytes)) / \(format(model.storeStatus.capacityBytes)) · Allocated files: \(format(model.storeStatus.allocatedFootprintBytes)) · Pinned estimate: \(format(model.storeStatus.pinnedQuotaBytes))"
   }
 
   private func format(_ bytes: Int64) -> String {

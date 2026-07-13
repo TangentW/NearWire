@@ -1,5 +1,6 @@
 import Combine
 import CryptoKit
+import Darwin
 import LocalAuthentication
 @_spi(NearWireInternal) import NearWireCore
 @_spi(NearWireInternal) import NearWireTransport
@@ -218,6 +219,8 @@ final class ViewerFoundationTests: XCTestCase {
       pairingCodes: LockedPairingCodeSequence(["ABCDEF"])
     )
     model.openWindow()
+    let failedExplorer = try XCTUnwrap(model.explorerController)
+    let failedComposer = try XCTUnwrap(model.composerController)
     await fulfillment(of: [listenerStarted], timeout: 1)
     listener.emit(
       .failed(
@@ -229,7 +232,13 @@ final class ViewerFoundationTests: XCTestCase {
       )
     )
     await waitForStatus(.failed(.localNetworkUnavailable), in: model)
+    await waitUntilExplorer {
+      failedExplorer.pendingCleanupWorkCount == 0 && failedComposer.pendingCleanupWorkCount == 0
+    }
     XCTAssertEqual(model.status, .failed(.localNetworkUnavailable))
+    XCTAssertTrue(failedExplorer.model.timelineRows.isEmpty)
+    XCTAssertNil(failedExplorer.inspector.canonicalBuffer)
+    XCTAssertEqual(failedComposer.contentJSON, "")
 
     model.retry()
     model.closeWindow()
@@ -265,12 +274,310 @@ final class ViewerFoundationTests: XCTestCase {
       pairingCodes: LockedPairingCodeSequence([])
     )
     let hostingView = NSHostingView(rootView: ViewerRootView(model: model))
-    hostingView.frame = NSRect(x: 0, y: 0, width: 900, height: 620)
+    hostingView.frame = NSRect(
+      x: 0,
+      y: 0,
+      width: ViewerWorkspaceLayout.minimumWindowWidth,
+      height: ViewerWorkspaceLayout.minimumWindowHeight
+    )
     hostingView.layoutSubtreeIfNeeded()
 
+    XCTAssertEqual(
+      ViewerWorkspaceLayout.regions,
+      [.sourceAndDevices, .eventTimeline, .eventInspector, .controlComposer]
+    )
+    XCTAssertGreaterThanOrEqual(
+      ViewerWorkspaceLayout.minimumWindowWidth,
+      ViewerWorkspaceLayout.sourceMinimumWidth + ViewerWorkspaceLayout.timelineMinimumWidth
+        + ViewerWorkspaceLayout.inspectorMinimumWidth
+    )
+    XCTAssertLessThan(
+      ViewerWorkspaceLayout.composerMinimumHeight,
+      ViewerWorkspaceLayout.minimumWindowHeight
+    )
     XCTAssertGreaterThan(hostingView.fittingSize.width, 0)
     XCTAssertGreaterThan(hostingView.fittingSize.height, 0)
     XCTAssertEqual(model.status, .stopped)
+  }
+
+  @MainActor
+  func testNativeTextControlsBoundExactEditsAndDisableInspectorClipboardSurfaces() {
+    var buffer = ViewerIncrementalTextBuffer(
+      maximumUTF8Bytes: 8,
+      maximumUnicodeScalars: 4
+    )
+    let editor = ViewerOperatorTextView(frame: .zero)
+    editor.controlStyle = .singleLine
+    editor.onBoundedEdit = { range, replacement in
+      buffer.replaceCharacters(in: range, with: replacement) == .applied
+    }
+
+    XCTAssertTrue(
+      editor.textView(
+        editor,
+        shouldChangeTextIn: NSRange(location: 0, length: 0),
+        replacementString: "é🙂"
+      )
+    )
+    editor.string = buffer.value
+    XCTAssertTrue(
+      editor.textView(
+        editor,
+        shouldChangeTextIn: NSRange(location: 1, length: 2),
+        replacementString: "ab"
+      )
+    )
+    editor.string = buffer.value
+    XCTAssertTrue(
+      editor.textView(
+        editor,
+        shouldChangeTextIn: NSRange(location: 3, length: 0),
+        replacementString: "🙂"
+      )
+    )
+    editor.string = buffer.value
+    let accepted = editor.string
+    XCTAssertFalse(
+      editor.textView(
+        editor,
+        shouldChangeTextIn: NSRange(location: 5, length: 0),
+        replacementString: "x"
+      )
+    )
+    XCTAssertEqual(editor.string, accepted)
+    XCTAssertEqual(buffer.value, accepted)
+    XCTAssertFalse(editor.isProcessingNativeEdit)
+    XCTAssertFalse(
+      editor.textView(
+        editor,
+        shouldChangeTextIn: NSRange(location: 0, length: 0),
+        replacementString: "\n"
+      )
+    )
+    XCTAssertTrue(editor.isEditable)
+    XCTAssertTrue(editor.isSelectable)
+    XCTAssertTrue(editor.acceptsFirstResponder)
+    XCTAssertFalse(editor.isRichText)
+    XCTAssertFalse(editor.importsGraphics)
+    XCTAssertTrue(editor.responds(to: #selector(NSText.copy(_:))))
+    XCTAssertTrue(editor.responds(to: #selector(NSText.cut(_:))))
+    XCTAssertTrue(editor.responds(to: #selector(NSText.paste(_:))))
+    XCTAssertTrue(Mirror(reflecting: editor).children.isEmpty)
+    XCTAssertFalse(String(reflecting: editor).contains(accepted))
+
+    var submitted = false
+    editor.onSubmit = { submitted = true }
+    XCTAssertTrue(editor.textView(editor, doCommandBy: #selector(NSResponder.insertNewline(_:))))
+    XCTAssertTrue(submitted)
+
+    let multiline = ViewerOperatorTextView(frame: .zero)
+    multiline.controlStyle = .multiline
+    multiline.onBoundedEdit = { _, _ in true }
+    XCTAssertTrue(
+      multiline.textView(
+        multiline,
+        shouldChangeTextIn: NSRange(location: 0, length: 0),
+        replacementString: "\n"
+      )
+    )
+
+    var pastedBuffer = ViewerIncrementalTextBuffer(
+      maximumUTF8Bytes: 8,
+      maximumUnicodeScalars: 4
+    )
+    let pasteEditor = ViewerOperatorTextView(frame: .zero)
+    pasteEditor.onBoundedEdit = { range, replacement in
+      pastedBuffer.replaceCharacters(in: range, with: replacement) == .applied
+    }
+    let pasteboard = NSPasteboard(name: NSPasteboard.Name("NearWireTests.\(UUID().uuidString)"))
+    defer { pasteboard.releaseGlobally() }
+    pasteboard.clearContents()
+    XCTAssertTrue(pasteboard.writeObjects(["é🙂" as NSString]))
+    pasteEditor.setSelectedRange(NSRange(location: 0, length: 0))
+    XCTAssertTrue(pasteEditor.readSelection(from: pasteboard, type: .string))
+    XCTAssertEqual(pasteEditor.string, "é🙂")
+    XCTAssertEqual(pastedBuffer.value, "é🙂")
+
+    pasteboard.clearContents()
+    XCTAssertTrue(pasteboard.writeObjects(["ab" as NSString]))
+    pasteEditor.setSelectedRange(NSRange(location: 1, length: 2))
+    XCTAssertTrue(pasteEditor.readSelection(from: pasteboard, type: .string))
+    XCTAssertEqual(pasteEditor.string, "éab")
+    XCTAssertEqual(pastedBuffer.value, "éab")
+
+    pasteboard.clearContents()
+    XCTAssertTrue(pasteboard.writeObjects(["🙂🙂" as NSString]))
+    pasteEditor.setSelectedRange(NSRange(location: 3, length: 0))
+    XCTAssertTrue(pasteEditor.readSelection(from: pasteboard, type: .string))
+    XCTAssertEqual(pasteEditor.string, "éab")
+    XCTAssertEqual(pastedBuffer.value, "éab")
+
+    let received = ViewerReceivedEventTextView(frame: .zero)
+    received.string = "private Event content"
+    let clipboardItems = [
+      NSMenuItem(title: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: ""),
+      NSMenuItem(title: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: ""),
+      NSMenuItem(title: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: ""),
+    ]
+    XCTAssertFalse(received.isEditable)
+    XCTAssertFalse(received.isSelectable)
+    XCTAssertFalse(received.acceptsFirstResponder)
+    XCTAssertFalse(received.isRichText)
+    XCTAssertFalse(received.importsGraphics)
+    XCTAssertNil(received.menu)
+    XCTAssertTrue(received.registeredDraggedTypes.isEmpty)
+    XCTAssertTrue(clipboardItems.allSatisfy { !received.validateUserInterfaceItem($0) })
+    XCTAssertTrue(Mirror(reflecting: received).children.isEmpty)
+    XCTAssertFalse(String(reflecting: received).contains("private Event content"))
+    received.clearSensitiveState()
+    XCTAssertEqual(received.string, "")
+
+    var filter = ViewerExplorerFilterDraft()
+    XCTAssertEqual(
+      filter.replaceText(
+        .search,
+        range: NSRange(location: 0, length: 0),
+        replacement: "device"
+      ),
+      .applied
+    )
+    XCTAssertEqual(
+      filter.replaceText(
+        .search,
+        range: NSRange(location: 0, length: 6),
+        replacement: String(repeating: "x", count: 513)
+      ),
+      .rejected(.byteLimit)
+    )
+    XCTAssertEqual(filter.searchText, "device")
+  }
+
+  @MainActor
+  func testControlComposerScalesToCompactWidthWithDeterministicEditorFocusOrder() throws {
+    let runtimeID = UUID()
+    let owner = FakeAdmissionHandoffOwner(runtimeLogicalID: runtimeID)
+    let controller = try ViewerControlComposerController(
+      runtimeLogicalID: runtimeID,
+      sessionControl: owner
+    )
+    let hostingView = NSHostingView(rootView: ViewerControlComposerView(controller: controller))
+    hostingView.frame = NSRect(x: 0, y: 0, width: 620, height: 900)
+    hostingView.layoutSubtreeIfNeeded()
+
+    let editors = descendantViews(of: ViewerOperatorTextView.self, in: hostingView)
+    XCTAssertEqual(editors.count, 3)
+    XCTAssertEqual(
+      editors.compactMap { $0.accessibilityLabel() },
+      ["Control Event type", "Control Event JSON content", "TTL milliseconds"]
+    )
+    XCTAssertTrue(editors.allSatisfy(\.acceptsFirstResponder))
+    XCTAssertGreaterThan(hostingView.fittingSize.width, 0)
+    XCTAssertGreaterThan(hostingView.fittingSize.height, 0)
+    controller.sealAndClear()
+  }
+
+  @MainActor
+  func testRunningRootComposesEventExplorerAndRuntimeCleanupSealsIt() async throws {
+    let listener = FakeViewerSecureListener(
+      eventsOnStart: [.ready(port: 49_152), .serviceRegistered(exact: true)]
+    )
+    let model = makeApplicationModel(
+      listenerFactory: LockedListenerFactory([listener]),
+      pairingCodes: LockedPairingCodeSequence(["ABCDEF"])
+    )
+
+    model.openWindow()
+    await waitForStatus(.listening(code: "ABCDEF", paused: false), in: model)
+    let explorer = try XCTUnwrap(model.explorerController)
+    let composer = try XCTUnwrap(model.composerController)
+    let hostingView = NSHostingView(rootView: ViewerRootView(model: model))
+    hostingView.frame = NSRect(
+      x: 0,
+      y: 0,
+      width: ViewerWorkspaceLayout.minimumWindowWidth,
+      height: ViewerWorkspaceLayout.minimumWindowHeight
+    )
+    hostingView.layoutSubtreeIfNeeded()
+
+    XCTAssertEqual(explorer.sourceRows.map(\.title).first, "Live")
+    XCTAssertTrue(explorer.usesAllDevices)
+    XCTAssertTrue(explorer.replaceFilterText(.eventType, with: "log.network"))
+    explorer.updateFilterDraft {
+      $0.eventTypeMode = .prefix
+      $0.directions = ["appToViewer"]
+      $0.requiresDrop = true
+    }
+    XCTAssertEqual(explorer.activeFilterCount, 3)
+    XCTAssertNoThrow(try explorer.filterDraft.makeFilter())
+    explorer.prepareExport(.completeRecording)
+    XCTAssertEqual(explorer.exportState, .failed(.unavailable))
+    explorer.updateSelectedRecording(name: "Unavailable", note: nil, pinned: false)
+    XCTAssertEqual(explorer.recordingOperationState, .failed(.unavailable))
+    XCTAssertGreaterThan(hostingView.fittingSize.width, 0)
+    XCTAssertGreaterThan(hostingView.fittingSize.height, 0)
+
+    _ = await model.prepareForTermination()
+    XCTAssertNil(model.explorerController)
+    XCTAssertNil(model.composerController)
+    XCTAssertTrue(explorer.model.isPaused)
+    XCTAssertTrue(explorer.model.timelineRows.isEmpty)
+    XCTAssertNil(explorer.inspectorMetadata)
+    XCTAssertTrue(composer.targetRows.isEmpty)
+    XCTAssertTrue(composer.resultRows.isEmpty)
+    XCTAssertEqual(composer.eventType, "")
+    XCTAssertEqual(composer.contentJSON, "")
+    XCTAssertEqual(composer.ttlText, "")
+  }
+
+  @MainActor
+  func testRecordingEditorEnforcesMetadataCapsBeforeStorageAndRedactsContent() {
+    let editor = ViewerRecordingEditorModel(name: "Initial", note: "Initial note")
+    XCTAssertEqual(editor.name, "Initial")
+    XCTAssertEqual(editor.note, "Initial note")
+
+    let maximumName = String(repeating: "n", count: 80)
+    XCTAssertTrue(editor.replaceWhole(.name, with: maximumName))
+    XCTAssertFalse(editor.replaceWhole(.name, with: maximumName + "x"))
+    XCTAssertEqual(editor.name, maximumName)
+
+    let maximumNote = String(repeating: "a", count: 4_096)
+    XCTAssertTrue(editor.replaceWhole(.note, with: maximumNote))
+    XCTAssertFalse(editor.replaceWhole(.note, with: maximumNote + "b"))
+    XCTAssertEqual(editor.note, maximumNote)
+
+    let maximumAnnotation = String(repeating: "z", count: 4_096)
+    XCTAssertTrue(editor.replaceWhole(.annotation, with: maximumAnnotation))
+    XCTAssertFalse(editor.replaceWhole(.annotation, with: maximumAnnotation + "z"))
+    XCTAssertEqual(editor.annotation, maximumAnnotation)
+    editor.clearAnnotation()
+    XCTAssertEqual(editor.annotation, "")
+    XCTAssertEqual(editor.buffers.name.diagnostics.fullValueRescanCount, 0)
+    XCTAssertEqual(editor.buffers.note.diagnostics.fullValueRescanCount, 0)
+    XCTAssertEqual(editor.buffers.annotation.diagnostics.fullValueRescanCount, 0)
+    XCTAssertTrue(Mirror(reflecting: editor).children.isEmpty)
+    XCTAssertFalse(String(reflecting: editor).contains(maximumNote))
+  }
+
+  func testExplorerOperationMessagesAndExportExclusionDisclosureAreFixedAndSafe() {
+    let failures: [ViewerStoreExplorerFailure] = [
+      .storeReplaced,
+      .cancelled,
+      .unavailable,
+      .invalidRequest,
+      .busy,
+      .refineQuery,
+      .catalogChanged,
+    ]
+    let messages = failures.map(\.operatorMessage)
+
+    XCTAssertEqual(Set(messages).count, failures.count)
+    XCTAssertTrue(messages.allSatisfy { !$0.isEmpty && !$0.contains("/") })
+    XCTAssertFalse(messages.joined().contains("SQLite"))
+    XCTAssertFalse(messages.joined().contains("NSUnderlyingError"))
+    XCTAssertEqual(
+      ViewerExportPresentationText.transientRowsExcluded,
+      "Transient rows labeled Not recorded are excluded."
+    )
   }
 
   func testBuiltApplicationMetadataAndPrivacyManifestMatchDiscoveryContract() throws {
@@ -1073,6 +1380,98 @@ final class ViewerFoundationTests: XCTestCase {
     XCTAssertEqual(staleDeliveries.value, 0)
   }
 
+  @MainActor
+  func testStoreStatusRefreshRetainsOneLoadAndOneDirtySuccessorAcrossSustainedBurst() async {
+    let status = ViewerStoreStatus(
+      state: .available,
+      capacityBytes: 1,
+      logicalQuotaBytes: 0,
+      allocatedFootprintBytes: 0,
+      oldestHistoryMilliseconds: nil,
+      pinnedQuotaBytes: 0,
+      estimatedRetainedDurationMilliseconds: nil,
+      lastCleanupCategory: .none
+    )
+    let firstLoadEntered = DispatchSemaphore(value: 0)
+    let firstLoadRelease = DispatchSemaphore(value: 0)
+    let secondLoadEntered = expectation(description: "Dirty successor load entered")
+    let secondLoadRelease = DispatchSemaphore(value: 0)
+    let loads = LockedTestCounter()
+    let deliveries = LockedTestCounter()
+    let delivered = expectation(description: "Bounded status deliveries")
+    delivered.expectedFulfillmentCount = 3
+    let coordinator = ViewerStoreStatusRefreshCoordinator(
+      load: {
+        loads.increment()
+        switch loads.value {
+        case 1:
+          firstLoadEntered.signal()
+          firstLoadRelease.wait()
+        case 2:
+          secondLoadEntered.fulfill()
+          secondLoadRelease.wait()
+        default:
+          break
+        }
+        return status
+      },
+      delivery: { _ in
+        deliveries.increment()
+        delivered.fulfill()
+      }
+    )
+
+    coordinator.request()
+    XCTAssertEqual(firstLoadEntered.wait(timeout: .now() + 1), .success)
+    for _ in 0..<100_000 { coordinator.request() }
+    XCTAssertEqual(loads.value, 1)
+    XCTAssertEqual(coordinator.pendingWorkCountForTesting, 1)
+    XCTAssertTrue(coordinator.hasDirtySuccessorForTesting)
+
+    firstLoadRelease.signal()
+    await fulfillment(of: [secondLoadEntered], timeout: 1)
+    for _ in 0..<100_000 { coordinator.request() }
+    XCTAssertEqual(loads.value, 2)
+    XCTAssertEqual(coordinator.pendingWorkCountForTesting, 1)
+    XCTAssertTrue(coordinator.hasDirtySuccessorForTesting)
+
+    secondLoadRelease.signal()
+    await fulfillment(of: [delivered], timeout: 1)
+    XCTAssertEqual(loads.value, 3)
+    XCTAssertEqual(deliveries.value, 3)
+    XCTAssertEqual(coordinator.pendingWorkCountForTesting, 0)
+    XCTAssertFalse(coordinator.hasDirtySuccessorForTesting)
+
+    await coordinator.deactivateAndWait().value
+    for _ in 0..<1_000 { coordinator.request() }
+    await Task.yield()
+    XCTAssertEqual(loads.value, 3)
+
+    let cleanupLoadEntered = DispatchSemaphore(value: 0)
+    let cleanupLoadRelease = DispatchSemaphore(value: 0)
+    let cleanupCoordinator = ViewerStoreStatusRefreshCoordinator(
+      load: {
+        cleanupLoadEntered.signal()
+        cleanupLoadRelease.wait()
+        return status
+      },
+      delivery: { _ in XCTFail("Deactivated load must not publish status.") }
+    )
+    cleanupCoordinator.request()
+    XCTAssertEqual(cleanupLoadEntered.wait(timeout: .now() + 1), .success)
+    let cleanupFinished = expectation(description: "Blocked status load joined")
+    let cleanup = cleanupCoordinator.deactivateAndWait()
+    Task {
+      await cleanup.value
+      cleanupFinished.fulfill()
+    }
+    await Task.yield()
+    XCTAssertEqual(cleanupCoordinator.pendingWorkCountForTesting, 1)
+    cleanupLoadRelease.signal()
+    await fulfillment(of: [cleanupFinished], timeout: 1)
+    XCTAssertEqual(cleanupCoordinator.pendingWorkCountForTesting, 0)
+  }
+
   func testAdmissionManagerAutomaticallyHandsOffAndPlaceholderClosesCore() throws {
     let started = expectation(description: "Channel started")
     let viewerHelloSent = expectation(description: "Viewer Hello sent")
@@ -1515,7 +1914,7 @@ final class ViewerFoundationTests: XCTestCase {
     XCTAssertEqual(later.claimCount, 0)
   }
 
-  func testListenerGenerationCancellationDoesNotAffectOtherGeneration() throws {
+  func testListenerGenerationCancellationDoesNotAffectOtherGeneration() async throws {
     let bothStarted = expectation(description: "Both generation channels started")
     bothStarted.expectedFulfillmentCount = 2
     let oldCancelled = expectation(description: "Old generation channel cancelled")
@@ -1540,15 +1939,17 @@ final class ViewerFoundationTests: XCTestCase {
     manager.activateGeneration(newGeneration)
     manager.admit(oldIncoming, generation: oldGeneration, viewerInstallationID: viewerID)
     manager.admit(newIncoming, generation: newGeneration, viewerInstallationID: viewerID)
-    wait(for: [bothStarted], timeout: 1)
+    await fulfillment(of: [bothStarted], timeout: 1)
 
     manager.cancelGeneration(oldGeneration)
-    wait(for: [oldCancelled], timeout: 1)
-    XCTAssertEqual(manager.occupiedCount, 1)
+    await fulfillment(of: [oldCancelled], timeout: 1)
+    await waitForAdmissionOccupancy(1, in: manager)
     XCTAssertEqual(newIncoming.channel.cancelCount, 0)
 
-    manager.stop()
-    wait(for: [newCancelled], timeout: 1)
+    let cleanup = manager.stop()
+    await fulfillment(of: [newCancelled], timeout: 1)
+    let outcome = await cleanup.wait(timeoutNanoseconds: 1_000_000_000)
+    XCTAssertEqual(outcome, .completed)
     XCTAssertEqual(manager.occupiedCount, 0)
   }
 
@@ -1989,43 +2390,4817 @@ final class ViewerFoundationTests: XCTestCase {
 
   @MainActor
   func testIdentityResetWaitsForAdmissionCleanupReceipt() async throws {
-    let cleanupGate = AsyncTestGate()
-    let resetCalled = expectation(description: "Reset called after cleanup")
-    let resetCount = LockedTestCounter()
-    let listener = FakeViewerSecureListener(
-      eventsOnStart: [.ready(port: 49_152), .serviceRegistered(exact: true)]
+    enum ResetMode: String {
+      case tls
+      case full
+    }
+
+    for mode in [ResetMode.tls, .full] {
+      let cleanupGate = AsyncTestGate()
+      let resetCalled = expectation(description: "\(mode.rawValue) reset called after cleanup")
+      let tlsResetCount = LockedTestCounter()
+      let fullResetCount = LockedTestCounter()
+      let listener = FakeViewerSecureListener(
+        eventsOnStart: [.ready(port: 49_152), .serviceRegistered(exact: true)]
+      )
+      let identity = try EndpointID(rawValue: "viewer-test")
+      let model = ViewerApplicationModel(
+        preferences: ViewerPreferences(requiresApproval: { false }, setRequiresApproval: { _ in }),
+        dependencies: ViewerRuntimeDependencies(
+          loadIdentity: {
+            ViewerPreparedIdentity(
+              installationID: identity,
+              makeListener: { _ in listener }
+            )
+          },
+          resetTLSIdentity: {
+            tlsResetCount.increment()
+            if mode == .tls { resetCalled.fulfill() }
+          },
+          resetAllIdentity: {
+            fullResetCount.increment()
+            if mode == .full { resetCalled.fulfill() }
+          },
+          generatePairingCode: { try PairingCode("ABCDEF") },
+          makeRuntimeComponents: { runtimeLogicalID in
+            let owner = FakeAdmissionHandoffOwner(
+              runtimeLogicalID: runtimeLogicalID,
+              managerGeneration: 1,
+              shutdownOperation: { await cleanupGate.wait() }
+            )
+            let liveWindow = ViewerLiveEventWindow(runtimeLogicalID: runtimeLogicalID)
+            let compositeJournal = ViewerCompositeSessionJournal(
+              runtimeLogicalID: runtimeLogicalID,
+              durableJournal: ViewerNoopSessionJournal(),
+              liveWindow: liveWindow
+            )
+            let explorerInputs = ViewerRuntimeExplorerInputs(
+              runtimeLogicalID: runtimeLogicalID,
+              storeGateway: ViewerStoreExplorerGateway(),
+              liveObservations: liveWindow
+            )
+            return ViewerRuntimeComponents(
+              runtimeLogicalID: runtimeLogicalID,
+              managerGeneration: 1,
+              handoffOwner: owner,
+              sessionControl: owner,
+              liveObservations: liveWindow,
+              compositeJournal: compositeJournal,
+              explorerInputs: explorerInputs,
+              cleanupReceipt: ViewerRuntimeCleanupReceipt {
+                liveWindow.sealPresentation()
+              }
+            )
+          }
+        )
+      )
+      model.openWindow()
+      await waitForStatus(.listening(code: "ABCDEF", paused: false), in: model)
+      let explorer = try XCTUnwrap(model.explorerController)
+      let composer = try XCTUnwrap(model.composerController)
+
+      switch mode {
+      case .tls:
+        model.resetTLSIdentity()
+      case .full:
+        model.requestFullIdentityReset()
+        model.confirmFullIdentityReset()
+      }
+      cleanupGate.waitUntilEntered()
+      XCTAssertEqual(tlsResetCount.value + fullResetCount.value, 0)
+      XCTAssertEqual(model.status, .stopping)
+      cleanupGate.open()
+      await fulfillment(of: [resetCalled], timeout: 1)
+      XCTAssertEqual(tlsResetCount.value, mode == .tls ? 1 : 0)
+      XCTAssertEqual(fullResetCount.value, mode == .full ? 1 : 0)
+      XCTAssertEqual(explorer.pendingCleanupWorkCount, 0)
+      XCTAssertEqual(composer.pendingCleanupWorkCount, 0)
+      _ = await model.prepareForTermination()
+    }
+  }
+
+  func testRuntimeComponentsKeepOneTypedManagerAndClearLiveStateAfterDurableShutdown()
+    async throws
+  {
+    let runtimeLogicalID = UUID()
+    let managerGeneration: UInt64 = 41
+    let durableEndGate = AsyncTestGate()
+    let journal = RuntimeComponentJournalSpy(endGate: durableEndGate)
+    let suiteName = "ViewerFoundationTests.runtime-components.\(UUID().uuidString)"
+    let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+    defer { defaults.removePersistentDomain(forName: suiteName) }
+    let preferences = ViewerDevicePreferences(defaults: defaults)
+    let components = ViewerRuntimeComponents.make(
+      runtimeLogicalID: runtimeLogicalID,
+      managerGeneration: managerGeneration,
+      preferences: preferences,
+      durableJournal: journal
     )
-    let identity = try EndpointID(rawValue: "viewer-test")
+    let liveWindow = try XCTUnwrap(components.liveObservations as? ViewerLiveEventWindow)
+    let route = ViewerLogicalRoute(
+      installationID: try EndpointID(rawValue: "runtime-components-app"),
+      applicationIdentifier: "com.nearwire.runtime-components"
+    )
+
+    XCTAssertEqual(components.runtimeLogicalID, runtimeLogicalID)
+    XCTAssertEqual(components.managerGeneration, managerGeneration)
+    XCTAssertEqual(components.sessionControl.runtimeLogicalID, runtimeLogicalID)
+    XCTAssertEqual(components.sessionControl.managerGeneration, managerGeneration)
+    XCTAssertEqual(components.compositeJournal.runtimeLogicalID, runtimeLogicalID)
+    XCTAssertEqual(components.explorerInputs.runtimeLogicalID, runtimeLogicalID)
+    XCTAssertTrue(
+      (components.handoffOwner as AnyObject) === (components.sessionControl as AnyObject)
+    )
+    XCTAssertTrue(
+      (components.liveObservations as AnyObject)
+        === (components.explorerInputs.liveObservations as AnyObject)
+    )
+    XCTAssertEqual(journal.startedRuntimeIDs, [runtimeLogicalID])
+    XCTAssertTrue(components.sessionControl.setNickname("Before cleanup", route: route))
+
+    _ = await components.cleanupReceipt.begin().value
+    XCTAssertTrue(liveWindow.isPresentationSealed)
+    XCTAssertFalse(liveWindow.isCleared)
+    XCTAssertFalse(components.sessionControl.setNickname("After cleanup", route: route))
+
+    let shutdown = components.handoffOwner.beginShutdown()
+    durableEndGate.waitUntilEntered()
+    XCTAssertFalse(liveWindow.isCleared)
+    durableEndGate.open()
+    await shutdown.value
+
+    XCTAssertEqual(journal.endedRuntimeIDs, [runtimeLogicalID])
+    XCTAssertTrue(liveWindow.isCleared)
+    XCTAssertEqual(Array(Mirror(reflecting: components).children).count, 0)
+    XCTAssertEqual(Array(Mirror(reflecting: components.explorerInputs).children).count, 0)
+    XCTAssertEqual(Array(Mirror(reflecting: components.cleanupReceipt).children).count, 0)
+  }
+
+  func testCommittedObservationConsumesPrecomputedCanonicalContent() throws {
+    let runtimeLogicalID = UUID()
+    let context = try makeObservationContext(
+      connectionID: UUID(),
+      displayName: "Precomputed Content"
+    )
+    let precomputed = Data(#"{"precomputed":true}"#.utf8)
+    let observation = try ViewerCommittedEventObservation(
+      runtimeLogicalID: runtimeLogicalID,
+      context: context,
+      nickname: nil,
+      envelope: makeObservationEnvelope(
+        content: .object(["original": .string("must-not-be-reencoded")]),
+        createdAt: Date(timeIntervalSince1970: 1),
+        sessionEpoch: SessionEpoch(),
+        sequence: 1
+      ),
+      viewerWallMilliseconds: 1_000,
+      viewerMonotonicNanoseconds: 1_000,
+      deterministicEventBytes: 128,
+      canonicalContent: precomputed,
+      initialDisposition: .buffered
+    )
+    XCTAssertEqual(observation.durableProjection.canonicalContent, precomputed)
+  }
+
+  func testCommittedObservationComparatorAndLiveIngressPreserveTheFirstValue() throws {
+    let runtimeLogicalID = UUID()
+    let connectionID = UUID()
+    let sessionEpoch = SessionEpoch()
+    let firstContext = try makeObservationContext(
+      connectionID: connectionID,
+      displayName: "First display"
+    )
+    let laterContext = try makeObservationContext(
+      connectionID: connectionID,
+      displayName: "Later display"
+    )
+    let firstEnvelope = try makeObservationEnvelope(
+      content: .object(["value": .integer(1)]),
+      createdAt: Date(timeIntervalSince1970: 1_000.000_1),
+      sessionEpoch: sessionEpoch
+    )
+    let equalEnvelope = try makeObservationEnvelope(
+      id: firstEnvelope.id,
+      content: firstEnvelope.content,
+      createdAt: Date(timeIntervalSince1970: 1_000.000_4),
+      sessionEpoch: sessionEpoch
+    )
+    let conflictingEnvelope = try makeObservationEnvelope(
+      id: firstEnvelope.id,
+      content: .object(["value": .integer(2)]),
+      createdAt: firstEnvelope.createdAt,
+      sessionEpoch: sessionEpoch
+    )
+    let nextMillisecondEnvelope = try makeObservationEnvelope(
+      id: firstEnvelope.id,
+      content: firstEnvelope.content,
+      createdAt: Date(timeIntervalSince1970: 1_000.001_1),
+      sessionEpoch: sessionEpoch
+    )
+    let first = try ViewerCommittedEventObservation(
+      runtimeLogicalID: runtimeLogicalID,
+      context: firstContext,
+      nickname: "First nickname",
+      envelope: firstEnvelope,
+      viewerWallMilliseconds: 10,
+      viewerMonotonicNanoseconds: 20,
+      deterministicEventBytes: 30,
+      initialDisposition: .buffered
+    )
+    let identical = try ViewerCommittedEventObservation(
+      runtimeLogicalID: runtimeLogicalID,
+      context: laterContext,
+      nickname: "Later nickname",
+      envelope: equalEnvelope,
+      viewerWallMilliseconds: 100,
+      viewerMonotonicNanoseconds: 200,
+      deterministicEventBytes: 300,
+      initialDisposition: .buffered
+    )
+    let conflict = try ViewerCommittedEventObservation(
+      runtimeLogicalID: runtimeLogicalID,
+      context: laterContext,
+      nickname: nil,
+      envelope: conflictingEnvelope,
+      viewerWallMilliseconds: 101,
+      viewerMonotonicNanoseconds: 201,
+      deterministicEventBytes: 301,
+      initialDisposition: .buffered
+    )
+    let nextMillisecond = try ViewerCommittedEventObservation(
+      runtimeLogicalID: runtimeLogicalID,
+      context: firstContext,
+      nickname: nil,
+      envelope: nextMillisecondEnvelope,
+      viewerWallMilliseconds: 10,
+      viewerMonotonicNanoseconds: 20,
+      deterministicEventBytes: 30,
+      initialDisposition: .buffered
+    )
+    let differentDisposition = try ViewerCommittedEventObservation(
+      runtimeLogicalID: runtimeLogicalID,
+      context: firstContext,
+      nickname: nil,
+      envelope: firstEnvelope,
+      viewerWallMilliseconds: 10,
+      viewerMonotonicNanoseconds: 20,
+      deterministicEventBytes: 30,
+      initialDisposition: .consumerAccepted
+    )
+    let persistedFieldEnvelopes = try [
+      makeObservationEnvelope(
+        id: EventID(),
+        content: firstEnvelope.content,
+        createdAt: firstEnvelope.createdAt,
+        sessionEpoch: sessionEpoch
+      ),
+      makeObservationEnvelope(
+        typeRawValue: "test.observation.changed",
+        content: firstEnvelope.content,
+        createdAt: firstEnvelope.createdAt,
+        sessionEpoch: sessionEpoch
+      ),
+      makeObservationEnvelope(
+        id: firstEnvelope.id,
+        content: firstEnvelope.content,
+        createdAt: firstEnvelope.createdAt,
+        monotonicTimestampNanoseconds: 501,
+        sessionEpoch: sessionEpoch
+      ),
+      makeObservationEnvelope(
+        id: firstEnvelope.id,
+        content: firstEnvelope.content,
+        createdAt: firstEnvelope.createdAt,
+        sessionEpoch: sessionEpoch,
+        priority: .high
+      ),
+      makeObservationEnvelope(
+        id: firstEnvelope.id,
+        content: firstEnvelope.content,
+        createdAt: firstEnvelope.createdAt,
+        sessionEpoch: sessionEpoch,
+        ttl: EventTTL(milliseconds: 60_001)
+      ),
+      makeObservationEnvelope(
+        id: firstEnvelope.id,
+        content: firstEnvelope.content,
+        createdAt: firstEnvelope.createdAt,
+        sessionEpoch: sessionEpoch,
+        schemaVersion: EventSchemaVersion(2)
+      ),
+      makeObservationEnvelope(
+        id: firstEnvelope.id,
+        content: firstEnvelope.content,
+        createdAt: firstEnvelope.createdAt,
+        sessionEpoch: sessionEpoch,
+        causality: EventCausality(correlationID: EventID())
+      ),
+      makeObservationEnvelope(
+        id: firstEnvelope.id,
+        content: firstEnvelope.content,
+        createdAt: firstEnvelope.createdAt,
+        sessionEpoch: sessionEpoch,
+        causality: EventCausality(replyTo: EventID())
+      ),
+    ]
+    let persistedFieldConflicts = try persistedFieldEnvelopes.map { envelope in
+      try ViewerCommittedEventObservation(
+        runtimeLogicalID: runtimeLogicalID,
+        context: firstContext,
+        nickname: nil,
+        envelope: envelope,
+        viewerWallMilliseconds: 10,
+        viewerMonotonicNanoseconds: 20,
+        deterministicEventBytes: 30,
+        initialDisposition: .buffered
+      )
+    }
+
+    XCTAssertEqual(first.durableProjection, identical.durableProjection)
+    XCTAssertNotEqual(first.session, identical.session)
+    XCTAssertNotEqual(first.viewerWallMilliseconds, identical.viewerWallMilliseconds)
+    XCTAssertNotEqual(first.viewerMonotonicNanoseconds, identical.viewerMonotonicNanoseconds)
+    XCTAssertNotEqual(first.deterministicEventBytes, identical.deterministicEventBytes)
+    XCTAssertNotEqual(first.durableProjection, conflict.durableProjection)
+    XCTAssertNotEqual(first.durableProjection, nextMillisecond.durableProjection)
+    XCTAssertNotEqual(first.durableProjection, differentDisposition.durableProjection)
+    XCTAssertTrue(
+      persistedFieldConflicts.allSatisfy { $0.durableProjection != first.durableProjection }
+    )
+
+    let projectionQueue = DispatchQueue(
+      label: "ViewerFoundationTests.live-duplicate-comparison"
+    )
+    let projectionGate = DispatchSemaphore(value: 0)
+    projectionQueue.async { projectionGate.wait() }
+    let liveWindow = ViewerLiveEventWindow(
+      runtimeLogicalID: runtimeLogicalID,
+      projectionQueue: projectionQueue
+    )
+    let durableJournal = CommittedObservationJournalSpy()
+    let journal = ViewerCompositeSessionJournal(
+      runtimeLogicalID: runtimeLogicalID,
+      durableJournal: durableJournal,
+      liveWindow: liveWindow
+    )
+    let outcomes = LockedJournalOutcomeCollection()
+    journal.eventCommitted(first) { outcomes.append($0) }
+    journal.eventCommitted(identical) { outcomes.append($0) }
+    journal.eventCommitted(conflict) { outcomes.append($0) }
+    XCTAssertEqual(outcomes.values, [.accepted])
+    XCTAssertEqual(durableJournal.observations.map(\.observationID), [first.observationID])
+    projectionGate.signal()
+    liveWindow.waitForProjectionForTesting()
+
+    XCTAssertEqual(outcomes.values, [.accepted, .identical, .presentationConflict])
+    XCTAssertEqual(durableJournal.observations.map(\.observationID), [first.observationID])
+    for fieldConflict in persistedFieldConflicts {
+      XCTAssertEqual(liveWindow.offer(fieldConflict), .presentationConflict)
+    }
+    XCTAssertEqual(liveWindow.retainedObservationCount, 1)
+    XCTAssertEqual(
+      liveWindow.retainedObservationBytes,
+      first.deterministicEventBytes + ViewerLiveProjectionLimits.fixedEntryOverheadBytes
+    )
+    XCTAssertEqual(liveWindow.conflictCount, 1)
+    liveWindow.applyStoreOutcome(
+      .identical,
+      key: first.key,
+      observationID: UUID()
+    )
+    liveWindow.waitForProjectionForTesting()
+    XCTAssertEqual(liveWindow.retainedObservationCount, 1)
+    XCTAssertEqual(liveWindow.evict(first.key)?.observationID, first.observationID)
+    XCTAssertEqual(liveWindow.retainedObservationCount, 0)
+    XCTAssertEqual(liveWindow.lostHorizonCount, 1)
+    liveWindow.applyStoreOutcome(
+      .journalConflict,
+      key: first.key,
+      observationID: first.observationID
+    )
+    liveWindow.waitForProjectionForTesting()
+    XCTAssertEqual(liveWindow.lostHorizonCount, 2)
+    XCTAssertEqual(liveWindow.conflictCount, 0)
+    XCTAssertEqual(liveWindow.offer(conflict), .accepted)
+    liveWindow.waitForProjectionForTesting()
+    XCTAssertEqual(liveWindow.retainedObservationCount, 1)
+    liveWindow.applyStoreOutcome(
+      .journalConflict,
+      key: conflict.key,
+      observationID: conflict.observationID
+    )
+    liveWindow.waitForProjectionForTesting()
+    XCTAssertEqual(liveWindow.retainedObservationCount, 0)
+    XCTAssertEqual(liveWindow.conflictCount, 1)
+    XCTAssertEqual(Array(Mirror(reflecting: first).children).count, 1)
+    XCTAssertEqual(Array(Mirror(reflecting: first.durableProjection).children).count, 0)
+    XCTAssertEqual(Array(Mirror(reflecting: first.session).children).count, 0)
+  }
+
+  func testUntrackedDuplicatesUseDurableAuthorityAndShutdownSealsCallbacks() async throws {
+    let runtimeLogicalID = UUID()
+    let connectionID = UUID()
+    let context = try makeObservationContext(
+      connectionID: connectionID,
+      displayName: "Untracked duplicate"
+    )
+    let epoch = SessionEpoch()
+    let projectionQueue = DispatchQueue(
+      label: "ViewerFoundationTests.live-untracked-duplicate"
+    )
+    let projectionGate = DispatchSemaphore(value: 0)
+    projectionQueue.async { projectionGate.wait() }
+    let liveWindow = ViewerLiveEventWindow(
+      runtimeLogicalID: runtimeLogicalID,
+      projectionQueue: projectionQueue
+    )
+    let durableJournal = CommittedObservationJournalSpy()
+    let journal = ViewerCompositeSessionJournal(
+      runtimeLogicalID: runtimeLogicalID,
+      durableJournal: durableJournal,
+      liveWindow: liveWindow
+    )
+    let outcomes = LockedJournalOutcomeCollection()
+
+    var observations: [ViewerCommittedEventObservation] = []
+    for sequence in 0..<UInt64(ViewerLiveProjectionLimits.ingressCount) {
+      let observation = try ViewerCommittedEventObservation(
+        runtimeLogicalID: runtimeLogicalID,
+        context: context,
+        nickname: nil,
+        envelope: makeObservationEnvelope(
+          content: .object(["sequence": .integer(Int64(sequence))]),
+          createdAt: Date(timeIntervalSince1970: 7_000),
+          sessionEpoch: epoch,
+          sequence: sequence
+        ),
+        viewerWallMilliseconds: 7_000_000,
+        viewerMonotonicNanoseconds: sequence,
+        deterministicEventBytes: 1,
+        initialDisposition: .buffered
+      )
+      observations.append(observation)
+      journal.eventCommitted(observation) { outcomes.append($0) }
+    }
+    let authority = try XCTUnwrap(observations.first)
+    let identical = try ViewerCommittedEventObservation(
+      runtimeLogicalID: runtimeLogicalID,
+      context: context,
+      nickname: "Later metadata",
+      envelope: authority.envelope,
+      viewerWallMilliseconds: 7_000_001,
+      viewerMonotonicNanoseconds: 999,
+      deterministicEventBytes: 2,
+      initialDisposition: .buffered
+    )
+    let conflictingEnvelope = try makeObservationEnvelope(
+      id: authority.envelope.id,
+      content: .object(["sequence": .integer(-1)]),
+      createdAt: authority.envelope.createdAt,
+      sessionEpoch: epoch,
+      sequence: authority.key.wireSequence
+    )
+    let conflict = try ViewerCommittedEventObservation(
+      runtimeLogicalID: runtimeLogicalID,
+      context: context,
+      nickname: nil,
+      envelope: conflictingEnvelope,
+      viewerWallMilliseconds: 7_000_002,
+      viewerMonotonicNanoseconds: 1_000,
+      deterministicEventBytes: 1,
+      initialDisposition: .buffered
+    )
+
+    journal.eventCommitted(identical) { outcomes.append($0) }
+    journal.eventCommitted(conflict) { outcomes.append($0) }
+    XCTAssertEqual(outcomes.values.count, ViewerLiveProjectionLimits.ingressCount + 2)
+    XCTAssertEqual(Array(outcomes.values.suffix(2)), [.identical, .journalConflict])
+    XCTAssertEqual(durableJournal.commitCount, ViewerLiveProjectionLimits.ingressCount + 2)
+
+    projectionGate.signal()
+    liveWindow.waitForProjectionForTesting()
+    XCTAssertEqual(liveWindow.retainedObservationCount, ViewerLiveProjectionLimits.ingressCount)
+    XCTAssertEqual(liveWindow.snapshot().gaps.ingressOverflowCount, 2)
+
+    await journal.runtimeEnded(
+      logicalID: runtimeLogicalID,
+      wallMilliseconds: 7_001_000,
+      monotonicNanoseconds: 2_000
+    )
+    XCTAssertTrue(liveWindow.isCleared)
+    let commitsBeforeSealedOffer = durableJournal.commitCount
+    let sealed = LockedJournalOutcomeCollection()
+    journal.eventCommitted(authority) { sealed.append($0) }
+    XCTAssertEqual(sealed.values, [.sealed])
+    XCTAssertEqual(durableJournal.commitCount, commitsBeforeSealedOffer)
+  }
+
+  func testLiveProjectionEnforcesIngressAndWindowBoundsAndTracksRuntimeState() async throws {
+    let runtimeLogicalID = UUID()
+    let connectionID = UUID()
+    let context = try makeObservationContext(
+      connectionID: connectionID,
+      displayName: "Bounded projection"
+    )
+    let epoch = SessionEpoch()
+    let projectionQueue = DispatchQueue(label: "ViewerFoundationTests.live-projection-bound")
+    let projectionGate = DispatchSemaphore(value: 0)
+    projectionQueue.async { projectionGate.wait() }
+    let window = ViewerLiveEventWindow(
+      runtimeLogicalID: runtimeLogicalID,
+      projectionQueue: projectionQueue
+    )
+
+    func observation(sequence: UInt64, bytes: Int = 1) throws -> ViewerCommittedEventObservation {
+      try ViewerCommittedEventObservation(
+        runtimeLogicalID: runtimeLogicalID,
+        context: context,
+        nickname: "Device",
+        envelope: makeObservationEnvelope(
+          content: .object(["sequence": .integer(Int64(sequence))]),
+          createdAt: Date(timeIntervalSince1970: 2_000),
+          sessionEpoch: epoch,
+          sequence: sequence
+        ),
+        viewerWallMilliseconds: 2_000_000,
+        viewerMonotonicNanoseconds: sequence,
+        deterministicEventBytes: bytes,
+        initialDisposition: .buffered
+      )
+    }
+
+    for sequence in 0..<UInt64(ViewerLiveProjectionLimits.ingressCount) {
+      XCTAssertEqual(try window.offer(observation(sequence: sequence)), .accepted)
+    }
+    XCTAssertEqual(
+      try window.offer(observation(sequence: UInt64(ViewerLiveProjectionLimits.ingressCount))),
+      .untracked
+    )
+    projectionGate.signal()
+    window.waitForProjectionForTesting()
+
+    var snapshot = window.snapshot()
+    XCTAssertEqual(snapshot.events.count, ViewerLiveProjectionLimits.ingressCount)
+    XCTAssertEqual(snapshot.sessions.count, 1)
+    XCTAssertEqual(snapshot.gaps.ingressOverflowCount, 1)
+    XCTAssertEqual(
+      snapshot.accountedEventBytes,
+      ViewerLiveProjectionLimits.ingressCount
+        * (ViewerLiveProjectionLimits.fixedEntryOverheadBytes + 1)
+    )
+    let initialDiagnostics = window.diagnosticsForTesting()
+    XCTAssertEqual(initialDiagnostics.ingressOfferCount, 65)
+    XCTAssertEqual(initialDiagnostics.drainScheduleCount, 1)
+    XCTAssertEqual(initialDiagnostics.dirtySuccessorCount, 1)
+    XCTAssertEqual(initialDiagnostics.drainRunCount, 1)
+    XCTAssertEqual(initialDiagnostics.maximumConcurrentDrainCount, 1)
+    XCTAssertEqual(initialDiagnostics.snapshotPublicationCount, 1)
+
+    for sequence in UInt64(ViewerLiveProjectionLimits.ingressCount + 1)..<513 {
+      XCTAssertEqual(try window.offer(observation(sequence: sequence)), .accepted)
+      if sequence % 32 == 0 { window.waitForProjectionForTesting() }
+    }
+    window.waitForProjectionForTesting()
+    XCTAssertEqual(try window.offer(observation(sequence: 513)), .accepted)
+    window.waitForProjectionForTesting()
+
+    snapshot = window.snapshot()
+    XCTAssertEqual(snapshot.events.count, ViewerLiveProjectionLimits.retainedCount)
+    XCTAssertEqual(snapshot.gaps.windowOverflowCount, 1)
+    XCTAssertEqual(window.lostHorizonCount, 2)
+    XCTAssertFalse(snapshot.events.contains { $0.observation.key.wireSequence == 0 })
+
+    let latest = try XCTUnwrap(
+      snapshot.events.first { $0.observation.key.wireSequence == 513 }
+    ).observation
+    window.laterDisposition(key: latest.key, disposition: .consumerAccepted)
+    window.dropsChanged(
+      connectionID: connectionID,
+      samples: [ViewerDropJournalSample(reason: .localOverflow, count: 7)]
+    )
+    window.sessionEnded(
+      connectionID: connectionID,
+      wallMilliseconds: 2_001_000,
+      monotonicNanoseconds: 999
+    )
+    window.applyStoreOutcome(
+      .unavailable,
+      key: latest.key,
+      observationID: latest.observationID
+    )
+    window.waitForProjectionForTesting()
+
+    snapshot = window.snapshot()
+    let unavailable = try XCTUnwrap(
+      snapshot.events.first { $0.observation.observationID == latest.observationID }
+    )
+    XCTAssertEqual(unavailable.laterDisposition, .consumerAccepted)
+    XCTAssertEqual(unavailable.durableState, .notRecorded)
+    XCTAssertTrue(unavailable.hasDrop)
+    XCTAssertTrue(unavailable.sessionEnded)
+    XCTAssertTrue(snapshot.gaps.storeUnavailable)
+    XCTAssertEqual(snapshot.gaps.storeUnavailableCount, 1)
+    XCTAssertEqual(snapshot.sessions.first?.positiveDropCount, 7)
+
+    window.applyStoreOutcome(
+      .accepted,
+      key: latest.key,
+      observationID: latest.observationID
+    )
+    window.waitForProjectionForTesting()
+    snapshot = window.snapshot()
+    XCTAssertFalse(snapshot.gaps.storeUnavailable)
+    XCTAssertEqual(snapshot.gaps.storeRecoveryCount, 1)
+    XCTAssertEqual(
+      snapshot.events.first { $0.observation.observationID == latest.observationID }?.durableState,
+      .acceptedAwaitingVisibility
+    )
+
+    window.storeStateChanged(.writeFailed)
+    window.waitForProjectionForTesting()
+    XCTAssertTrue(window.snapshot().gaps.storeUnavailable)
+    XCTAssertEqual(window.snapshot().gaps.storeUnavailableCount, 2)
+    window.storeStateChanged(.available)
+    window.waitForProjectionForTesting()
+    XCTAssertFalse(window.snapshot().gaps.storeUnavailable)
+    XCTAssertEqual(window.snapshot().gaps.storeRecoveryCount, 2)
+
+    window.durableRowBecameVisible(key: latest.key, observationID: latest.observationID)
+    window.waitForProjectionForTesting()
+    XCTAssertFalse(
+      window.snapshot().events.contains { $0.observation.observationID == latest.observationID }
+    )
+
+    await window.runtimeEnded()
+    XCTAssertTrue(window.isCleared)
+    XCTAssertTrue(window.snapshot().events.isEmpty)
+    XCTAssertTrue(window.snapshot().sessions.isEmpty)
+  }
+
+  func testHundredThousandLiveOffersUseOneBoundedDrainAndRefreshWake() async throws {
+    let runtimeLogicalID = UUID()
+    let connectionID = UUID()
+    let context = try makeObservationContext(
+      connectionID: connectionID,
+      displayName: "Hundred thousand offers"
+    )
+    let epoch = SessionEpoch()
+    let projectionQueue = DispatchQueue(
+      label: "ViewerFoundationTests.hundred-thousand-live-offers"
+    )
+    let refreshScheduler = ManualLiveRefreshScheduler()
+    let window = ViewerLiveEventWindow(
+      runtimeLogicalID: runtimeLogicalID,
+      projectionQueue: projectionQueue,
+      refreshScheduler: refreshScheduler.value
+    )
+
+    func observation(sequence: UInt64) throws -> ViewerCommittedEventObservation {
+      try ViewerCommittedEventObservation(
+        runtimeLogicalID: runtimeLogicalID,
+        context: context,
+        nickname: nil,
+        envelope: makeObservationEnvelope(
+          content: .object(["value": .integer(Int64(sequence))]),
+          createdAt: Date(timeIntervalSince1970: 2_500),
+          sessionEpoch: epoch,
+          sequence: sequence
+        ),
+        viewerWallMilliseconds: 2_500_000,
+        viewerMonotonicNanoseconds: sequence,
+        deterministicEventBytes: 1,
+        initialDisposition: .buffered
+      )
+    }
+
+    for sequence in 0..<UInt64(ViewerLiveProjectionLimits.retainedCount) {
+      XCTAssertEqual(try window.offer(observation(sequence: sequence)), .accepted)
+      window.waitForProjectionForTesting()
+    }
+    XCTAssertEqual(window.retainedObservationCount, ViewerLiveProjectionLimits.retainedCount)
+    XCTAssertEqual(refreshScheduler.pendingCount, 1)
+    let baseline = window.diagnosticsForTesting()
+
+    let gate = BlockingViewerOperationGate()
+    projectionQueue.async { gate.run() }
+    XCTAssertEqual(gate.waitUntilEntered(), .success)
+
+    let repeated = try observation(sequence: UInt64(ViewerLiveProjectionLimits.retainedCount))
+    let baselineFootprint = currentFoundationProcessPhysicalFootprintBytes()
+    let callbackStart = DispatchTime.now().uptimeNanoseconds
+    var acceptedCount = 0
+    var deferredCount = 0
+    var untrackedCount = 0
+    var unexpectedCount = 0
+    for _ in 0..<100_000 {
+      switch window.offer(repeated) {
+      case .accepted: acceptedCount += 1
+      case .deferred: deferredCount += 1
+      case .untracked: untrackedCount += 1
+      case .identical, .presentationConflict, .sealed: unexpectedCount += 1
+      }
+    }
+    let callbackElapsed = DispatchTime.now().uptimeNanoseconds - callbackStart
+    let endingFootprint = currentFoundationProcessPhysicalFootprintBytes()
+
+    XCTAssertEqual(acceptedCount, 1)
+    XCTAssertEqual(deferredCount, ViewerLiveProjectionLimits.ingressCount - 1)
+    XCTAssertEqual(
+      untrackedCount,
+      100_000 - ViewerLiveProjectionLimits.ingressCount
+    )
+    XCTAssertEqual(unexpectedCount, 0)
+
+    gate.release()
+    window.waitForProjectionForTesting()
+    let diagnostics = window.diagnosticsForTesting()
+    XCTAssertEqual(diagnostics.ingressOfferCount - baseline.ingressOfferCount, 100_000)
+    XCTAssertEqual(diagnostics.drainScheduleCount - baseline.drainScheduleCount, 1)
+    XCTAssertEqual(diagnostics.dirtySuccessorCount - baseline.dirtySuccessorCount, 1)
+    XCTAssertEqual(diagnostics.drainRunCount - baseline.drainRunCount, 1)
+    XCTAssertEqual(diagnostics.maximumConcurrentDrainCount, 1)
+    XCTAssertEqual(
+      diagnostics.snapshotPublicationCount - baseline.snapshotPublicationCount,
+      1
+    )
+    XCTAssertEqual(diagnostics.refreshScheduleCount, 1)
+    XCTAssertEqual(diagnostics.refreshDeliveryCount, 0)
+    XCTAssertEqual(refreshScheduler.pendingCount, 1)
+
+    let snapshot = window.snapshot()
+    XCTAssertEqual(snapshot.events.count, ViewerLiveProjectionLimits.retainedCount)
+    XCTAssertEqual(
+      snapshot.gaps.ingressOverflowCount,
+      UInt64(100_000 - ViewerLiveProjectionLimits.ingressCount)
+    )
+    XCTAssertEqual(snapshot.gaps.windowOverflowCount, 1)
+    XCTAssertEqual(
+      snapshot.accountedEventBytes,
+      ViewerLiveProjectionLimits.retainedCount
+        * (ViewerLiveProjectionLimits.fixedEntryOverheadBytes + 1)
+    )
+
+    refreshScheduler.runNext()
+    let delivered = window.diagnosticsForTesting()
+    XCTAssertEqual(delivered.refreshScheduleCount, 1)
+    XCTAssertEqual(delivered.refreshDeliveryCount, 1)
+
+    let footprintGrowth: UInt64? = {
+      guard let baselineFootprint, let endingFootprint else { return nil }
+      return endingFootprint >= baselineFootprint ? endingFootprint - baselineFootprint : 0
+    }()
+    let footprintText = footprintGrowth.map(String.init) ?? "unavailable"
+    print(
+      "NearWire 100,000 live-offer diagnostics: callback-total-ns=\(callbackElapsed), process-footprint-growth=\(footprintText)"
+    )
+
+    await window.runtimeEnded()
+    XCTAssertTrue(window.isCleared)
+    XCTAssertTrue(window.snapshot().events.isEmpty)
+  }
+
+  func testLiveIngressAdmitsOneMaximumEventAndRejectsTheTwentyMiBOverflow() throws {
+    let runtimeLogicalID = UUID()
+    let connectionID = UUID()
+    let context = try makeObservationContext(connectionID: connectionID, displayName: "Maximum")
+    let epoch = SessionEpoch()
+    let projectionQueue = DispatchQueue(label: "ViewerFoundationTests.live-projection-byte-bound")
+    let projectionGate = DispatchSemaphore(value: 0)
+    projectionQueue.async { projectionGate.wait() }
+    let window = ViewerLiveEventWindow(
+      runtimeLogicalID: runtimeLogicalID,
+      projectionQueue: projectionQueue
+    )
+    let maximum = try ViewerCommittedEventObservation(
+      runtimeLogicalID: runtimeLogicalID,
+      context: context,
+      nickname: nil,
+      envelope: makeObservationEnvelope(
+        content: .object(["value": .integer(1)]),
+        createdAt: Date(timeIntervalSince1970: 3_000),
+        sessionEpoch: epoch,
+        sequence: 1
+      ),
+      viewerWallMilliseconds: 3_000_000,
+      viewerMonotonicNanoseconds: 1,
+      deterministicEventBytes: 16 * 1_024 * 1_024,
+      initialDisposition: .buffered
+    )
+    let overflow = try ViewerCommittedEventObservation(
+      runtimeLogicalID: runtimeLogicalID,
+      context: context,
+      nickname: nil,
+      envelope: makeObservationEnvelope(
+        content: .object(["value": .integer(2)]),
+        createdAt: Date(timeIntervalSince1970: 3_000),
+        sessionEpoch: epoch,
+        sequence: 2
+      ),
+      viewerWallMilliseconds: 3_000_001,
+      viewerMonotonicNanoseconds: 2,
+      deterministicEventBytes: 4 * 1_024 * 1_024,
+      initialDisposition: .buffered
+    )
+
+    XCTAssertEqual(window.offer(maximum), .accepted)
+    XCTAssertEqual(window.offer(overflow), .untracked)
+    projectionGate.signal()
+    window.waitForProjectionForTesting()
+    XCTAssertEqual(window.retainedObservationCount, 1)
+    XCTAssertEqual(window.snapshot().gaps.ingressOverflowCount, 1)
+
+    let retainedWindow = ViewerLiveEventWindow(runtimeLogicalID: runtimeLogicalID)
+    let retainedEventBytes =
+      16 * 1_024 * 1_024 - ViewerLiveProjectionLimits.fixedEntryOverheadBytes
+    let retainedFirst = try ViewerCommittedEventObservation(
+      runtimeLogicalID: runtimeLogicalID,
+      context: context,
+      nickname: nil,
+      envelope: makeObservationEnvelope(
+        content: .object(["value": .integer(3)]),
+        createdAt: Date(timeIntervalSince1970: 3_000),
+        sessionEpoch: epoch,
+        sequence: 3
+      ),
+      viewerWallMilliseconds: 3_000_002,
+      viewerMonotonicNanoseconds: 3,
+      deterministicEventBytes: retainedEventBytes,
+      initialDisposition: .buffered
+    )
+    let retainedSecond = try ViewerCommittedEventObservation(
+      runtimeLogicalID: runtimeLogicalID,
+      context: context,
+      nickname: nil,
+      envelope: makeObservationEnvelope(
+        content: .object(["value": .integer(4)]),
+        createdAt: Date(timeIntervalSince1970: 3_000),
+        sessionEpoch: epoch,
+        sequence: 4
+      ),
+      viewerWallMilliseconds: 3_000_003,
+      viewerMonotonicNanoseconds: 4,
+      deterministicEventBytes: retainedEventBytes,
+      initialDisposition: .buffered
+    )
+    let retainedOverflow = try ViewerCommittedEventObservation(
+      runtimeLogicalID: runtimeLogicalID,
+      context: context,
+      nickname: nil,
+      envelope: makeObservationEnvelope(
+        content: .object(["value": .integer(5)]),
+        createdAt: Date(timeIntervalSince1970: 3_000),
+        sessionEpoch: epoch,
+        sequence: 5
+      ),
+      viewerWallMilliseconds: 3_000_004,
+      viewerMonotonicNanoseconds: 5,
+      deterministicEventBytes: 1,
+      initialDisposition: .buffered
+    )
+
+    XCTAssertEqual(retainedWindow.offer(retainedFirst), .accepted)
+    retainedWindow.waitForProjectionForTesting()
+    XCTAssertEqual(retainedWindow.offer(retainedSecond), .accepted)
+    retainedWindow.waitForProjectionForTesting()
+    XCTAssertEqual(retainedWindow.retainedObservationCount, 2)
+    XCTAssertEqual(
+      retainedWindow.retainedObservationBytes,
+      ViewerLiveProjectionLimits.retainedBytes
+    )
+
+    XCTAssertEqual(retainedWindow.offer(retainedOverflow), .accepted)
+    retainedWindow.waitForProjectionForTesting()
+    let retainedSnapshot = retainedWindow.snapshot()
+    XCTAssertEqual(retainedWindow.retainedObservationCount, 2)
+    XCTAssertEqual(retainedSnapshot.gaps.windowOverflowCount, 1)
+    XCTAssertEqual(
+      Set(retainedSnapshot.events.map(\.observation.observationID)),
+      Set([retainedSecond.observationID, retainedOverflow.observationID])
+    )
+  }
+
+  func testLiveSessionMetadataStaysBoundedAndFreshActiveSessionSurvivesChurn() throws {
+    let runtimeLogicalID = UUID()
+    let blockedQueue = DispatchQueue(label: "ViewerFoundationTests.session-churn-blocked")
+    let blockedGate = DispatchSemaphore(value: 0)
+    blockedQueue.async { blockedGate.wait() }
+    let blockedWindow = ViewerLiveEventWindow(
+      runtimeLogicalID: runtimeLogicalID,
+      projectionQueue: blockedQueue
+    )
+
+    for index in 0..<1_000 {
+      let connectionID = UUID()
+      let context = try makeObservationContext(
+        connectionID: connectionID,
+        displayName: "Blocked churn \(index)"
+      )
+      blockedWindow.sessionStarted(
+        try ViewerFrozenSessionMetadata(context: context, nickname: nil),
+        connectionID: connectionID
+      )
+      blockedWindow.sessionEnded(
+        connectionID: connectionID,
+        wallMilliseconds: Int64(index + 1),
+        monotonicNanoseconds: UInt64(index + 1)
+      )
+    }
+    XCTAssertEqual(blockedWindow.activeSessionMetadataCountForTesting, 0)
+    XCTAssertEqual(
+      blockedWindow.pendingSessionTerminationCountForTesting,
+      ViewerLiveProjectionLimits.maximumSessions
+    )
+    blockedGate.signal()
+    blockedWindow.waitForProjectionForTesting()
+    XCTAssertLessThanOrEqual(
+      blockedWindow.snapshot().sessions.count,
+      ViewerLiveProjectionLimits.maximumSessions
+    )
+    XCTAssertGreaterThan(blockedWindow.snapshot().gaps.diagnosticLossCount, 0)
+
+    let window = ViewerLiveEventWindow(runtimeLogicalID: runtimeLogicalID)
+    for index in 0..<ViewerLiveProjectionLimits.maximumSessions {
+      let connectionID = UUID()
+      let context = try makeObservationContext(
+        connectionID: connectionID,
+        displayName: "Retained churn \(index)"
+      )
+      window.sessionStarted(
+        try ViewerFrozenSessionMetadata(context: context, nickname: nil),
+        connectionID: connectionID
+      )
+      let observation = try ViewerCommittedEventObservation(
+        runtimeLogicalID: runtimeLogicalID,
+        context: context,
+        nickname: nil,
+        envelope: makeObservationEnvelope(
+          content: .object(["index": .integer(Int64(index))]),
+          createdAt: Date(timeIntervalSince1970: Double(index + 1)),
+          sessionEpoch: SessionEpoch(),
+          sequence: 1
+        ),
+        viewerWallMilliseconds: Int64(index + 1),
+        viewerMonotonicNanoseconds: UInt64(index + 1),
+        deterministicEventBytes: 1,
+        initialDisposition: .buffered
+      )
+      XCTAssertEqual(window.offer(observation), .accepted)
+      window.waitForProjectionForTesting()
+      window.sessionEnded(
+        connectionID: connectionID,
+        wallMilliseconds: Int64(index + 100),
+        monotonicNanoseconds: UInt64(index + 100)
+      )
+      window.waitForProjectionForTesting()
+    }
+    XCTAssertEqual(window.snapshot().sessions.count, ViewerLiveProjectionLimits.maximumSessions)
+
+    let freshConnectionID = UUID()
+    let freshContext = try makeObservationContext(
+      connectionID: freshConnectionID,
+      displayName: "Fresh active session"
+    )
+    window.sessionStarted(
+      try ViewerFrozenSessionMetadata(context: freshContext, nickname: nil),
+      connectionID: freshConnectionID
+    )
+    let freshObservation = try ViewerCommittedEventObservation(
+      runtimeLogicalID: runtimeLogicalID,
+      context: freshContext,
+      nickname: nil,
+      envelope: makeObservationEnvelope(
+        content: .object(["fresh": .bool(true)]),
+        createdAt: Date(timeIntervalSince1970: 100),
+        sessionEpoch: SessionEpoch(),
+        sequence: 1
+      ),
+      viewerWallMilliseconds: 100,
+      viewerMonotonicNanoseconds: 100,
+      deterministicEventBytes: 1,
+      initialDisposition: .buffered
+    )
+    XCTAssertEqual(window.offer(freshObservation), .accepted)
+    window.waitForProjectionForTesting()
+    let snapshot = window.snapshot()
+    XCTAssertEqual(snapshot.sessions.count, ViewerLiveProjectionLimits.maximumSessions)
+    XCTAssertTrue(snapshot.sessions.contains { $0.connectionID == freshConnectionID })
+    XCTAssertTrue(
+      snapshot.events.contains { $0.observation.key.connectionID == freshConnectionID }
+    )
+    XCTAssertEqual(snapshot.gaps.windowOverflowCount, 1)
+  }
+
+  func testBlockedProjectionRetainsTerminalTransitionsBeforeReplacementSessions() throws {
+    let runtimeLogicalID = UUID()
+    let projectionQueue = DispatchQueue(
+      label: "ViewerFoundationTests.session-generation-transition"
+    )
+    let window = ViewerLiveEventWindow(
+      runtimeLogicalID: runtimeLogicalID,
+      projectionQueue: projectionQueue
+    )
+
+    func observation(
+      context: ViewerAdmissionSessionContext,
+      index: Int,
+      generation: String
+    ) throws -> ViewerCommittedEventObservation {
+      try ViewerCommittedEventObservation(
+        runtimeLogicalID: runtimeLogicalID,
+        context: context,
+        nickname: nil,
+        envelope: makeObservationEnvelope(
+          content: .object([
+            "generation": .string(generation),
+            "index": .integer(Int64(index)),
+          ]),
+          createdAt: Date(timeIntervalSince1970: Double(index + 1)),
+          sessionEpoch: SessionEpoch(),
+          sequence: 1
+        ),
+        viewerWallMilliseconds: Int64(index + 1),
+        viewerMonotonicNanoseconds: UInt64(index + 1),
+        deterministicEventBytes: 1,
+        initialDisposition: .buffered
+      )
+    }
+
+    var initialContexts: [ViewerAdmissionSessionContext] = []
+    for index in 0..<ViewerLiveProjectionLimits.maximumSessions {
+      let context = try makeObservationContext(
+        connectionID: UUID(),
+        displayName: "Initial generation \(index)"
+      )
+      initialContexts.append(context)
+      window.sessionStarted(
+        try ViewerFrozenSessionMetadata(context: context, nickname: nil),
+        connectionID: context.connectionID
+      )
+      XCTAssertEqual(
+        window.offer(try observation(context: context, index: index, generation: "initial")),
+        .accepted
+      )
+    }
+    window.waitForProjectionForTesting()
+    XCTAssertEqual(window.snapshot().sessions.count, ViewerLiveProjectionLimits.maximumSessions)
+
+    let projectionBlocked = DispatchSemaphore(value: 0)
+    let projectionRelease = DispatchSemaphore(value: 0)
+    projectionQueue.async {
+      projectionBlocked.signal()
+      projectionRelease.wait()
+    }
+    XCTAssertEqual(projectionBlocked.wait(timeout: .now() + 1), .success)
+
+    for (index, context) in initialContexts.enumerated() {
+      window.sessionEnded(
+        connectionID: context.connectionID,
+        wallMilliseconds: Int64(index + 100),
+        monotonicNanoseconds: UInt64(index + 100)
+      )
+    }
+
+    var replacementConnectionIDs = Set<UUID>()
+    for index in 0..<ViewerLiveProjectionLimits.maximumSessions {
+      let context = try makeObservationContext(
+        connectionID: UUID(),
+        displayName: "Replacement generation \(index)"
+      )
+      replacementConnectionIDs.insert(context.connectionID)
+      window.sessionStarted(
+        try ViewerFrozenSessionMetadata(context: context, nickname: nil),
+        connectionID: context.connectionID
+      )
+      XCTAssertEqual(
+        window.offer(try observation(context: context, index: index, generation: "replacement")),
+        .accepted
+      )
+    }
+    XCTAssertEqual(
+      window.activeSessionMetadataCountForTesting,
+      ViewerLiveProjectionLimits.maximumSessions
+    )
+    XCTAssertEqual(
+      window.pendingSessionTerminationCountForTesting,
+      ViewerLiveProjectionLimits.maximumSessions
+    )
+
+    projectionRelease.signal()
+    window.waitForProjectionForTesting()
+    let snapshot = window.snapshot()
+    XCTAssertEqual(snapshot.sessions.count, ViewerLiveProjectionLimits.maximumSessions)
+    XCTAssertEqual(Set(snapshot.sessions.map(\.connectionID)), replacementConnectionIDs)
+    XCTAssertEqual(snapshot.events.count, ViewerLiveProjectionLimits.maximumSessions)
+    XCTAssertEqual(
+      Set(snapshot.events.map(\.observation.key.connectionID)),
+      replacementConnectionIDs
+    )
+    XCTAssertEqual(
+      snapshot.gaps.windowOverflowCount,
+      UInt64(ViewerLiveProjectionLimits.maximumSessions)
+    )
+  }
+
+  func testBlockedProjectionReconcilesEndedReplacementBeforeFreshGeneration() throws {
+    let runtimeLogicalID = UUID()
+    let projectionQueue = DispatchQueue(
+      label: "ViewerFoundationTests.three-session-generations"
+    )
+    let window = ViewerLiveEventWindow(
+      runtimeLogicalID: runtimeLogicalID,
+      projectionQueue: projectionQueue
+    )
+
+    func makeEvent(
+      _ context: ViewerAdmissionSessionContext,
+      generation: String,
+      index: Int
+    ) throws -> ViewerCommittedEventObservation {
+      try ViewerCommittedEventObservation(
+        runtimeLogicalID: runtimeLogicalID,
+        context: context,
+        nickname: nil,
+        envelope: makeObservationEnvelope(
+          content: .object(["generation": .string(generation)]),
+          createdAt: Date(timeIntervalSince1970: Double(index + 1)),
+          sessionEpoch: SessionEpoch(),
+          sequence: 1
+        ),
+        viewerWallMilliseconds: Int64(index + 1),
+        viewerMonotonicNanoseconds: UInt64(index + 1),
+        deterministicEventBytes: 1,
+        initialDisposition: .buffered
+      )
+    }
+
+    var initialContexts: [ViewerAdmissionSessionContext] = []
+    for index in 0..<ViewerLiveProjectionLimits.maximumSessions {
+      let context = try makeObservationContext(
+        connectionID: UUID(),
+        displayName: "Initial three-generation \(index)"
+      )
+      initialContexts.append(context)
+      window.sessionStarted(
+        try ViewerFrozenSessionMetadata(context: context, nickname: nil),
+        connectionID: context.connectionID
+      )
+      XCTAssertEqual(window.offer(try makeEvent(context, generation: "A", index: index)), .accepted)
+    }
+    window.waitForProjectionForTesting()
+
+    let blocked = DispatchSemaphore(value: 0)
+    let release = DispatchSemaphore(value: 0)
+    projectionQueue.async {
+      blocked.signal()
+      release.wait()
+    }
+    XCTAssertEqual(blocked.wait(timeout: .now() + 1), .success)
+
+    for (index, context) in initialContexts.enumerated() {
+      window.sessionEnded(
+        connectionID: context.connectionID,
+        wallMilliseconds: Int64(index + 100),
+        monotonicNanoseconds: UInt64(index + 100)
+      )
+    }
+    for index in 0..<ViewerLiveProjectionLimits.maximumSessions {
+      let context = try makeObservationContext(
+        connectionID: UUID(),
+        displayName: "Ended replacement \(index)"
+      )
+      window.sessionStarted(
+        try ViewerFrozenSessionMetadata(context: context, nickname: nil),
+        connectionID: context.connectionID
+      )
+      XCTAssertEqual(window.offer(try makeEvent(context, generation: "B", index: index)), .accepted)
+      window.sessionEnded(
+        connectionID: context.connectionID,
+        wallMilliseconds: Int64(index + 200),
+        monotonicNanoseconds: UInt64(index + 200)
+      )
+    }
+
+    var freshConnectionIDs = Set<UUID>()
+    for index in 0..<ViewerLiveProjectionLimits.maximumSessions {
+      let context = try makeObservationContext(
+        connectionID: UUID(),
+        displayName: "Fresh generation \(index)"
+      )
+      freshConnectionIDs.insert(context.connectionID)
+      window.sessionStarted(
+        try ViewerFrozenSessionMetadata(context: context, nickname: nil),
+        connectionID: context.connectionID
+      )
+      XCTAssertEqual(window.offer(try makeEvent(context, generation: "C", index: index)), .accepted)
+    }
+    XCTAssertEqual(
+      window.activeSessionMetadataCountForTesting,
+      ViewerLiveProjectionLimits.maximumSessions
+    )
+    XCTAssertEqual(
+      window.pendingSessionTerminationCountForTesting,
+      ViewerLiveProjectionLimits.maximumSessions
+    )
+
+    release.signal()
+    window.waitForProjectionForTesting()
+    let snapshot = window.snapshot()
+    XCTAssertEqual(Set(snapshot.sessions.map(\.connectionID)), freshConnectionIDs)
+    XCTAssertEqual(Set(snapshot.events.map(\.observation.key.connectionID)), freshConnectionIDs)
+    XCTAssertTrue(snapshot.sessions.allSatisfy { $0.endedMonotonicNanoseconds == nil })
+    XCTAssertEqual(
+      snapshot.gaps.windowOverflowCount,
+      UInt64(ViewerLiveProjectionLimits.maximumSessions * 2)
+    )
+    XCTAssertGreaterThanOrEqual(
+      snapshot.gaps.diagnosticLossCount,
+      UInt64(ViewerLiveProjectionLimits.maximumSessions)
+    )
+  }
+
+  func testBlockedSingleSlotChurnPreservesLatestActiveGeneration() throws {
+    let runtimeLogicalID = UUID()
+    let projectionQueue = DispatchQueue(label: "ViewerFoundationTests.single-slot-churn")
+    let window = ViewerLiveEventWindow(
+      runtimeLogicalID: runtimeLogicalID,
+      projectionQueue: projectionQueue
+    )
+
+    func makeEvent(
+      _ context: ViewerAdmissionSessionContext,
+      generation: Int
+    ) throws -> ViewerCommittedEventObservation {
+      try ViewerCommittedEventObservation(
+        runtimeLogicalID: runtimeLogicalID,
+        context: context,
+        nickname: nil,
+        envelope: makeObservationEnvelope(
+          content: .object(["generation": .integer(Int64(generation))]),
+          createdAt: Date(timeIntervalSince1970: Double(generation + 1)),
+          sessionEpoch: SessionEpoch(),
+          sequence: 1
+        ),
+        viewerWallMilliseconds: Int64(generation + 1),
+        viewerMonotonicNanoseconds: UInt64(generation + 1),
+        deterministicEventBytes: 1,
+        initialDisposition: .buffered
+      )
+    }
+
+    var initialContexts: [ViewerAdmissionSessionContext] = []
+    for index in 0..<ViewerLiveProjectionLimits.maximumSessions {
+      let context = try makeObservationContext(
+        connectionID: UUID(),
+        displayName: "Single-slot initial \(index)"
+      )
+      initialContexts.append(context)
+      window.sessionStarted(
+        try ViewerFrozenSessionMetadata(context: context, nickname: nil),
+        connectionID: context.connectionID
+      )
+      XCTAssertEqual(window.offer(try makeEvent(context, generation: index)), .accepted)
+    }
+    window.waitForProjectionForTesting()
+
+    let blocked = DispatchSemaphore(value: 0)
+    let release = DispatchSemaphore(value: 0)
+    projectionQueue.async {
+      blocked.signal()
+      release.wait()
+    }
+    XCTAssertEqual(blocked.wait(timeout: .now() + 1), .success)
+
+    let displaced = initialContexts[0]
+    window.sessionEnded(
+      connectionID: displaced.connectionID,
+      wallMilliseconds: 100,
+      monotonicNanoseconds: 100
+    )
+    let intermediateCount = ViewerLiveProjectionLimits.maximumSessions + 4
+    for generation in 0..<intermediateCount {
+      let context = try makeObservationContext(
+        connectionID: UUID(),
+        displayName: "Single-slot intermediate \(generation)"
+      )
+      window.sessionStarted(
+        try ViewerFrozenSessionMetadata(context: context, nickname: nil),
+        connectionID: context.connectionID
+      )
+      XCTAssertEqual(window.offer(try makeEvent(context, generation: 100 + generation)), .accepted)
+      window.sessionEnded(
+        connectionID: context.connectionID,
+        wallMilliseconds: Int64(200 + generation),
+        monotonicNanoseconds: UInt64(200 + generation)
+      )
+    }
+
+    let latest = try makeObservationContext(
+      connectionID: UUID(),
+      displayName: "Single-slot latest"
+    )
+    window.sessionStarted(
+      try ViewerFrozenSessionMetadata(context: latest, nickname: nil),
+      connectionID: latest.connectionID
+    )
+    XCTAssertEqual(window.offer(try makeEvent(latest, generation: 1_000)), .accepted)
+
+    release.signal()
+    window.waitForProjectionForTesting()
+    let snapshot = window.snapshot()
+    let expectedSessionIDs = Set(initialContexts.dropFirst().map(\.connectionID)).union([
+      latest.connectionID
+    ])
+    XCTAssertEqual(Set(snapshot.sessions.map(\.connectionID)), expectedSessionIDs)
+    XCTAssertEqual(Set(snapshot.events.map(\.observation.key.connectionID)), expectedSessionIDs)
+    XCTAssertTrue(
+      snapshot.sessions.contains { session in
+        session.connectionID == latest.connectionID
+          && session.metadata.displayName == "Single-slot latest"
+          && session.endedMonotonicNanoseconds == nil
+      })
+    XCTAssertEqual(
+      snapshot.gaps.windowOverflowCount,
+      UInt64(intermediateCount + 1)
+    )
+  }
+
+  func testDirectObservationModeSurvivesDispositionAndReconcilesAtLifecycleTransition() throws {
+    let runtimeLogicalID = UUID()
+    let window = ViewerLiveEventWindow(runtimeLogicalID: runtimeLogicalID)
+
+    func makeEvent(
+      _ context: ViewerAdmissionSessionContext,
+      index: Int
+    ) throws -> ViewerCommittedEventObservation {
+      try ViewerCommittedEventObservation(
+        runtimeLogicalID: runtimeLogicalID,
+        context: context,
+        nickname: nil,
+        envelope: makeObservationEnvelope(
+          content: .object(["index": .integer(Int64(index))]),
+          createdAt: Date(timeIntervalSince1970: Double(index + 1)),
+          sessionEpoch: SessionEpoch(),
+          sequence: 1
+        ),
+        viewerWallMilliseconds: Int64(index + 1),
+        viewerMonotonicNanoseconds: UInt64(index + 1),
+        deterministicEventBytes: 1,
+        initialDisposition: .buffered
+      )
+    }
+
+    var directObservations: [ViewerCommittedEventObservation] = []
+    for index in 0..<ViewerLiveProjectionLimits.maximumSessions {
+      let context = try makeObservationContext(
+        connectionID: UUID(),
+        displayName: "Direct observation \(index)"
+      )
+      let observation = try makeEvent(context, index: index)
+      directObservations.append(observation)
+      XCTAssertEqual(window.offer(observation), .accepted)
+      window.waitForProjectionForTesting()
+      if index == 0 {
+        window.laterDisposition(key: observation.key, disposition: .transportAdmitted)
+        window.waitForProjectionForTesting()
+      }
+    }
+    XCTAssertEqual(window.snapshot().sessions.count, ViewerLiveProjectionLimits.maximumSessions)
+    XCTAssertEqual(window.snapshot().events.count, ViewerLiveProjectionLimits.maximumSessions)
+    XCTAssertEqual(window.snapshot().events.first?.laterDisposition, .transportAdmitted)
+
+    let managedContext = try makeObservationContext(
+      connectionID: UUID(),
+      displayName: "Managed lifecycle"
+    )
+    window.sessionStarted(
+      try ViewerFrozenSessionMetadata(context: managedContext, nickname: nil),
+      connectionID: managedContext.connectionID
+    )
+    let managedObservation = try makeEvent(managedContext, index: 1_000)
+    XCTAssertEqual(window.offer(managedObservation), .accepted)
+    window.waitForProjectionForTesting()
+
+    let snapshot = window.snapshot()
+    XCTAssertEqual(snapshot.sessions.map(\.connectionID), [managedContext.connectionID])
+    XCTAssertEqual(
+      snapshot.events.map(\.observation.observationID),
+      [managedObservation.observationID]
+    )
+    XCTAssertEqual(
+      snapshot.gaps.windowOverflowCount,
+      UInt64(ViewerLiveProjectionLimits.maximumSessions)
+    )
+    XCTAssertTrue(
+      directObservations.allSatisfy { direct in
+        !snapshot.events.contains { $0.observation.observationID == direct.observationID }
+      }
+    )
+  }
+
+  func testLifecycleTransitionClearsDetachedDirectConflictMarker() throws {
+    let runtimeLogicalID = UUID()
+    let window = ViewerLiveEventWindow(runtimeLogicalID: runtimeLogicalID)
+    let directContext = try makeObservationContext(
+      connectionID: UUID(),
+      displayName: "Conflicted direct observation"
+    )
+    let directObservation = try ViewerCommittedEventObservation(
+      runtimeLogicalID: runtimeLogicalID,
+      context: directContext,
+      nickname: nil,
+      envelope: makeObservationEnvelope(
+        content: .object(["value": .string("direct")]),
+        createdAt: Date(timeIntervalSince1970: 1),
+        sessionEpoch: SessionEpoch(),
+        sequence: 1
+      ),
+      viewerWallMilliseconds: 1,
+      viewerMonotonicNanoseconds: 1,
+      deterministicEventBytes: 1,
+      initialDisposition: .buffered
+    )
+    XCTAssertEqual(window.offer(directObservation), .accepted)
+    window.waitForProjectionForTesting()
+    window.applyStoreOutcome(
+      .journalConflict,
+      key: directObservation.key,
+      observationID: directObservation.observationID
+    )
+    window.waitForProjectionForTesting()
+    XCTAssertTrue(window.snapshot().events.isEmpty)
+    XCTAssertEqual(window.snapshot().gaps.residentConflictCount, 1)
+
+    let managedContext = try makeObservationContext(
+      connectionID: UUID(),
+      displayName: "Managed lifecycle"
+    )
+    window.sessionStarted(
+      try ViewerFrozenSessionMetadata(context: managedContext, nickname: nil),
+      connectionID: managedContext.connectionID
+    )
+    window.waitForProjectionForTesting()
+
+    let snapshot = window.snapshot()
+    XCTAssertEqual(snapshot.sessions.map(\.connectionID), [managedContext.connectionID])
+    XCTAssertTrue(snapshot.events.isEmpty)
+    XCTAssertEqual(snapshot.gaps.residentConflictCount, 0)
+    XCTAssertEqual(snapshot.gaps.windowOverflowCount, 0)
+    XCTAssertEqual(snapshot.gaps.diagnosticLossCount, 1)
+  }
+
+  func testManagedSessionReclamationRemovesDetachedConflictMarker() throws {
+    let runtimeLogicalID = UUID()
+    let window = ViewerLiveEventWindow(runtimeLogicalID: runtimeLogicalID)
+    let context = try makeObservationContext(
+      connectionID: UUID(),
+      displayName: "Managed conflict reclamation"
+    )
+    let observation = try ViewerCommittedEventObservation(
+      runtimeLogicalID: runtimeLogicalID,
+      context: context,
+      nickname: nil,
+      envelope: makeObservationEnvelope(
+        content: .object(["value": .string("managed")]),
+        createdAt: Date(timeIntervalSince1970: 1),
+        sessionEpoch: SessionEpoch(),
+        sequence: 1
+      ),
+      viewerWallMilliseconds: 1,
+      viewerMonotonicNanoseconds: 1,
+      deterministicEventBytes: 1,
+      initialDisposition: .buffered
+    )
+    window.sessionStarted(
+      try ViewerFrozenSessionMetadata(context: context, nickname: nil),
+      connectionID: context.connectionID
+    )
+    XCTAssertEqual(window.offer(observation), .accepted)
+    window.waitForProjectionForTesting()
+    window.applyStoreOutcome(
+      .journalConflict,
+      key: observation.key,
+      observationID: observation.observationID
+    )
+    window.waitForProjectionForTesting()
+    XCTAssertEqual(window.snapshot().gaps.residentConflictCount, 1)
+
+    window.sessionEnded(
+      connectionID: context.connectionID,
+      wallMilliseconds: 2,
+      monotonicNanoseconds: 2
+    )
+    window.waitForProjectionForTesting()
+
+    let snapshot = window.snapshot()
+    XCTAssertTrue(snapshot.sessions.isEmpty)
+    XCTAssertTrue(snapshot.events.isEmpty)
+    XCTAssertEqual(snapshot.gaps.residentConflictCount, 0)
+    XCTAssertEqual(snapshot.gaps.windowOverflowCount, 0)
+    XCTAssertEqual(snapshot.gaps.diagnosticLossCount, 1)
+  }
+
+  func testManagedSessionCapacityEvictionRemovesDetachedConflictMarker() throws {
+    let runtimeLogicalID = UUID()
+    let window = ViewerLiveEventWindow(runtimeLogicalID: runtimeLogicalID)
+    let epoch = SessionEpoch()
+    var contexts: [ViewerAdmissionSessionContext] = []
+    for index in 0..<ViewerLiveProjectionLimits.maximumSessions {
+      let context = try makeObservationContext(
+        connectionID: UUID(),
+        displayName: "Managed capacity \(index)"
+      )
+      contexts.append(context)
+      window.sessionStarted(
+        try ViewerFrozenSessionMetadata(context: context, nickname: nil),
+        connectionID: context.connectionID
+      )
+    }
+    let target = contexts[0]
+    func makeTargetEvent(sequence: UInt64) throws -> ViewerCommittedEventObservation {
+      try ViewerCommittedEventObservation(
+        runtimeLogicalID: runtimeLogicalID,
+        context: target,
+        nickname: nil,
+        envelope: makeObservationEnvelope(
+          content: .object(["sequence": .integer(Int64(sequence))]),
+          createdAt: Date(timeIntervalSince1970: Double(sequence)),
+          sessionEpoch: epoch,
+          sequence: sequence
+        ),
+        viewerWallMilliseconds: Int64(sequence),
+        viewerMonotonicNanoseconds: sequence,
+        deterministicEventBytes: 1,
+        initialDisposition: .buffered
+      )
+    }
+    let conflicted = try makeTargetEvent(sequence: 1)
+    let retained = try makeTargetEvent(sequence: 2)
+    XCTAssertEqual(window.offer(conflicted), .accepted)
+    XCTAssertEqual(window.offer(retained), .accepted)
+    window.waitForProjectionForTesting()
+    window.applyStoreOutcome(
+      .journalConflict,
+      key: conflicted.key,
+      observationID: conflicted.observationID
+    )
+    window.sessionEnded(
+      connectionID: target.connectionID,
+      wallMilliseconds: 3,
+      monotonicNanoseconds: 3
+    )
+    window.waitForProjectionForTesting()
+    XCTAssertEqual(window.snapshot().gaps.residentConflictCount, 1)
+
+    let replacement = try makeObservationContext(
+      connectionID: UUID(),
+      displayName: "Managed capacity replacement"
+    )
+    window.sessionStarted(
+      try ViewerFrozenSessionMetadata(context: replacement, nickname: nil),
+      connectionID: replacement.connectionID
+    )
+    window.waitForProjectionForTesting()
+
+    let snapshot = window.snapshot()
+    XCTAssertFalse(snapshot.sessions.contains { $0.connectionID == target.connectionID })
+    XCTAssertTrue(snapshot.sessions.contains { $0.connectionID == replacement.connectionID })
+    XCTAssertFalse(
+      snapshot.events.contains { $0.observation.observationID == retained.observationID }
+    )
+    XCTAssertEqual(snapshot.gaps.residentConflictCount, 0)
+    XCTAssertEqual(snapshot.gaps.windowOverflowCount, 1)
+    XCTAssertEqual(snapshot.gaps.diagnosticLossCount, 1)
+  }
+
+  func testShortLifecycleManagedSessionRetainsEventBeforeFirstAndEstablishedDrain() throws {
+    func exercise(establishedLifecycle: Bool) throws {
+      let runtimeLogicalID = UUID()
+      let projectionQueue = DispatchQueue(
+        label: "ViewerFoundationTests.short-session.\(establishedLifecycle)"
+      )
+      let window = ViewerLiveEventWindow(
+        runtimeLogicalID: runtimeLogicalID,
+        projectionQueue: projectionQueue
+      )
+      if establishedLifecycle {
+        let establishedContext = try makeObservationContext(
+          connectionID: UUID(),
+          displayName: "Established lifecycle"
+        )
+        window.sessionStarted(
+          try ViewerFrozenSessionMetadata(context: establishedContext, nickname: nil),
+          connectionID: establishedContext.connectionID
+        )
+        window.waitForProjectionForTesting()
+      }
+
+      let projectionEntered = DispatchSemaphore(value: 0)
+      let projectionRelease = DispatchSemaphore(value: 0)
+      projectionQueue.async {
+        projectionEntered.signal()
+        projectionRelease.wait()
+      }
+      XCTAssertEqual(projectionEntered.wait(timeout: .now() + 1), .success)
+
+      let context = try makeObservationContext(
+        connectionID: UUID(),
+        displayName: "Short lifecycle"
+      )
+      let observation = try ViewerCommittedEventObservation(
+        runtimeLogicalID: runtimeLogicalID,
+        context: context,
+        nickname: nil,
+        envelope: makeObservationEnvelope(
+          content: .object(["value": .string("short")]),
+          createdAt: Date(timeIntervalSince1970: 2),
+          sessionEpoch: SessionEpoch(),
+          sequence: 1
+        ),
+        viewerWallMilliseconds: 2,
+        viewerMonotonicNanoseconds: 2,
+        deterministicEventBytes: 1,
+        initialDisposition: .buffered
+      )
+      window.sessionStarted(
+        try ViewerFrozenSessionMetadata(context: context, nickname: nil),
+        connectionID: context.connectionID
+      )
+      XCTAssertEqual(window.offer(observation), .accepted)
+      window.laterDisposition(key: observation.key, disposition: .transportAdmitted)
+      window.sessionEnded(
+        connectionID: context.connectionID,
+        wallMilliseconds: 3,
+        monotonicNanoseconds: 3
+      )
+      projectionRelease.signal()
+      window.waitForProjectionForTesting()
+
+      let snapshot = window.snapshot()
+      let retained = try XCTUnwrap(
+        snapshot.events.first { $0.observation.observationID == observation.observationID }
+      )
+      XCTAssertEqual(retained.laterDisposition, .transportAdmitted)
+      XCTAssertTrue(retained.sessionEnded)
+      XCTAssertTrue(
+        snapshot.sessions.contains {
+          $0.connectionID == context.connectionID && $0.endedMonotonicNanoseconds == 3
+        }
+      )
+      XCTAssertEqual(snapshot.gaps.windowOverflowCount, 0)
+      XCTAssertEqual(snapshot.gaps.diagnosticLossCount, 0)
+    }
+
+    try exercise(establishedLifecycle: false)
+    try exercise(establishedLifecycle: true)
+  }
+
+  func testDuplicateSessionChurnReleasesOwnerlessAuthorityAcrossCapacityHorizon() throws {
+    let runtimeLogicalID = UUID()
+    let projectionQueue = DispatchQueue(label: "ViewerFoundationTests.authority-churn")
+    let window = ViewerLiveEventWindow(
+      runtimeLogicalID: runtimeLogicalID,
+      projectionQueue: projectionQueue
+    )
+
+    func makeEvent(
+      context: ViewerAdmissionSessionContext,
+      generation: Int
+    ) throws -> ViewerCommittedEventObservation {
+      try ViewerCommittedEventObservation(
+        runtimeLogicalID: runtimeLogicalID,
+        context: context,
+        nickname: nil,
+        envelope: makeObservationEnvelope(
+          content: .object(["generation": .integer(Int64(generation))]),
+          createdAt: Date(timeIntervalSince1970: Double(generation + 1)),
+          sessionEpoch: SessionEpoch(),
+          sequence: 1
+        ),
+        viewerWallMilliseconds: Int64(generation + 1),
+        viewerMonotonicNanoseconds: UInt64(generation + 1),
+        deterministicEventBytes: 1,
+        initialDisposition: .buffered
+      )
+    }
+
+    for index in 0..<(ViewerLiveProjectionLimits.maximumSessions - 1) {
+      let context = try makeObservationContext(
+        connectionID: UUID(),
+        displayName: "Authority anchor \(index)"
+      )
+      window.sessionStarted(
+        try ViewerFrozenSessionMetadata(context: context, nickname: nil),
+        connectionID: context.connectionID
+      )
+    }
+    var currentContext = try makeObservationContext(
+      connectionID: UUID(),
+      displayName: "Authority generation 0"
+    )
+    window.sessionStarted(
+      try ViewerFrozenSessionMetadata(context: currentContext, nickname: nil),
+      connectionID: currentContext.connectionID
+    )
+    var currentEvent = try makeEvent(context: currentContext, generation: 0)
+    XCTAssertEqual(window.offer(currentEvent), .accepted)
+    window.waitForProjectionForTesting()
+
+    let churnCount =
+      ViewerLiveProjectionLimits.retainedCount
+      + ViewerLiveProjectionLimits.ingressCount + 24
+    for generation in 1...churnCount {
+      let projectionEntered = DispatchSemaphore(value: 0)
+      let projectionRelease = DispatchSemaphore(value: 0)
+      projectionQueue.async {
+        projectionEntered.signal()
+        projectionRelease.wait()
+      }
+      XCTAssertEqual(projectionEntered.wait(timeout: .now() + 1), .success)
+      let duplicate = try ViewerCommittedEventObservation(
+        runtimeLogicalID: runtimeLogicalID,
+        context: currentContext,
+        nickname: nil,
+        envelope: currentEvent.envelope,
+        viewerWallMilliseconds: Int64(generation + 10_000),
+        viewerMonotonicNanoseconds: UInt64(generation + 10_000),
+        deterministicEventBytes: 1,
+        initialDisposition: .buffered
+      )
+      XCTAssertEqual(window.offer(duplicate), .deferred)
+      window.sessionEnded(
+        connectionID: currentContext.connectionID,
+        wallMilliseconds: Int64(generation + 20_000),
+        monotonicNanoseconds: UInt64(generation + 20_000)
+      )
+
+      let nextContext = try makeObservationContext(
+        connectionID: UUID(),
+        displayName: "Authority generation \(generation)"
+      )
+      window.sessionStarted(
+        try ViewerFrozenSessionMetadata(context: nextContext, nickname: nil),
+        connectionID: nextContext.connectionID
+      )
+      let nextEvent = try makeEvent(context: nextContext, generation: generation)
+      XCTAssertEqual(window.offer(nextEvent), .accepted)
+      projectionRelease.signal()
+      window.waitForProjectionForTesting()
+      XCTAssertEqual(window.ownerlessAuthorityCountForTesting, 0)
+      XCTAssertEqual(window.authorityCountForTesting, window.retainedObservationCount)
+      currentContext = nextContext
+      currentEvent = nextEvent
+    }
+
+    XCTAssertEqual(window.retainedObservationCount, 1)
+    XCTAssertEqual(window.authorityCountForTesting, 1)
+    XCTAssertEqual(window.ownerlessAuthorityCountForTesting, 0)
+    XCTAssertEqual(
+      window.snapshot().events.first?.observation.observationID,
+      currentEvent.observationID
+    )
+    XCTAssertEqual(window.snapshot().gaps.windowOverflowCount, UInt64(churnCount * 2))
+  }
+
+  @MainActor
+  func testLiveRefreshIsLatestOnlyTenHertzAndPausedPresentationSchedulesNothing() throws {
+    let runtimeLogicalID = UUID()
+    let connectionID = UUID()
+    let context = try makeObservationContext(connectionID: connectionID, displayName: "Refresh")
+    let epoch = SessionEpoch()
+    let scheduler = ManualLiveRefreshScheduler()
+    let window = ViewerLiveEventWindow(
+      runtimeLogicalID: runtimeLogicalID,
+      refreshScheduler: scheduler.value
+    )
+    let generations = LockedUInt64Collection()
+    window.setRefreshHandler { generations.append($0) }
+
+    func offer(_ sequence: UInt64) throws {
+      let value = try ViewerCommittedEventObservation(
+        runtimeLogicalID: runtimeLogicalID,
+        context: context,
+        nickname: nil,
+        envelope: makeObservationEnvelope(
+          content: .object(["value": .integer(Int64(sequence))]),
+          createdAt: Date(timeIntervalSince1970: 4_000),
+          sessionEpoch: epoch,
+          sequence: sequence
+        ),
+        viewerWallMilliseconds: 4_000_000,
+        viewerMonotonicNanoseconds: sequence,
+        deterministicEventBytes: 1,
+        initialDisposition: .buffered
+      )
+      XCTAssertEqual(window.offer(value), .accepted)
+      window.waitForProjectionForTesting()
+    }
+
+    try offer(1)
+    try offer(2)
+    XCTAssertEqual(scheduler.pendingCount, 1)
+    scheduler.runNext()
+    XCTAssertEqual(generations.values.count, 1)
+    XCTAssertEqual(generations.values.last, window.snapshot().generation)
+
+    try offer(3)
+    XCTAssertEqual(scheduler.pendingCount, 1)
+    XCTAssertEqual(
+      scheduler.nextDelay,
+      ViewerLiveProjectionLimits.refreshIntervalNanoseconds
+    )
+    window.setPresentationPaused(true)
+    scheduler.runNext()
+    XCTAssertEqual(generations.values.count, 1)
+    try offer(4)
+    XCTAssertEqual(scheduler.pendingCount, 0)
+
+    window.setPresentationPaused(false)
+    XCTAssertEqual(scheduler.pendingCount, 1)
+    scheduler.runNext()
+    XCTAssertEqual(generations.values.count, 2)
+    XCTAssertEqual(generations.values.last, window.snapshot().generation)
+    XCTAssertEqual(Array(Mirror(reflecting: window.snapshot()).children).count, 2)
+    XCTAssertEqual(Array(Mirror(reflecting: window.snapshot().events[0]).children).count, 0)
+    XCTAssertEqual(Array(Mirror(reflecting: window.snapshot().sessions[0]).children).count, 0)
+    XCTAssertEqual(Array(Mirror(reflecting: window.snapshot().gaps).children).count, 0)
+  }
+
+  func testLiveEvaluatorMatchesMetadataJSONPresenceAndExcludesTransientFullText() throws {
+    let runtimeLogicalID = UUID()
+    let connectionID = UUID()
+    let context = try makeObservationContext(connectionID: connectionID, displayName: "Evaluator")
+    let epoch = SessionEpoch()
+    let first = try ViewerCommittedEventObservation(
+      runtimeLogicalID: runtimeLogicalID,
+      context: context,
+      nickname: "Primary",
+      envelope: makeObservationEnvelope(
+        content: .object([
+          "items": .array([.object(["value": .integer(42)])]),
+          "message": .string("alpha value"),
+          "nullable": .null,
+          "ratio": .number(1.5),
+          "enabled": .bool(true),
+        ]),
+        createdAt: Date(timeIntervalSince1970: 5_000),
+        sessionEpoch: epoch,
+        sequence: 1
+      ),
+      viewerWallMilliseconds: 5_000_000,
+      viewerMonotonicNanoseconds: 10,
+      deterministicEventBytes: 100,
+      initialDisposition: .buffered
+    )
+    let second = try ViewerCommittedEventObservation(
+      runtimeLogicalID: runtimeLogicalID,
+      context: context,
+      nickname: "Primary",
+      envelope: makeObservationEnvelope(
+        content: .object([
+          "items": .array([.object(["value": .integer(7)])]),
+          "message": .string("beta value"),
+          "nullable": .string("present"),
+        ]),
+        createdAt: Date(timeIntervalSince1970: 5_001),
+        sessionEpoch: epoch,
+        sequence: 2
+      ),
+      viewerWallMilliseconds: 5_001_000,
+      viewerMonotonicNanoseconds: 20,
+      deterministicEventBytes: 100,
+      initialDisposition: .buffered
+    )
+    let snapshot = ViewerLiveProjectionSnapshot(
+      runtimeLogicalID: runtimeLogicalID,
+      generation: 9,
+      events: [
+        ViewerLiveEventSnapshot(
+          observation: first,
+          laterDisposition: .expired,
+          durableState: .notRecorded,
+          hasPresentationConflict: true,
+          hasGap: true,
+          hasDrop: true,
+          sessionEnded: false
+        ),
+        ViewerLiveEventSnapshot(
+          observation: second,
+          laterDisposition: nil,
+          durableState: .notRecorded,
+          hasPresentationConflict: false,
+          hasGap: false,
+          hasDrop: false,
+          sessionEnded: false
+        ),
+      ],
+      sessions: [
+        ViewerLiveSessionSnapshot(
+          connectionID: connectionID,
+          metadata: first.session,
+          positiveDropCount: 1,
+          endedWallMilliseconds: nil,
+          endedMonotonicNanoseconds: nil
+        )
+      ],
+      gaps: ViewerLiveGapSnapshot(
+        ingressOverflowCount: 0,
+        windowOverflowCount: 0,
+        residentConflictCount: 1,
+        diagnosticLossCount: 0,
+        storeUnavailableCount: 1,
+        storeRecoveryCount: 0,
+        storeUnavailable: true
+      ),
+      accountedEventBytes: 2 * (ViewerLiveProjectionLimits.fixedEntryOverheadBytes + 100)
+    )
+    let request = try ViewerLiveEvaluationRequest(
+      runtimeLogicalID: runtimeLogicalID,
+      deviceScope: ViewerLiveDeviceScope(selectedConnectionIDs: [connectionID]),
+      predicates: [
+        .eventTypeEqualsAny(["test.other", "test.observation"]),
+        .eventTypePrefix("test."),
+        .contentContains("alpha"),
+        .applicationIdentifiers(["com.nearwire.observation"]),
+        .applicationVersions(["1.0"]),
+        .directions(["appToViewer"]),
+        .priorities(["normal", "high"]),
+        .wallTime(from: 5_000_000, through: 5_000_000),
+        .jsonExists(path: "$.items[0].value"),
+        .jsonAny(path: "$.items[0].value", equalsAny: [.integer(7), .integer(42)]),
+        .jsonStringContains(path: "$.message", value: "alpha"),
+        .json(path: "$.nullable", equals: .null),
+        .json(path: "$.ratio", equals: .real(1.5)),
+        .json(path: "$.enabled", equals: .boolean(true)),
+        .hasGap,
+        .hasDrop,
+        .hasTerminalDisposition,
+      ]
+    )
+    let evaluator = ViewerLiveEventEvaluator(nowNanoseconds: { 0 })
+
+    guard case .complete(let output) = evaluator.evaluate(snapshot: snapshot, request: request)
+    else { return XCTFail("Expected a complete bounded live evaluation") }
+    XCTAssertEqual(output.snapshotGeneration, 9)
+    XCTAssertEqual(output.matchedKeys, [first.key])
+    XCTAssertNil(output.transientExclusion)
+    XCTAssertGreaterThan(output.predicateCheckCount, 0)
+    XCTAssertGreaterThan(output.jsonNodeVisitCount, 0)
+
+    for (from, through, expected) in [
+      (5_000_000, 5_000_000, [first.key]),
+      (5_000_001, 5_000_999, []),
+      (5_001_000, 5_001_000, [second.key]),
+    ] {
+      let boundaryRequest = try ViewerLiveEvaluationRequest(
+        runtimeLogicalID: runtimeLogicalID,
+        predicates: [.wallTime(from: Int64(from), through: Int64(through))]
+      )
+      guard
+        case .complete(let boundaryOutput) = evaluator.evaluate(
+          snapshot: snapshot,
+          request: boundaryRequest
+        )
+      else { return XCTFail("Expected exact receive-time boundary evaluation") }
+      XCTAssertEqual(boundaryOutput.matchedKeys, expected)
+    }
+
+    let durableOnlyDeviceRequest = try ViewerLiveEvaluationRequest(
+      runtimeLogicalID: runtimeLogicalID,
+      predicates: [.deviceSessionIDs([1])]
+    )
+    guard
+      case .complete(let durableOnlyDeviceOutput) = evaluator.evaluate(
+        snapshot: snapshot,
+        request: durableOnlyDeviceRequest
+      )
+    else { return XCTFail("Expected missing durable-only metadata to be a complete non-match") }
+    XCTAssertTrue(durableOnlyDeviceOutput.matchedKeys.isEmpty)
+
+    let wrongDeviceRequest = try ViewerLiveEvaluationRequest(
+      runtimeLogicalID: runtimeLogicalID,
+      deviceScope: ViewerLiveDeviceScope(selectedConnectionIDs: [UUID()]),
+      predicates: []
+    )
+    guard
+      case .complete(let wrongDeviceOutput) = evaluator.evaluate(
+        snapshot: snapshot,
+        request: wrongDeviceRequest
+      )
+    else { return XCTFail("Expected an exact-device non-match") }
+    XCTAssertTrue(wrongDeviceOutput.matchedKeys.isEmpty)
+
+    let fullTextRequest = try ViewerLiveEvaluationRequest(
+      runtimeLogicalID: runtimeLogicalID,
+      predicates: [.fullText("alpha")]
+    )
+    guard
+      case .complete(let fullTextOutput) = evaluator.evaluate(
+        snapshot: snapshot,
+        request: fullTextRequest
+      )
+    else { return XCTFail("Expected explicit transient FTS exclusion") }
+    XCTAssertTrue(fullTextOutput.matchedKeys.isEmpty)
+    XCTAssertEqual(fullTextOutput.transientExclusion, .fullTextRequiresRecordedData)
+    XCTAssertEqual(
+      fullTextOutput.transientExclusion?.guidance,
+      "Full-text search requires recorded data — transient rows excluded."
+    )
+    XCTAssertEqual(Array(Mirror(reflecting: request).children).count, 0)
+    XCTAssertEqual(Array(Mirror(reflecting: request.deviceScope).children).count, 0)
+    XCTAssertEqual(Array(Mirror(reflecting: evaluator).children).count, 0)
+    XCTAssertEqual(Array(Mirror(reflecting: output).children).count, 1)
+  }
+
+  func testLiveEvaluatorReturnsNoPartialCompletionOnCancellationDeadlineOrShapeOverflow()
+    throws
+  {
+    let runtimeLogicalID = UUID()
+    let connectionID = UUID()
+    let context = try makeObservationContext(connectionID: connectionID, displayName: "Budget")
+    let observation = try ViewerCommittedEventObservation(
+      runtimeLogicalID: runtimeLogicalID,
+      context: context,
+      nickname: nil,
+      envelope: makeObservationEnvelope(
+        content: .object(["value": .integer(1)]),
+        createdAt: Date(timeIntervalSince1970: 6_000),
+        sessionEpoch: SessionEpoch(),
+        sequence: 1
+      ),
+      viewerWallMilliseconds: 6_000_000,
+      viewerMonotonicNanoseconds: 1,
+      deterministicEventBytes: 1,
+      initialDisposition: .buffered
+    )
+    let event = ViewerLiveEventSnapshot(
+      observation: observation,
+      laterDisposition: nil,
+      durableState: .notRecorded,
+      hasPresentationConflict: false,
+      hasGap: false,
+      hasDrop: false,
+      sessionEnded: false
+    )
+    let snapshot = ViewerLiveProjectionSnapshot(
+      runtimeLogicalID: runtimeLogicalID,
+      generation: 1,
+      events: [event],
+      sessions: [],
+      gaps: ViewerLiveGapSnapshot(
+        ingressOverflowCount: 0,
+        windowOverflowCount: 0,
+        residentConflictCount: 0,
+        diagnosticLossCount: 0,
+        storeUnavailableCount: 0,
+        storeRecoveryCount: 0,
+        storeUnavailable: false
+      ),
+      accountedEventBytes: ViewerLiveProjectionLimits.fixedEntryOverheadBytes + 1
+    )
+    let request = try ViewerLiveEvaluationRequest(
+      runtimeLogicalID: runtimeLogicalID,
+      predicates: [.jsonExists(path: "$.value")]
+    )
+
+    XCTAssertEqual(
+      ViewerLiveEventEvaluator(nowNanoseconds: { 0 }).evaluate(
+        snapshot: snapshot,
+        request: request,
+        isCancelled: { true }
+      ),
+      .cancelled
+    )
+    let deadlineClock = SteppingNanosecondClock(
+      values: [0, ViewerLiveEventEvaluator.deadlineNanoseconds]
+    )
+    XCTAssertEqual(
+      ViewerLiveEventEvaluator(nowNanoseconds: { deadlineClock.now() }).evaluate(
+        snapshot: snapshot,
+        request: request
+      ),
+      .refineRequired
+    )
+    let oversized = ViewerLiveProjectionSnapshot(
+      runtimeLogicalID: runtimeLogicalID,
+      generation: 2,
+      events: Array(repeating: event, count: ViewerLiveProjectionLimits.retainedCount + 1),
+      sessions: [],
+      gaps: snapshot.gaps,
+      accountedEventBytes: snapshot.accountedEventBytes
+    )
+    XCTAssertEqual(
+      ViewerLiveEventEvaluator(nowNanoseconds: { 0 }).evaluate(
+        snapshot: oversized,
+        request: request
+      ),
+      .refineRequired
+    )
+
+    var nested: JSONValue = .integer(1)
+    for _ in 0..<16 { nested = .object(["a": nested]) }
+    let deepObservation = try ViewerCommittedEventObservation(
+      runtimeLogicalID: runtimeLogicalID,
+      context: context,
+      nickname: nil,
+      envelope: makeObservationEnvelope(
+        content: nested,
+        createdAt: Date(timeIntervalSince1970: 6_001),
+        sessionEpoch: SessionEpoch(),
+        sequence: 2
+      ),
+      viewerWallMilliseconds: 6_001_000,
+      viewerMonotonicNanoseconds: 2,
+      deterministicEventBytes: 1,
+      initialDisposition: .buffered
+    )
+    let deepEvent = ViewerLiveEventSnapshot(
+      observation: deepObservation,
+      laterDisposition: nil,
+      durableState: .notRecorded,
+      hasPresentationConflict: false,
+      hasGap: false,
+      hasDrop: false,
+      sessionEnded: false
+    )
+    let maximumSnapshot = ViewerLiveProjectionSnapshot(
+      runtimeLogicalID: runtimeLogicalID,
+      generation: 3,
+      events: Array(repeating: deepEvent, count: ViewerLiveProjectionLimits.retainedCount),
+      sessions: [],
+      gaps: snapshot.gaps,
+      accountedEventBytes: ViewerLiveProjectionLimits.retainedCount
+        * (ViewerLiveProjectionLimits.fixedEntryOverheadBytes + 1)
+    )
+    let maximumPath = "$" + Array(repeating: ".a", count: 16).joined()
+    let maximumRequest = try ViewerLiveEvaluationRequest(
+      runtimeLogicalID: runtimeLogicalID,
+      predicates: Array(repeating: .jsonExists(path: maximumPath), count: 32)
+    )
+    guard
+      case .complete(let maximumOutput) = ViewerLiveEventEvaluator(
+        nowNanoseconds: { 0 }
+      ).evaluate(snapshot: maximumSnapshot, request: maximumRequest)
+    else { return XCTFail("Expected the exact maximum predicate shape to complete") }
+    XCTAssertEqual(maximumOutput.matchedKeys.count, ViewerLiveProjectionLimits.retainedCount)
+    XCTAssertEqual(maximumOutput.predicateCheckCount, 16_384)
+    XCTAssertEqual(maximumOutput.jsonNodeVisitCount, 512 * 32 * 16)
+    XCTAssertLessThanOrEqual(
+      maximumOutput.jsonNodeVisitCount,
+      ViewerLiveEventEvaluator.maximumJSONNodeVisits
+    )
+    XCTAssertEqual(
+      ViewerLiveEvaluationResult.refineGuidance,
+      "Refine the live filter to evaluate within bounded work."
+    )
+
+    XCTAssertThrowsError(
+      try ViewerLiveDeviceScope(selectedConnectionIDs: [connectionID, connectionID])
+    )
+    XCTAssertThrowsError(
+      try ViewerLiveEvaluationRequest(
+        runtimeLogicalID: runtimeLogicalID,
+        predicates: Array(repeating: .hasGap, count: 33)
+      )
+    )
+    XCTAssertThrowsError(
+      try ViewerLiveEvaluationRequest(
+        runtimeLogicalID: runtimeLogicalID,
+        predicates: [.jsonExists(path: "$[999999999999999999999999999]")]
+      )
+    )
+  }
+
+  @MainActor
+  func testExplorerModelCapsEveryResidentListAndReloadsOnlyExactSelection() throws {
+    func recordingSnapshot() -> ViewerRecordingCatalogSnapshot {
+      ViewerRecordingCatalogSnapshot(
+        storeGeneration: 1,
+        changeGeneration: "recording-snapshot",
+        recordingUpperRowID: 1_000,
+        recordingVersionUpperRowID: 1_000,
+        installationAliasUpperRowID: 1_000,
+        deviceSessionUpperRowID: 1_000,
+        deviceVersionUpperRowID: 1_000,
+        tombstoneUpperRowID: 0,
+        gapUpperRowID: 1_000,
+        dropUpperRowID: 1_000
+      )
+    }
+    func deviceSnapshot() -> ViewerDeviceCatalogSnapshot {
+      ViewerDeviceCatalogSnapshot(
+        storeGeneration: 1,
+        recordingID: 1,
+        changeGeneration: "device-snapshot",
+        recordingUpperRowID: 1,
+        recordingVersionUpperRowID: 1,
+        installationAliasUpperRowID: 1_000,
+        deviceSessionUpperRowID: 1_000,
+        deviceVersionUpperRowID: 1_000,
+        tombstoneUpperRowID: 0,
+        gapUpperRowID: 1_000,
+        dropUpperRowID: 1_000
+      )
+    }
+    func recordingRow(_ rowID: Int64) -> ViewerRecordingCatalogRow {
+      ViewerRecordingCatalogRow(
+        rowID: rowID,
+        logicalID: UUID(),
+        revision: 1,
+        name: nil,
+        note: nil,
+        pinned: false,
+        state: "closed",
+        startedWallMilliseconds: rowID,
+        startedMonotonicNanoseconds: rowID,
+        endedWallMilliseconds: rowID,
+        endedMonotonicNanoseconds: rowID,
+        deviceCount: 1,
+        latestDevice: nil,
+        hasGap: false,
+        hasDrop: false
+      )
+    }
+    func deviceRow(_ ordinal: Int64) -> ViewerDeviceCatalogRow {
+      ViewerDeviceCatalogRow(
+        rowID: ordinal,
+        logicalID: UUID(),
+        recordingID: 1,
+        installationAlias: "device-\(ordinal)",
+        connectionAlias: "connection-\(ordinal)",
+        connectionOrdinal: ordinal,
+        revision: 1,
+        displayName: nil,
+        state: "closed",
+        partialHistory: false,
+        applicationIdentifier: nil,
+        applicationVersion: nil,
+        startedWallMilliseconds: ordinal,
+        startedMonotonicNanoseconds: ordinal,
+        endedWallMilliseconds: ordinal,
+        endedMonotonicNanoseconds: ordinal,
+        hasGap: false,
+        hasDrop: false
+      )
+    }
+    func eventRow(_ rowID: Int64) -> ViewerStoredEventRow {
+      ViewerStoredEventRow(
+        rowID: rowID,
+        deviceSessionID: 1,
+        direction: "appToViewer",
+        wireSequence: rowID - 1,
+        eventUUID: "event-\(rowID)",
+        eventType: "test.explorer",
+        contentByteCount: 1,
+        createdWallMilliseconds: rowID,
+        viewerWallMilliseconds: rowID,
+        viewerMonotonicNanoseconds: rowID,
+        priority: "normal",
+        recordingRevision: 1,
+        deviceRevision: 1,
+        resolvedDisposition: "buffered"
+      )
+    }
+    func gapRow(_ rowID: Int64) -> ViewerGapRow {
+      ViewerGapRow(
+        rowID: rowID,
+        recordingID: 1,
+        deviceSessionID: nil,
+        sequence: rowID,
+        namespace: "gap",
+        revision: 1,
+        reason: "test",
+        firstViewerWallMilliseconds: rowID,
+        lastViewerWallMilliseconds: rowID,
+        directions: "appToViewer",
+        firstWireSequence: rowID,
+        lastWireSequence: rowID,
+        count: 1
+      )
+    }
+
+    let model = ViewerEventExplorerModel(runtimeLogicalID: UUID())
+    let token = model.currentToken
+    let recordingBounds = recordingSnapshot()
+    let deviceBounds = deviceSnapshot()
+    XCTAssertTrue(
+      model.applyRecordingPage(
+        ViewerRecordingCatalogPage(
+          snapshot: recordingBounds,
+          rows: (201...400).reversed().map { recordingRow(Int64($0)) },
+          olderCursor: ViewerRecordingCatalogCursor(
+            queryFingerprint: "recordings",
+            snapshot: recordingBounds,
+            direction: .older,
+            rowID: 201
+          ),
+          newerCursor: ViewerRecordingCatalogCursor(
+            queryFingerprint: "recordings",
+            snapshot: recordingBounds,
+            direction: .newer,
+            rowID: 400
+          )
+        ),
+        placement: .replace,
+        token: token
+      )
+    )
+    XCTAssertTrue(
+      model.applyRecordingPage(
+        ViewerRecordingCatalogPage(
+          snapshot: recordingBounds,
+          rows: [recordingRow(200)],
+          olderCursor: nil,
+          newerCursor: nil
+        ),
+        placement: .trailing,
+        token: token
+      )
+    )
+    XCTAssertEqual(model.recordingRows.count, ViewerEventExplorerModel.maximumRecordingRows)
+    XCTAssertEqual(model.recordingRows.first?.rowID, 399)
+    XCTAssertEqual(model.recordingNavigation.reloadAnchor?.identity, 400)
+    let selectedRecording = ViewerExplorerRecordingIdentity.durable(
+      rowID: 400,
+      logicalID: UUID()
+    )
+    XCTAssertTrue(model.selectRecording(selectedRecording))
+    XCTAssertTrue(model.selectedRecordingNeedsReload)
+
+    XCTAssertTrue(
+      model.applyDevicePage(
+        ViewerDeviceCatalogPage(
+          snapshot: deviceBounds,
+          rows: (201...400).reversed().map { deviceRow(Int64($0)) },
+          olderCursor: nil,
+          newerCursor: nil
+        ),
+        placement: .replace,
+        token: token
+      )
+    )
+    XCTAssertTrue(
+      model.applyDevicePage(
+        ViewerDeviceCatalogPage(
+          snapshot: deviceBounds,
+          rows: [deviceRow(200)],
+          olderCursor: nil,
+          newerCursor: nil
+        ),
+        placement: .trailing,
+        token: token
+      )
+    )
+    XCTAssertEqual(model.deviceRows.count, ViewerEventExplorerModel.maximumDeviceRows)
+    XCTAssertEqual(model.deviceRows.first?.connectionOrdinal, 399)
+    XCTAssertEqual(model.deviceNavigation.reloadAnchor?.identity, 400)
+    let selectedDevices = (0..<ViewerEventExplorerModel.maximumSelectedDevices).map { _ in UUID() }
+    XCTAssertTrue(model.selectDevices(selectedDevices))
+    XCTAssertFalse(model.selectDevices(selectedDevices + [UUID()]))
+    XCTAssertEqual(model.selectedDeviceLogicalIDs, selectedDevices)
+    XCTAssertEqual(model.selectedDeviceLogicalIDsNeedingReload, Set(selectedDevices))
+
+    for start in stride(from: 1, through: 401, by: 200) {
+      let end = min(start + 199, 600)
+      XCTAssertTrue(
+        model.applyEventPage(
+          ViewerEventPage(
+            rows: (start...end).map { eventRow(Int64($0)) },
+            nextCursor: nil,
+            previousCursor: nil
+          ),
+          placement: start == 1 ? .replace : .trailing,
+          token: token
+        )
+      )
+    }
+    let selectedIdentity = ViewerExplorerEventIdentity.durable(rowID: 1)
+    XCTAssertTrue(model.selectEvent(selectedIdentity, scrollToSelection: true))
+    let selectedDetail = ViewerStoredEventDetail(
+      summary: eventRow(1),
+      contentJSON: Data("{\"secret\":\"explorer-detail-secret\"}".utf8),
+      deviceLogicalID: UUID(),
+      installationAlias: "device-1",
+      connectionAlias: "connection-1",
+      originMonotonicNanoseconds: 1,
+      ttlMilliseconds: 1_000,
+      schemaVersion: 1,
+      correlationEventUUID: nil,
+      replyToEventUUID: nil
+    )
+    XCTAssertTrue(
+      model.applySelectedDetail(selectedDetail, identity: selectedIdentity, token: token))
+    XCTAssertTrue(
+      model.applyEventPage(
+        ViewerEventPage(rows: [eventRow(601)], nextCursor: nil, previousCursor: nil),
+        placement: .trailing,
+        token: token
+      )
+    )
+    XCTAssertEqual(model.eventRows.count, ViewerEventExplorerModel.maximumEventRows)
+    XCTAssertEqual(model.eventRows.first?.rowID, 2)
+    XCTAssertEqual(model.eventNavigation.reloadAnchor?.identity, selectedIdentity)
+    XCTAssertTrue(model.eventNavigation.hasUnloadedLeadingRows)
+    XCTAssertEqual(model.selectedEventIdentity, selectedIdentity)
+    XCTAssertEqual(model.selectedEventDetail, selectedDetail)
+    XCTAssertTrue(model.selectedEventNeedsReload)
+    XCTAssertEqual(model.scrollAnchor, .durable(rowID: 2))
+
+    XCTAssertTrue(
+      model.applyEventPage(
+        ViewerEventPage(rows: [eventRow(1)], nextCursor: nil, previousCursor: nil),
+        placement: .leading,
+        token: token
+      )
+    )
+    XCTAssertEqual(model.eventRows.first?.rowID, 1)
+    XCTAssertEqual(model.eventRows.last?.rowID, 600)
+    XCTAssertFalse(model.selectedEventNeedsReload)
+    XCTAssertEqual(model.eventNavigation.reloadAnchor?.identity, .durable(rowID: 601))
+    XCTAssertTrue(model.eventNavigation.hasUnloadedTrailingRows)
+
+    for start in stride(from: 1, through: 97, by: 32) {
+      let end = min(start + 31, 128)
+      XCTAssertTrue(
+        model.applyGapPage(
+          ViewerGapPage(
+            rows: (start...end).map { gapRow(Int64($0)) },
+            nextCursor: nil,
+            previousCursor: nil
+          ),
+          placement: start == 1 ? .replace : .trailing,
+          token: token
+        )
+      )
+    }
+    XCTAssertTrue(
+      model.applyGapPage(
+        ViewerGapPage(rows: [gapRow(129)], nextCursor: nil, previousCursor: nil),
+        placement: .trailing,
+        token: token
+      )
+    )
+    XCTAssertEqual(model.gapRows.count, ViewerEventExplorerModel.maximumGapRows)
+    XCTAssertEqual(model.gapRows.first?.rowID, 2)
+    XCTAssertEqual(model.gapNavigation.reloadAnchor?.identity.sequence, 1)
+
+    let replacementToken = model.beginPresentationReplacement(clearRows: false)
+    XCTAssertNotEqual(replacementToken, token)
+    XCTAssertFalse(
+      model.applyEventPage(
+        ViewerEventPage(rows: [eventRow(602)], nextCursor: nil, previousCursor: nil),
+        placement: .trailing,
+        token: token
+      )
+    )
+    XCTAssertFalse(
+      model.applyEventPage(
+        ViewerEventPage(
+          rows: (1...201).map { eventRow(Int64($0)) },
+          nextCursor: nil,
+          previousCursor: nil
+        ),
+        placement: .replace,
+        token: replacementToken
+      )
+    )
+    XCTAssertFalse(
+      model.applyEventPage(
+        ViewerEventPage(rows: [eventRow(2), eventRow(1)], nextCursor: nil, previousCursor: nil),
+        placement: .replace,
+        token: replacementToken
+      )
+    )
+    let diagnosticText = [String(describing: model), String(reflecting: model)].joined()
+    XCTAssertFalse(diagnosticText.contains("explorer-detail-secret"))
+    XCTAssertTrue(Mirror(reflecting: model).children.isEmpty)
+
+    model.sealAndClear()
+    XCTAssertTrue(model.recordingRows.isEmpty)
+    XCTAssertTrue(model.deviceRows.isEmpty)
+    XCTAssertTrue(model.eventRows.isEmpty)
+    XCTAssertTrue(model.gapRows.isEmpty)
+    XCTAssertNil(model.selectedEventDetail)
+  }
+
+  @MainActor
+  func testExplorerModelCoalescesOneLatestRefreshAtTenHertzAndFreezesOnPause() async {
+    let scheduler = ManualLiveRefreshScheduler()
+    let capture = ExplorerRefreshCapture()
+    let model = ViewerEventExplorerModel(
+      runtimeLogicalID: UUID(),
+      refreshScheduler: scheduler.explorerValue,
+      onRefresh: { token, signal in capture.append(token: token, signal: signal) }
+    )
+    let initialToken = model.currentToken
+    for index in 0..<100_000 {
+      XCTAssertTrue(
+        model.noteRefresh(
+          changeToken: "token-\(index)",
+          durableUpperRowID: Int64(index),
+          transientChangeIncrement: 1
+        )
+      )
+    }
+    XCTAssertEqual(scheduler.pendingCount, 1)
+    XCTAssertEqual(model.refreshDiagnostics.scheduleCount, 1)
+    XCTAssertEqual(model.pendingRefreshSignal?.transientChangeCount, 100_000)
+
+    let pausedToken = model.setPaused(true)
+    XCTAssertNotEqual(pausedToken, initialToken)
+    XCTAssertTrue(model.isPaused)
+    scheduler.runNext()
+    await Task.yield()
+    await Task.yield()
+    XCTAssertEqual(capture.count, 0)
+    XCTAssertEqual(model.pendingRefreshSignal?.transientChangeCount, 100_000)
+
+    let resumedToken = model.setPaused(false)
+    XCTAssertNotEqual(resumedToken, pausedToken)
+    XCTAssertEqual(scheduler.pendingCount, 1)
+    scheduler.runNext()
+    await Task.yield()
+    await Task.yield()
+    XCTAssertEqual(capture.count, 1)
+    XCTAssertEqual(capture.tokens, [resumedToken])
+    XCTAssertEqual(capture.signals.first?.latestChangeToken, "token-99999")
+    XCTAssertEqual(capture.signals.first?.durableUpperRowID, 99_999)
+    XCTAssertEqual(capture.signals.first?.transientChangeCount, 100_000)
+    XCTAssertEqual(model.refreshDiagnostics.deliveryCount, 1)
+
+    for index in 100_000..<200_000 {
+      XCTAssertTrue(
+        model.noteRefresh(
+          changeToken: "token-\(index)",
+          durableUpperRowID: Int64(index),
+          transientChangeIncrement: 1
+        )
+      )
+    }
+    XCTAssertEqual(scheduler.pendingCount, 1)
+    XCTAssertEqual(scheduler.nextDelay, ViewerEventExplorerModel.refreshIntervalNanoseconds)
+    XCTAssertEqual(model.refreshDiagnostics.scheduleCount, 3)
+    scheduler.runNext()
+    await Task.yield()
+    await Task.yield()
+    XCTAssertEqual(capture.count, 2)
+    XCTAssertEqual(capture.signals.last?.latestChangeToken, "token-199999")
+    XCTAssertEqual(capture.signals.last?.transientChangeCount, 100_000)
+
+    XCTAssertFalse(
+      model.noteRefresh(
+        changeToken: String(
+          repeating: "x", count: ViewerEventExplorerModel.maximumChangeTokenBytes + 1),
+        durableUpperRowID: 1
+      )
+    )
+    XCTAssertTrue(model.noteRefresh(changeToken: "sealed", durableUpperRowID: 200_000))
+    XCTAssertEqual(scheduler.pendingCount, 1)
+    model.sealAndClear()
+    scheduler.runNext()
+    await Task.yield()
+    await Task.yield()
+    XCTAssertEqual(capture.count, 2)
+    XCTAssertFalse(model.refreshDiagnostics.wakeScheduled)
+    XCTAssertNil(model.pendingRefreshSignal)
+  }
+
+  @MainActor
+  func testExplorerScopePreservesLogicalSelectionAcrossPartialMaterialization() throws {
+    let runtimeLogicalID = UUID()
+    let firstDevice = UUID()
+    let secondDevice = UUID()
+    let missingDevice = UUID()
+    let filter = try ViewerExplorerFilter(
+      predicates: [
+        .eventTypePrefix("test"),
+        .applicationIdentifiers(["com.example.app"]),
+        .directions(["appToViewer", "viewerToApp"]),
+        .priorities(["normal", "high"]),
+        .wallTime(from: 100, through: 200),
+        .jsonExists(path: "$.value"),
+        .hasGap,
+        .hasDrop,
+        .hasTerminalDisposition,
+        .fullText("recorded needle"),
+      ]
+    )
+    let devices = try ViewerExplorerDeviceScope(
+      selectedLogicalIDs: [firstDevice, secondDevice, missingDevice]
+    )
+    let source = ViewerExplorerSource.current(runtimeLogicalID: runtimeLogicalID)
+    let scope = try ViewerExplorerScope(source: source, devices: devices, filter: filter)
+    let unavailable = try ViewerExplorerMaterializationSnapshot(
+      source: source,
+      generation: 1,
+      recordingID: nil,
+      deviceSessionIDsByLogicalID: [:]
+    )
+    let unavailableInputs = try ViewerExplorerScopeCompiler.compile(
+      scope: scope,
+      materialization: unavailable
+    )
+    XCTAssertNil(unavailableInputs.durableQuery)
+    XCTAssertNotNil(unavailableInputs.liveRequest)
+    XCTAssertEqual(unavailableInputs.selectedLogicalDeviceCount, 3)
+    XCTAssertEqual(unavailableInputs.materializedSelectedDeviceCount, 0)
+    XCTAssertTrue(unavailableInputs.liveRequest?.deviceScope.contains(firstDevice) == true)
+    XCTAssertTrue(unavailableInputs.liveRequest?.deviceScope.contains(secondDevice) == true)
+    XCTAssertTrue(unavailableInputs.liveRequest?.deviceScope.contains(missingDevice) == true)
+
+    let partial = try ViewerExplorerMaterializationSnapshot(
+      source: source,
+      generation: 2,
+      recordingID: 10,
+      deviceSessionIDsByLogicalID: [firstDevice: 101, secondDevice: 102]
+    )
+    let partialInputs = try ViewerExplorerScopeCompiler.compile(
+      scope: scope,
+      materialization: partial
+    )
+    XCTAssertEqual(partialInputs.durableQuery?.recordingID, 10)
+    XCTAssertEqual(partialInputs.materializedSelectedDeviceCount, 2)
+    XCTAssertEqual(partialInputs.durableQuery?.predicates.last, .deviceSessionIDs([101, 102]))
+    XCTAssertTrue(partialInputs.liveRequest?.deviceScope.contains(missingDevice) == true)
+    let emptyLiveSnapshot = ViewerLiveProjectionSnapshot(
+      runtimeLogicalID: runtimeLogicalID,
+      generation: 1,
+      events: [],
+      sessions: [],
+      gaps: ViewerLiveGapSnapshot(
+        ingressOverflowCount: 0,
+        windowOverflowCount: 0,
+        residentConflictCount: 0,
+        diagnosticLossCount: 0,
+        storeUnavailableCount: 0,
+        storeRecoveryCount: 0,
+        storeUnavailable: false
+      ),
+      accountedEventBytes: 0
+    )
+    guard let liveRequest = partialInputs.liveRequest,
+      case .complete(let liveOutput) = ViewerLiveEventEvaluator(
+        nowNanoseconds: { 0 }
+      ).evaluate(snapshot: emptyLiveSnapshot, request: liveRequest)
+    else { return XCTFail("Expected one complete immutable live evaluation") }
+    XCTAssertEqual(liveOutput.transientExclusion, .fullTextRequiresRecordedData)
+
+    let allScope = try ViewerExplorerScope(source: source, devices: .all, filter: filter)
+    let allInputs = try ViewerExplorerScopeCompiler.compile(
+      scope: allScope,
+      materialization: partial
+    )
+    XCTAssertEqual(allInputs.durableQuery?.predicates, filter.predicates)
+    XCTAssertEqual(allInputs.materializedSelectedDeviceCount, 0)
+
+    let model = ViewerEventExplorerModel(runtimeLogicalID: runtimeLogicalID)
+    let unavailableToken = try model.replaceScope(scope, materialization: unavailable)
+    XCTAssertEqual(model.selectedDeviceLogicalIDs, [firstDevice, secondDevice, missingDevice])
+    XCTAssertNil(model.compiledInputs?.durableQuery)
+    XCTAssertEqual(
+      model.selectedRecordingIdentity,
+      .current(runtimeLogicalID: runtimeLogicalID)
+    )
+    let partialToken = try XCTUnwrap(model.replaceMaterialization(partial))
+    XCTAssertNotEqual(partialToken, unavailableToken)
+    XCTAssertEqual(model.compiledInputs?.materializedSelectedDeviceCount, 2)
+    XCTAssertEqual(model.selectedDeviceLogicalIDs, [firstDevice, secondDevice, missingDevice])
+    XCTAssertEqual(try model.replaceMaterialization(partial), partialToken)
+
+    let replacementFilter = try ViewerExplorerFilter(
+      predicates: [.eventTypeEquals("replacement.filter")]
+    )
+    let replacementScope = try ViewerExplorerScope(
+      source: source,
+      devices: devices,
+      filter: replacementFilter
+    )
+    let replacementToken = try model.replaceScope(
+      replacementScope,
+      materialization: partial
+    )
+    XCTAssertNotEqual(replacementToken, partialToken)
+    XCTAssertEqual(model.currentToken, replacementToken)
+    XCTAssertEqual(model.compiledInputs?.scope.filter, replacementFilter)
+    XCTAssertFalse(
+      model.applyEventPage(
+        ViewerEventPage(rows: [], nextCursor: nil, previousCursor: nil),
+        placement: .replace,
+        token: partialToken
+      )
+    )
+
+    let stale = try ViewerExplorerMaterializationSnapshot(
+      source: .current(runtimeLogicalID: UUID()),
+      generation: 3,
+      recordingID: 10,
+      deviceSessionIDsByLogicalID: [:]
+    )
+    XCTAssertThrowsError(try model.replaceMaterialization(stale)) { error in
+      XCTAssertEqual(error as? ViewerExplorerScopeError, .staleMaterialization)
+    }
+    XCTAssertEqual(model.currentToken, replacementToken)
+
+    let historicalSource = ViewerExplorerSource.historical(
+      recordingID: 20,
+      recordingLogicalID: UUID()
+    )
+    let historicalScope = try ViewerExplorerScope(
+      source: historicalSource,
+      devices: .all,
+      filter: filter
+    )
+    let historical = try ViewerExplorerMaterializationSnapshot(
+      source: historicalSource,
+      generation: 1,
+      recordingID: 20,
+      deviceSessionIDsByLogicalID: [:]
+    )
+    let historicalInputs = try ViewerExplorerScopeCompiler.compile(
+      scope: historicalScope,
+      materialization: historical
+    )
+    XCTAssertNotNil(historicalInputs.durableQuery)
+    XCTAssertNil(historicalInputs.liveRequest)
+
+    XCTAssertThrowsError(
+      try ViewerExplorerFilter(predicates: [.deviceSessionIDs([1])])
+    )
+    XCTAssertNoThrow(
+      try ViewerExplorerDeviceScope(selectedLogicalIDs: (0..<16).map { _ in UUID() })
+    )
+    let cardinalityIDs = (0..<16).map { _ in UUID() }
+    let cardinalityMappings = Dictionary(
+      uniqueKeysWithValues: cardinalityIDs.enumerated().map {
+        ($0.element, Int64($0.offset + 1))
+      }
+    )
+    for count in 1...16 {
+      let selected = Array(cardinalityIDs.prefix(count))
+      let cardinalityScope = try ViewerExplorerScope(
+        source: source,
+        devices: ViewerExplorerDeviceScope(selectedLogicalIDs: selected),
+        filter: ViewerExplorerFilter()
+      )
+      let cardinalityInputs = try ViewerExplorerScopeCompiler.compile(
+        scope: cardinalityScope,
+        materialization: ViewerExplorerMaterializationSnapshot(
+          source: source,
+          generation: UInt64(count),
+          recordingID: 10,
+          deviceSessionIDsByLogicalID: cardinalityMappings
+        )
+      )
+      XCTAssertEqual(cardinalityInputs.selectedLogicalDeviceCount, count)
+      XCTAssertEqual(cardinalityInputs.materializedSelectedDeviceCount, count)
+      XCTAssertEqual(
+        cardinalityInputs.durableQuery?.predicates,
+        [.deviceSessionIDs((1...Int64(count)).map { $0 })]
+      )
+      XCTAssertTrue(
+        selected.allSatisfy { cardinalityInputs.liveRequest?.deviceScope.contains($0) == true })
+    }
+    XCTAssertThrowsError(
+      try ViewerExplorerDeviceScope(selectedLogicalIDs: (0..<17).map { _ in UUID() })
+    )
+    XCTAssertThrowsError(
+      try ViewerExplorerMaterializationSnapshot(
+        source: source,
+        generation: 1,
+        recordingID: 10,
+        deviceSessionIDsByLogicalID: [firstDevice: 1, secondDevice: 1]
+      )
+    )
+    let diagnostics = [
+      String(describing: scope),
+      String(reflecting: partialInputs),
+      String(describing: filter),
+      String(reflecting: partial),
+    ].joined()
+    XCTAssertFalse(diagnostics.contains("recorded needle"))
+    XCTAssertTrue(Mirror(reflecting: scope).children.isEmpty)
+  }
+
+  @MainActor
+  func testExplorerCoordinatorPausesPresentationAndReconcilesExactDurableIdentity()
+    async throws
+  {
+    let runtimeLogicalID = UUID()
+    let connectionID = UUID()
+    let context = try makeObservationContext(
+      connectionID: connectionID,
+      displayName: "Explorer App"
+    )
+    let exactObservation = try ViewerCommittedEventObservation(
+      runtimeLogicalID: runtimeLogicalID,
+      context: context,
+      nickname: nil,
+      envelope: makeObservationEnvelope(
+        content: .object(["value": .string("exact-secret")]),
+        createdAt: Date(timeIntervalSince1970: 1),
+        sessionEpoch: SessionEpoch(),
+        sequence: 7
+      ),
+      viewerWallMilliseconds: 1_000,
+      viewerMonotonicNanoseconds: 1_000,
+      deterministicEventBytes: 128,
+      initialDisposition: .buffered
+    )
+    let transientOnlyObservation = try ViewerCommittedEventObservation(
+      runtimeLogicalID: runtimeLogicalID,
+      context: context,
+      nickname: nil,
+      envelope: makeObservationEnvelope(
+        content: .object(["value": .string("transient-secret")]),
+        createdAt: Date(timeIntervalSince1970: 2),
+        sessionEpoch: SessionEpoch(),
+        sequence: 8
+      ),
+      viewerWallMilliseconds: 1_001,
+      viewerMonotonicNanoseconds: 1_001,
+      deterministicEventBytes: 128,
+      initialDisposition: .buffered
+    )
+    let liveSnapshot = ViewerLiveProjectionSnapshot(
+      runtimeLogicalID: runtimeLogicalID,
+      generation: 1,
+      events: [exactObservation, transientOnlyObservation].map {
+        ViewerLiveEventSnapshot(
+          observation: $0,
+          laterDisposition: nil,
+          durableState: .acceptedAwaitingVisibility,
+          hasPresentationConflict: false,
+          hasGap: true,
+          hasDrop: false,
+          sessionEnded: false
+        )
+      },
+      sessions: [],
+      gaps: ViewerLiveGapSnapshot(
+        ingressOverflowCount: 0,
+        windowOverflowCount: 1,
+        residentConflictCount: 0,
+        diagnosticLossCount: 0,
+        storeUnavailableCount: 0,
+        storeRecoveryCount: 0,
+        storeUnavailable: false
+      ),
+      accountedEventBytes: 2 * (ViewerLiveProjectionLimits.fixedEntryOverheadBytes + 128)
+    )
+    let live = ExplorerLiveObservationSpy(snapshot: liveSnapshot)
+    let store = ExplorerStoreDriverSpy()
+    let model = ViewerEventExplorerModel(runtimeLogicalID: runtimeLogicalID)
+    let coordinator = ViewerEventExplorerCoordinator(
+      model: model,
+      store: store.driver,
+      live: live
+    )
+    let source = ViewerExplorerSource.current(runtimeLogicalID: runtimeLogicalID)
+    let scope = try ViewerExplorerScope(
+      source: source,
+      devices: ViewerExplorerDeviceScope(selectedLogicalIDs: [connectionID]),
+      filter: ViewerExplorerFilter()
+    )
+    let materialization = try ViewerExplorerMaterializationSnapshot(
+      source: source,
+      generation: 1,
+      recordingID: 1,
+      deviceSessionIDsByLogicalID: [connectionID: 10]
+    )
+
+    let scopeToken = try coordinator.replaceScope(scope, materialization: materialization)
+    XCTAssertEqual(store.releaseRequestCount, 1)
+    XCTAssertEqual(coordinator.state, .releasing(.scopeReplacement))
+    store.completeNextRelease(.success(()))
+    await waitUntilExplorer { store.queryRequestCount == 1 && model.timelineRows.count == 2 }
+    XCTAssertEqual(live.snapshotRequestCount, 1)
+    XCTAssertEqual(model.timelineRows.count, 2)
+    XCTAssertTrue(model.selectEvent(.transient(exactObservation.key), scrollToSelection: true))
+
+    let querySnapshot = ViewerQuerySnapshot(
+      eventUpperRowID: 100,
+      recordingVersionUpperRowID: 100,
+      deviceVersionUpperRowID: 100,
+      dispositionUpperRowID: 100,
+      gapUpperRowID: 100,
+      dropUpperRowID: 100
+    )
+    let durableRow = ViewerStoredEventRow(
+      rowID: 99,
+      deviceSessionID: 10,
+      direction: "appToViewer",
+      wireSequence: 7,
+      eventUUID: exactObservation.envelope.id.rawValue,
+      eventType: exactObservation.envelope.type.rawValue,
+      contentByteCount: Int64(exactObservation.durableProjection.canonicalContent.count),
+      createdWallMilliseconds: exactObservation.durableProjection.createdWallMilliseconds,
+      viewerWallMilliseconds: exactObservation.viewerWallMilliseconds,
+      viewerMonotonicNanoseconds: 1_000,
+      priority: "normal",
+      recordingRevision: 1,
+      deviceRevision: 1,
+      resolvedDisposition: "buffered"
+    )
+    let durableGap = ViewerGapRow(
+      rowID: 1,
+      recordingID: 1,
+      deviceSessionID: 10,
+      sequence: 1,
+      namespace: "store",
+      revision: 1,
+      reason: "test",
+      firstViewerWallMilliseconds: 1_000,
+      lastViewerWallMilliseconds: 1_001,
+      directions: "appToViewer",
+      firstWireSequence: 7,
+      lastWireSequence: 8,
+      count: 1
+    )
+    store.completeNextQuery(.success(querySnapshot))
+    await waitUntilExplorer { store.pageRequestCount == 1 && store.gapRequestCount == 1 }
+    store.completeNextPage(
+      .success(ViewerEventPage(rows: [durableRow], nextCursor: nil, previousCursor: nil))
+    )
+    store.completeNextGaps(
+      .success(ViewerGapPage(rows: [durableGap], nextCursor: nil, previousCursor: nil))
+    )
+    await waitUntilExplorer { coordinator.state == .ready(.scopeReplacement) }
+
+    XCTAssertEqual(model.timelineRows.count, 2)
+    XCTAssertEqual(model.eventRows.map(\.rowID), [99])
+    XCTAssertFalse(model.timelineRows.contains { $0.identity == .transient(exactObservation.key) })
+    XCTAssertTrue(
+      model.timelineRows.contains { $0.identity == .transient(transientOnlyObservation.key) }
+    )
+    XCTAssertEqual(model.selectedEventIdentity, .durable(rowID: 99))
+    XCTAssertEqual(live.visibleValues.count, 1)
+    XCTAssertEqual(live.visibleValues.first?.key, exactObservation.key)
+    XCTAssertEqual(model.gapRows, [durableGap])
+    XCTAssertEqual(model.liveGapLane?.gaps.windowOverflowCount, 1)
+    XCTAssertTrue(model.liveGapLane?.hasDiagnostic == true)
+    XCTAssertEqual(model.timelineRows.count + model.gapRows.count, 3)
+    let inspector = ViewerEventInspectorModel(runtimeLogicalID: runtimeLogicalID)
+    let transientIdentity = ViewerExplorerEventIdentity.transient(transientOnlyObservation.key)
+    let transientRequest = try inspector.select(
+      liveEvent: liveSnapshot.events[1],
+      identity: transientIdentity
+    )
+    XCTAssertEqual(inspector.canonicalBuffer?.metadata.isRecorded, false)
+    XCTAssertEqual(inspector.canonicalBuffer?.metadata.hasGap, true)
+    XCTAssertEqual(inspector.canonicalBuffer?.metadata.deviceLogicalID, connectionID)
+    XCTAssertTrue(inspector.apply(ViewerRendererPreparer().prepare(transientRequest)))
+    XCTAssertEqual(inspector.preparation?.presentedKind, .genericJSON)
+
+    coordinator.noteManualScroll(.durable(rowID: 99))
+    XCTAssertFalse(model.autoFollow)
+    let pausedRows = model.timelineRows
+    let pausedToken = coordinator.pause()
+    XCTAssertNotEqual(pausedToken, scopeToken)
+    XCTAssertTrue(model.isPaused)
+    XCTAssertEqual(live.pausedValues.last, true)
+    XCTAssertEqual(model.timelineRows, pausedRows)
+    XCTAssertTrue(model.selectEvent(.durable(rowID: 99)))
+    XCTAssertTrue(
+      model.applySelectedDetail(
+        makeRendererDetail(
+          rowID: 99,
+          eventType: "test.observation",
+          content: Data("{\"value\":1}".utf8)
+        ),
+        identity: .durable(rowID: 99),
+        token: pausedToken
+      )
+    )
+    XCTAssertFalse(
+      model.applyEventPage(
+        ViewerEventPage(rows: [durableRow], nextCursor: nil, previousCursor: nil),
+        placement: .replace,
+        token: scopeToken
+      )
+    )
+    XCTAssertTrue(
+      model.noteRefresh(
+        changeToken: "paused-latest",
+        durableUpperRowID: 100,
+        transientChangeIncrement: UInt64.max,
+        transientGapIncrement: UInt64.max
+      )
+    )
+    XCTAssertEqual(model.pendingRefreshSignal?.transientChangeCount, UInt64.max)
+    XCTAssertEqual(model.pendingRefreshSignal?.transientGapCount, UInt64.max)
+
+    _ = coordinator.resume()
+    XCTAssertEqual(store.releaseRequestCount, 2)
+    let jumpToken = coordinator.jumpToLatest()
+    XCTAssertTrue(model.autoFollow)
+    XCTAssertEqual(store.releaseRequestCount, 3)
+    store.completeNextRelease(.success(()))
+    await Task.yield()
+    await Task.yield()
+    XCTAssertEqual(store.queryRequestCount, 1)
+    store.completeNextRelease(.success(()))
+    await waitUntilExplorer { store.queryRequestCount == 2 && live.snapshotRequestCount == 2 }
+    store.completeNextQuery(.success(querySnapshot))
+    await waitUntilExplorer { store.pageRequestCount == 2 && store.gapRequestCount == 2 }
+    store.completeNextPage(
+      .success(ViewerEventPage(rows: [durableRow], nextCursor: nil, previousCursor: nil))
+    )
+    store.completeNextGaps(
+      .success(ViewerGapPage(rows: [durableGap], nextCursor: nil, previousCursor: nil))
+    )
+    await waitUntilExplorer { coordinator.state == .ready(.jumpToLatest) }
+    XCTAssertEqual(model.currentToken, jumpToken)
+    XCTAssertEqual(model.scrollAnchor, .transient(transientOnlyObservation.key))
+    XCTAssertEqual(coordinator.diagnostics.requestCount, 3)
+    XCTAssertEqual(coordinator.diagnostics.releaseRequestCount, 3)
+    XCTAssertEqual(coordinator.diagnostics.releaseCompletionCount, 3)
+    XCTAssertEqual(coordinator.diagnostics.durableQueryCount, 2)
+    XCTAssertEqual(coordinator.diagnostics.liveSnapshotCount, 2)
+    XCTAssertEqual(live.pausedValues, [true, false])
+    let diagnosticText = [
+      String(describing: coordinator),
+      String(reflecting: model.timelineRows.first as Any),
+    ].joined()
+    XCTAssertFalse(diagnosticText.contains("exact-secret"))
+    XCTAssertFalse(diagnosticText.contains("transient-secret"))
+  }
+
+  @MainActor
+  func testExplorerCoordinatorPauseBeforeCompletionAndRapidGenerationsPublishOnlyLatest()
+    async throws
+  {
+    let runtimeLogicalID = UUID()
+    let source = ViewerExplorerSource.current(runtimeLogicalID: runtimeLogicalID)
+    let materialization = try ViewerExplorerMaterializationSnapshot(
+      source: source,
+      generation: 1,
+      recordingID: nil,
+      deviceSessionIDsByLogicalID: [:]
+    )
+    let live = ExplorerLiveObservationSpy(
+      snapshot: ViewerLiveProjectionSnapshot(
+        runtimeLogicalID: runtimeLogicalID,
+        generation: 1,
+        events: [],
+        sessions: [],
+        gaps: ViewerLiveGapSnapshot(
+          ingressOverflowCount: 0,
+          windowOverflowCount: 0,
+          residentConflictCount: 0,
+          diagnosticLossCount: 0,
+          storeUnavailableCount: 0,
+          storeRecoveryCount: 0,
+          storeUnavailable: false
+        ),
+        accountedEventBytes: 0
+      )
+    )
+    let store = ExplorerStoreDriverSpy()
+    let evaluationQueue = DispatchQueue(
+      label: "ViewerFoundationTests.explorer-rapid-generations"
+    )
+    let evaluationGate = DispatchSemaphore(value: 0)
+    evaluationQueue.async { evaluationGate.wait() }
+    let model = ViewerEventExplorerModel(runtimeLogicalID: runtimeLogicalID)
+    let coordinator = ViewerEventExplorerCoordinator(
+      model: model,
+      store: store.driver,
+      live: live,
+      evaluationQueue: evaluationQueue,
+      evaluator: ViewerLiveEventEvaluator(nowNanoseconds: { 0 })
+    )
+    let initialScope = try ViewerExplorerScope(
+      source: source,
+      devices: .all,
+      filter: ViewerExplorerFilter()
+    )
+
+    let initialToken = try coordinator.replaceScope(
+      initialScope,
+      materialization: materialization
+    )
+    store.completeNextRelease(.success(()))
+    await waitUntilExplorer { live.snapshotRequestCount == 1 }
+    XCTAssertEqual(coordinator.state, .loading(.scopeReplacement))
+
+    let pausedToken = coordinator.pause()
+    XCTAssertNotEqual(pausedToken, initialToken)
+    XCTAssertEqual(coordinator.state, .paused)
+    evaluationGate.signal()
+    for _ in 0..<20 { await Task.yield() }
+    XCTAssertTrue(model.timelineRows.isEmpty)
+
+    let resumeToken = coordinator.resume()
+    let jumpToken = coordinator.jumpToLatest()
+    let finalScope = try ViewerExplorerScope(
+      source: source,
+      devices: .all,
+      filter: ViewerExplorerFilter(predicates: [.eventTypeEquals("final.filter")])
+    )
+    let finalToken = try coordinator.replaceScope(finalScope, materialization: materialization)
+    XCTAssertNotEqual(resumeToken, pausedToken)
+    XCTAssertNotEqual(jumpToken, resumeToken)
+    XCTAssertNotEqual(finalToken, jumpToken)
+    XCTAssertEqual(store.releaseRequestCount, 4)
+
+    store.completeNextRelease(.success(()))
+    store.completeNextRelease(.success(()))
+    for _ in 0..<20 { await Task.yield() }
+    XCTAssertEqual(live.snapshotRequestCount, 1)
+    XCTAssertEqual(store.queryRequestCount, 0)
+
+    store.completeNextRelease(.success(()))
+    await waitUntilExplorer { coordinator.state == .ready(.scopeReplacement) }
+    XCTAssertEqual(model.currentToken, finalToken)
+    XCTAssertEqual(model.compiledInputs?.scope.filter, finalScope.filter)
+    XCTAssertTrue(model.timelineRows.isEmpty)
+    XCTAssertEqual(live.snapshotRequestCount, 2)
+    XCTAssertEqual(live.pausedValues, [true, false])
+    XCTAssertEqual(store.queryRequestCount, 0)
+    XCTAssertEqual(store.pageRequestCount, 0)
+    XCTAssertEqual(store.gapRequestCount, 0)
+    XCTAssertEqual(
+      coordinator.diagnostics,
+      ViewerExplorerTraversalDiagnostics(
+        requestCount: 4,
+        releaseRequestCount: 4,
+        releaseCompletionCount: 4,
+        durableQueryCount: 0,
+        liveSnapshotCount: 2
+      )
+    )
+  }
+
+  @MainActor
+  func testExplorerCoordinatorRejectsInvalidStoreTokenAtEveryTraversalStage() async throws {
+    let runtimeLogicalID = UUID()
+    let source = ViewerExplorerSource.current(runtimeLogicalID: runtimeLogicalID)
+    let live = ExplorerLiveObservationSpy(
+      snapshot: ViewerLiveProjectionSnapshot(
+        runtimeLogicalID: runtimeLogicalID,
+        generation: 1,
+        events: [],
+        sessions: [],
+        gaps: ViewerLiveGapSnapshot(
+          ingressOverflowCount: 0,
+          windowOverflowCount: 0,
+          residentConflictCount: 0,
+          diagnosticLossCount: 0,
+          storeUnavailableCount: 0,
+          storeRecoveryCount: 0,
+          storeUnavailable: false
+        ),
+        accountedEventBytes: 0
+      )
+    )
+    let store = ExplorerStoreDriverSpy()
+    let model = ViewerEventExplorerModel(runtimeLogicalID: runtimeLogicalID)
+    let coordinator = ViewerEventExplorerCoordinator(
+      model: model,
+      store: store.driver,
+      live: live
+    )
+    let querySnapshot = ViewerQuerySnapshot(
+      eventUpperRowID: 100,
+      recordingVersionUpperRowID: 100,
+      deviceVersionUpperRowID: 100,
+      dispositionUpperRowID: 100,
+      gapUpperRowID: 100,
+      dropUpperRowID: 100
+    )
+    let sentinelEvent = ViewerStoredEventRow(
+      rowID: 41,
+      deviceSessionID: 1,
+      direction: "appToViewer",
+      wireSequence: 1,
+      eventUUID: UUID().uuidString.lowercased(),
+      eventType: "test.invalid-page",
+      contentByteCount: 1,
+      createdWallMilliseconds: 1_000,
+      viewerWallMilliseconds: 1_000,
+      viewerMonotonicNanoseconds: 1_000,
+      priority: "normal",
+      recordingRevision: 1,
+      deviceRevision: 1,
+      resolvedDisposition: "buffered"
+    )
+    let sentinelGap = ViewerGapRow(
+      rowID: 42,
+      recordingID: 1,
+      deviceSessionID: nil,
+      sequence: 1,
+      namespace: "test",
+      revision: 1,
+      reason: "invalid-gap",
+      firstViewerWallMilliseconds: 1_000,
+      lastViewerWallMilliseconds: 1_000,
+      directions: "appToViewer",
+      firstWireSequence: 1,
+      lastWireSequence: 1,
+      count: 1
+    )
+    _ = try coordinator.replaceScope(
+      ViewerExplorerScope(
+        source: source,
+        devices: .all,
+        filter: ViewerExplorerFilter()
+      ),
+      materialization: ViewerExplorerMaterializationSnapshot(
+        source: source,
+        generation: 1,
+        recordingID: 1,
+        deviceSessionIDsByLogicalID: [:]
+      )
+    )
+
+    store.invalidateNextRelease()
+    store.completeNextRelease(.success(()))
+    for _ in 0..<100 { await Task.yield() }
+    XCTAssertEqual(store.queryRequestCount, 0)
+    XCTAssertEqual(store.pageRequestCount, 0)
+    XCTAssertEqual(store.gapRequestCount, 0)
+    XCTAssertEqual(live.snapshotRequestCount, 0)
+
+    _ = coordinator.refresh()
+    store.completeNextRelease(.success(()))
+    await waitUntilExplorer { store.queryRequestCount == 1 }
+    store.invalidateNextQuery()
+    store.completeNextQuery(.success(querySnapshot))
+    for _ in 0..<100 { await Task.yield() }
+    XCTAssertEqual(store.pageRequestCount, 0)
+    XCTAssertEqual(store.gapRequestCount, 0)
+
+    _ = coordinator.refresh()
+    store.completeNextRelease(.success(()))
+    await waitUntilExplorer { store.queryRequestCount == 2 }
+    store.completeNextQuery(.success(querySnapshot))
+    await waitUntilExplorer { store.pageRequestCount == 1 && store.gapRequestCount == 1 }
+    store.invalidateNextPage()
+    store.completeNextPage(
+      .success(ViewerEventPage(rows: [sentinelEvent], nextCursor: nil, previousCursor: nil))
+    )
+    store.completeNextGaps(
+      .success(ViewerGapPage(rows: [], nextCursor: nil, previousCursor: nil))
+    )
+    for _ in 0..<100 { await Task.yield() }
+    XCTAssertTrue(model.timelineRows.isEmpty)
+    XCTAssertTrue(model.gapRows.isEmpty)
+    XCTAssertEqual(coordinator.state, .loading(.refresh))
+    await coordinator.waitForIdle().value
+    XCTAssertEqual(coordinator.pendingWorkCount, 0)
+
+    _ = coordinator.refresh()
+    store.completeNextRelease(.success(()))
+    await waitUntilExplorer { store.queryRequestCount == 3 }
+    store.completeNextQuery(.success(querySnapshot))
+    await waitUntilExplorer { store.pageRequestCount == 2 && store.gapRequestCount == 2 }
+    store.invalidateNextGaps()
+    store.completeNextPage(
+      .success(ViewerEventPage(rows: [], nextCursor: nil, previousCursor: nil))
+    )
+    store.completeNextGaps(
+      .success(ViewerGapPage(rows: [sentinelGap], nextCursor: nil, previousCursor: nil))
+    )
+    for _ in 0..<100 { await Task.yield() }
+    XCTAssertTrue(model.timelineRows.isEmpty)
+    XCTAssertTrue(model.gapRows.isEmpty)
+    XCTAssertEqual(coordinator.state, .loading(.refresh))
+    await coordinator.waitForIdle().value
+    XCTAssertEqual(coordinator.pendingWorkCount, 0)
+
+    _ = coordinator.refresh()
+    store.completeNextRelease(.success(()))
+    await waitUntilExplorer { store.queryRequestCount == 4 }
+    store.completeNextQuery(.success(querySnapshot))
+    await waitUntilExplorer { store.pageRequestCount == 3 && store.gapRequestCount == 3 }
+    store.completeNextPage(
+      .success(ViewerEventPage(rows: [], nextCursor: nil, previousCursor: nil))
+    )
+    store.completeNextGaps(
+      .success(ViewerGapPage(rows: [], nextCursor: nil, previousCursor: nil))
+    )
+    await waitUntilExplorer { coordinator.state == .ready(.refresh) }
+    await coordinator.waitForIdle().value
+    XCTAssertEqual(coordinator.pendingWorkCount, 0)
+  }
+
+  @MainActor
+  func testExplorerCoordinatorDiscardsSynchronouslyRejectedTraversalSuccessors() async throws {
+    let runtimeLogicalID = UUID()
+    let source = ViewerExplorerSource.current(runtimeLogicalID: runtimeLogicalID)
+    let live = ExplorerLiveObservationSpy(
+      snapshot: ViewerLiveProjectionSnapshot(
+        runtimeLogicalID: runtimeLogicalID,
+        generation: 1,
+        events: [],
+        sessions: [],
+        gaps: ViewerLiveGapSnapshot(
+          ingressOverflowCount: 0,
+          windowOverflowCount: 0,
+          residentConflictCount: 0,
+          diagnosticLossCount: 0,
+          storeUnavailableCount: 0,
+          storeRecoveryCount: 0,
+          storeUnavailable: false
+        ),
+        accountedEventBytes: 0
+      )
+    )
+    let store = ExplorerStoreDriverSpy()
+    let model = ViewerEventExplorerModel(runtimeLogicalID: runtimeLogicalID)
+    let coordinator = ViewerEventExplorerCoordinator(
+      model: model,
+      store: store.driver,
+      live: live
+    )
+    let querySnapshot = ViewerQuerySnapshot(
+      eventUpperRowID: 0,
+      recordingVersionUpperRowID: 0,
+      deviceVersionUpperRowID: 0,
+      dispositionUpperRowID: 0,
+      gapUpperRowID: 0,
+      dropUpperRowID: 0
+    )
+    _ = try coordinator.replaceScope(
+      ViewerExplorerScope(
+        source: source,
+        devices: .all,
+        filter: ViewerExplorerFilter()
+      ),
+      materialization: ViewerExplorerMaterializationSnapshot(
+        source: source,
+        generation: 1,
+        recordingID: 1,
+        deviceSessionIDsByLogicalID: [:]
+      )
+    )
+
+    store.rejectNextQuerySynchronously()
+    store.completeNextRelease(.success(()))
+    await waitUntilExplorer {
+      store.queryRequestCount == 1 && coordinator.pendingWorkCount == 0
+    }
+    XCTAssertEqual(coordinator.state, .loading(.scopeReplacement))
+    XCTAssertEqual(store.pageRequestCount, 0)
+    XCTAssertEqual(store.gapRequestCount, 0)
+    XCTAssertTrue(model.timelineRows.isEmpty)
+    XCTAssertTrue(model.gapRows.isEmpty)
+
+    _ = coordinator.refresh()
+    store.completeNextRelease(.success(()))
+    await waitUntilExplorer { store.queryRequestCount == 2 }
+    store.rejectNextPageSynchronously()
+    store.rejectNextGapsSynchronously()
+    store.completeNextQuery(.success(querySnapshot))
+    await waitUntilExplorer {
+      store.pageRequestCount == 1 && store.gapRequestCount == 1
+        && coordinator.pendingWorkCount == 0
+    }
+    XCTAssertEqual(coordinator.state, .loading(.refresh))
+    XCTAssertTrue(model.timelineRows.isEmpty)
+    XCTAssertTrue(model.gapRows.isEmpty)
+
+    _ = coordinator.refresh()
+    store.completeNextRelease(.success(()))
+    await waitUntilExplorer { store.queryRequestCount == 3 }
+    store.completeNextQuery(.success(querySnapshot))
+    await waitUntilExplorer { store.pageRequestCount == 2 && store.gapRequestCount == 2 }
+    store.completeNextPage(
+      .success(ViewerEventPage(rows: [], nextCursor: nil, previousCursor: nil))
+    )
+    store.completeNextGaps(
+      .success(ViewerGapPage(rows: [], nextCursor: nil, previousCursor: nil))
+    )
+    await waitUntilExplorer { coordinator.state == .ready(.refresh) }
+    await coordinator.waitForIdle().value
+    XCTAssertEqual(coordinator.pendingWorkCount, 0)
+  }
+
+  @MainActor
+  func testBlockedLiveEvaluationJoinsAfterSealWithoutLatePresentation() async throws {
+    let runtimeLogicalID = UUID()
+    let connectionID = UUID()
+    let source = ViewerExplorerSource.current(runtimeLogicalID: runtimeLogicalID)
+    let context = try makeObservationContext(
+      connectionID: connectionID,
+      displayName: "Cancellation App"
+    )
+    let observation = try ViewerCommittedEventObservation(
+      runtimeLogicalID: runtimeLogicalID,
+      context: context,
+      nickname: nil,
+      envelope: makeObservationEnvelope(
+        content: .object(["message": .string("cancel-live-secret")]),
+        createdAt: Date(timeIntervalSince1970: 1),
+        sessionEpoch: SessionEpoch(),
+        sequence: 1
+      ),
+      viewerWallMilliseconds: 1_000,
+      viewerMonotonicNanoseconds: 1_000,
+      deterministicEventBytes: 128,
+      initialDisposition: .buffered
+    )
+    let live = ExplorerLiveObservationSpy(
+      snapshot: ViewerLiveProjectionSnapshot(
+        runtimeLogicalID: runtimeLogicalID,
+        generation: 1,
+        events: [
+          ViewerLiveEventSnapshot(
+            observation: observation,
+            laterDisposition: nil,
+            durableState: .pending,
+            hasPresentationConflict: false,
+            hasGap: false,
+            hasDrop: false,
+            sessionEnded: false
+          )
+        ],
+        sessions: [],
+        gaps: ViewerLiveGapSnapshot(
+          ingressOverflowCount: 0,
+          windowOverflowCount: 0,
+          residentConflictCount: 0,
+          diagnosticLossCount: 0,
+          storeUnavailableCount: 0,
+          storeRecoveryCount: 0,
+          storeUnavailable: false
+        ),
+        accountedEventBytes: ViewerLiveProjectionLimits.fixedEntryOverheadBytes + 128
+      )
+    )
+    let store = ExplorerStoreDriverSpy()
+    let evaluationQueue = DispatchQueue(label: "ViewerFoundationTests.blocked-live-cleanup")
+    let evaluationClock = BlockingViewerMonotonicClock()
+    let model = ViewerEventExplorerModel(runtimeLogicalID: runtimeLogicalID)
+    let coordinator = ViewerEventExplorerCoordinator(
+      model: model,
+      store: store.driver,
+      live: live,
+      evaluationQueue: evaluationQueue,
+      evaluator: ViewerLiveEventEvaluator(nowNanoseconds: { evaluationClock.now() })
+    )
+    let presentationCount = LockedTestCounter()
+    coordinator.setPresentationHandler { presentationCount.increment() }
+
+    _ = try coordinator.replaceScope(
+      ViewerExplorerScope(
+        source: source,
+        devices: .all,
+        filter: ViewerExplorerFilter()
+      ),
+      materialization: ViewerExplorerMaterializationSnapshot(
+        source: source,
+        generation: 1,
+        recordingID: nil,
+        deviceSessionIDsByLogicalID: [:]
+      )
+    )
+    store.completeNextRelease(.success(()))
+    await waitUntilExplorer { evaluationClock.isBlocked }
+    XCTAssertEqual(live.snapshotRequestCount, 1)
+    XCTAssertEqual(coordinator.pendingWorkCount, 1)
+
+    coordinator.setPresentationHandler {}
+    model.setRefreshHandler { _, _ in }
+    model.sealAndClear()
+    coordinator.cancelActiveWork()
+    let presentationCountAtSeal = presentationCount.value
+    let cleanup = coordinator.waitForIdle()
+    XCTAssertEqual(coordinator.pendingWorkCount, 1)
+    evaluationClock.release()
+    await cleanup.value
+
+    XCTAssertEqual(coordinator.pendingWorkCount, 0)
+    XCTAssertEqual(presentationCount.value, presentationCountAtSeal)
+    XCTAssertTrue(model.timelineRows.isEmpty)
+    XCTAssertTrue(model.recordingRows.isEmpty)
+    XCTAssertNil(model.pendingRefreshSignal)
+    XCTAssertFalse(String(reflecting: coordinator).contains("blocked-live-cleanup"))
+  }
+
+  @MainActor
+  func testRendererRegistryPreparesBoundedRawTreeLogTableAndNumericFallbacks() throws {
+    var genericObject: [String: Any] = [:]
+    for index in 0..<129 { genericObject[String(format: "key-%03d", index)] = index }
+    genericObject["payload"] = String(repeating: "é", count: 33_000)
+    let genericData = try JSONSerialization.data(
+      withJSONObject: genericObject,
+      options: [.sortedKeys]
+    )
+    let genericDetail = makeRendererDetail(
+      rowID: 1,
+      eventType: "custom.generic",
+      content: genericData
+    )
+    let model = ViewerEventInspectorModel(runtimeLogicalID: UUID())
+    let genericRequest = try model.select(
+      detail: genericDetail,
+      identity: .durable(rowID: 1)
+    )
+    XCTAssertEqual(genericRequest.rendererKind, .genericJSON)
+    let genericResult = ViewerRendererPreparer().prepare(genericRequest)
+    XCTAssertTrue(model.apply(genericResult))
+    XCTAssertEqual(genericResult.preparation.presentedKind, .genericJSON)
+    XCTAssertEqual(genericResult.preparation.generic.prettyState, .prepared)
+    XCTAssertLessThanOrEqual(
+      genericResult.preparation.generic.prettyText?.utf8.count ?? .max,
+      ViewerJSONInspectionLimits.maximumPrettyOutputBytes
+    )
+    XCTAssertGreaterThan(genericResult.preparation.generic.rawChunkCount, 1)
+    var reconstructed = Data()
+    for index in 0..<genericResult.preparation.generic.rawChunkCount {
+      let chunk = try model.rawChunk(at: index)
+      XCTAssertLessThanOrEqual(chunk.byteRange.count, ViewerJSONInspectionLimits.rawChunkBytes)
+      reconstructed.append(Data(chunk.text.utf8))
+      XCTAssertLessThanOrEqual(
+        chunk.focusedAccessibilityText.utf8.count,
+        ViewerJSONInspectionLimits.maximumFocusedAccessibilityBytes
+      )
+    }
+    XCTAssertEqual(reconstructed, genericData)
+
+    var tree = try XCTUnwrap(genericResult.preparation.generic.treeState)
+    let firstChildren = try tree.expand(nodeID: 0, offset: 0, data: genericData)
+    XCTAssertEqual(firstChildren.count, ViewerJSONInspectionLimits.maximumTreeChildrenPerExpansion)
+    XCTAssertEqual(tree.nodes.first?.nextChildOffset, 128)
+    let remainingChildren = try tree.expand(nodeID: 0, offset: 128, data: genericData)
+    XCTAssertEqual(remainingChildren.count, 2)
+    XCTAssertEqual(tree.nodes.count, 131)
+    XCTAssertLessThanOrEqual(tree.nodes.count, ViewerJSONInspectionLimits.maximumTreeNodes)
+    XCTAssertLessThanOrEqual(
+      tree.derivedTextBytes,
+      ViewerJSONInspectionLimits.maximumTreeDerivedTextBytes
+    )
+    XCTAssertTrue(
+      tree.nodes.allSatisfy {
+        $0.preview.utf8.count <= ViewerJSONInspectionLimits.maximumTreePreviewBytes
+          && $0.valueRange.upperBound <= genericData.count
+      }
+    )
+    XCTAssertLessThanOrEqual(
+      try tree.focusedAccessibilityText(nodeID: 1, data: genericData).utf8.count,
+      ViewerJSONInspectionLimits.maximumFocusedAccessibilityBytes
+    )
+
+    let unsafeMessage = "line\n\u{202E}unsafe " + String(repeating: "x", count: 70_000)
+    let logData = try JSONSerialization.data(
+      withJSONObject: ["message": unsafeMessage],
+      options: [.sortedKeys]
+    )
+    let logRequest = try model.select(
+      detail: makeRendererDetail(rowID: 2, eventType: "log.network", content: logData),
+      identity: .durable(rowID: 2)
+    )
+    XCTAssertEqual(logRequest.rendererKind, .log)
+    let logResult = ViewerRendererPreparer().prepare(logRequest)
+    guard case .log(let log)? = logResult.preparation.specialized else {
+      return XCTFail("Expected bounded log preparation")
+    }
+    let logText = log.chunks.joined()
+    XCTAssertEqual(logResult.preparation.presentedKind, .log)
+    XCTAssertTrue(logText.contains("<U+000A>"))
+    XCTAssertTrue(logText.contains("<U+202E>"))
+    XCTAssertTrue(logText.hasPrefix("⟦"))
+    XCTAssertTrue(logText.hasSuffix("…⟧"))
+    XCTAssertTrue(log.chunks.allSatisfy { $0.utf8.count <= ViewerLogPreparation.chunkBytes })
+    XCTAssertLessThanOrEqual(log.derivedTextBytes, ViewerLogPreparation.maximumOutputBytes)
+    XCTAssertLessThanOrEqual(
+      log.focusedAccessibilityText.utf8.count,
+      ViewerJSONInspectionLimits.maximumFocusedAccessibilityBytes
+    )
+
+    var tableObject: [String: Any] = [
+      "boolean": true,
+      "control": "line\n\u{202E}value",
+      "null": NSNull(),
+      "real": 1.5,
+      "string": "value",
+    ]
+    for index in 0..<129 { tableObject[String(format: "field-%03d", index)] = index }
+    let tableData = try JSONSerialization.data(
+      withJSONObject: tableObject,
+      options: [.sortedKeys]
+    )
+    let tableRequest = try model.select(
+      detail: makeRendererDetail(rowID: 3, eventType: "table.metrics", content: tableData),
+      identity: .durable(rowID: 3)
+    )
+    let tableResult = ViewerRendererPreparer().prepare(tableRequest)
+    guard case .table(let table)? = tableResult.preparation.specialized else {
+      return XCTFail("Expected bounded table preparation")
+    }
+    XCTAssertEqual(table.rows.count, ViewerTablePreparation.maximumRetainedRows)
+    XCTAssertEqual(try table.page(offset: 0).count, ViewerTablePreparation.pageRows)
+    XCTAssertEqual(try table.page(offset: 64).count, ViewerTablePreparation.pageRows)
+    XCTAssertTrue(table.hasMore)
+    XCTAssertEqual(table.scannedEntryCount, 134)
+    XCTAssertLessThanOrEqual(
+      table.derivedTextBytes,
+      ViewerTablePreparation.maximumDerivedTextBytes
+    )
+    XCTAssertTrue(
+      table.rows.allSatisfy {
+        $0.keyPreview.utf8.count <= ViewerTablePreparation.maximumKeyPreviewBytes
+          && $0.valuePreview.utf8.count <= ViewerTablePreparation.maximumValuePreviewBytes
+          && $0.focusedAccessibilityText.utf8.count
+            <= ViewerJSONInspectionLimits.maximumFocusedAccessibilityBytes
+      }
+    )
+    XCTAssertTrue(table.rows.map(\.valuePreview).joined().contains("<U+202E>"))
+
+    let numericObject = Dictionary(uniqueKeysWithValues: (0..<8).map { ("v\($0)", $0) })
+    let numericData = try JSONSerialization.data(
+      withJSONObject: Array(repeating: numericObject, count: 201),
+      options: [.sortedKeys]
+    )
+    let numericRequest = try model.select(
+      detail: makeRendererDetail(rowID: 4, eventType: "chart.metrics", content: numericData),
+      identity: .durable(rowID: 4)
+    )
+    let numericResult = ViewerRendererPreparer().prepare(numericRequest)
+    guard case .numeric(let numeric)? = numericResult.preparation.specialized else {
+      return XCTFail("Expected bounded numeric preparation")
+    }
+    XCTAssertLessThanOrEqual(numeric.fields.count, ViewerNumericPreparation.maximumFields)
+    XCTAssertEqual(numeric.points.count, ViewerNumericPreparation.maximumPoints)
+    XCTAssertEqual(numeric.scannedRowCount, ViewerNumericPreparation.maximumRows)
+    XCTAssertTrue(numeric.hasMore)
+    XCTAssertTrue(numeric.points.allSatisfy { $0.value.isFinite })
+
+    let timelineRequest = try model.select(
+      detail: makeRendererDetail(
+        rowID: 7,
+        eventType: "timeline.state",
+        content: Data("{\"state\":true}".utf8)
+      ),
+      identity: .durable(rowID: 7)
+    )
+    let timelineResult = ViewerRendererPreparer().prepare(timelineRequest)
+    guard case .timeline(let timeline)? = timelineResult.preparation.specialized else {
+      return XCTFail("Expected metadata-only timeline preparation")
+    }
+    XCTAssertEqual(timeline.eventType, "timeline.state")
+    XCTAssertEqual(timeline.direction, "appToViewer")
+    XCTAssertEqual(timeline.disposition, "buffered")
+
+    let incompatibleData = try JSONSerialization.data(withJSONObject: ["value": 1])
+    let incompatibleRequest = try model.select(
+      detail: makeRendererDetail(
+        rowID: 5,
+        eventType: "log.incompatible",
+        content: incompatibleData
+      ),
+      identity: .durable(rowID: 5)
+    )
+    let incompatibleResult = ViewerRendererPreparer().prepare(incompatibleRequest)
+    XCTAssertEqual(incompatibleResult.preparation.presentedKind, .genericJSON)
+    XCTAssertEqual(incompatibleResult.preparation.fallbackReason, .incompatibleShape)
+    XCTAssertEqual(
+      incompatibleResult.preparation.fallbackGuidance,
+      ViewerRendererFallbackReason.guidance
+    )
+
+    let cancelledResult = ViewerRendererPreparer().prepare(logRequest, isCancelled: { true })
+    XCTAssertEqual(cancelledResult.preparation.presentedKind, .genericJSON)
+    XCTAssertEqual(cancelledResult.preparation.fallbackReason, .cancelled)
+    let cancelledTableResult = ViewerRendererPreparer().prepare(
+      tableRequest,
+      isCancelled: { true }
+    )
+    XCTAssertEqual(cancelledTableResult.preparation.presentedKind, .genericJSON)
+    XCTAssertEqual(cancelledTableResult.preparation.fallbackReason, .cancelled)
+    let deadlineClock = SteppingNanosecondClock(
+      values: [0, 100_000_000, 200_000_000, 300_000_000, 400_000_000, 500_000_000]
+    )
+    let deadlineResult = ViewerRendererPreparer(
+      nowNanoseconds: { deadlineClock.now() }
+    ).prepare(logRequest)
+    XCTAssertEqual(deadlineResult.preparation.presentedKind, .genericJSON)
+    XCTAssertEqual(deadlineResult.preparation.fallbackReason, .refineRequired)
+    let tableDeadlineClock = SteppingNanosecondClock(
+      values: [
+        0, ViewerJSONInspectionLimits.deadlineNanoseconds,
+        0, ViewerJSONInspectionLimits.deadlineNanoseconds,
+        0, ViewerJSONInspectionLimits.deadlineNanoseconds,
+      ]
+    )
+    let tableDeadlineResult = ViewerRendererPreparer(
+      nowNanoseconds: { tableDeadlineClock.now() }
+    ).prepare(tableRequest)
+    XCTAssertEqual(tableDeadlineResult.preparation.presentedKind, .genericJSON)
+    XCTAssertEqual(tableDeadlineResult.preparation.fallbackReason, .refineRequired)
+
+    let oversizedLogData = try JSONSerialization.data(
+      withJSONObject: String(repeating: "x", count: ViewerLogPreparation.maximumInputBytes + 1),
+      options: [.fragmentsAllowed]
+    )
+    let oversizedLogRequest = try model.select(
+      detail: makeRendererDetail(
+        rowID: 6,
+        eventType: "log.oversized",
+        content: oversizedLogData
+      ),
+      identity: .durable(rowID: 6)
+    )
+    let oversizedLogResult = ViewerRendererPreparer().prepare(oversizedLogRequest)
+    XCTAssertEqual(oversizedLogResult.preparation.presentedKind, .genericJSON)
+    XCTAssertEqual(oversizedLogResult.preparation.fallbackReason, .inputTooLarge)
+    XCTAssertEqual(oversizedLogResult.preparation.generic.prettyState, .chunkedRawOnly)
+    let diagnostics = [
+      String(describing: genericRequest),
+      String(reflecting: logResult.preparation),
+      String(describing: log),
+      String(reflecting: table),
+      String(describing: numeric),
+      String(reflecting: model),
+    ].joined()
+    XCTAssertFalse(diagnostics.contains("unsafe"))
+    XCTAssertFalse(diagnostics.contains("payload"))
+    XCTAssertTrue(Mirror(reflecting: model).children.isEmpty)
+  }
+
+  @MainActor
+  func testRendererExtremeValidatedShapesRemainBounded() throws {
+    let model = ViewerEventInspectorModel(runtimeLogicalID: UUID())
+    let preparer = ViewerRendererPreparer(nowNanoseconds: { 0 })
+
+    let depth = 128
+    let depthData = Data(
+      (String(repeating: "[", count: depth) + "0" + String(repeating: "]", count: depth))
+        .utf8
+    )
+    let depthRequest = try model.select(
+      detail: makeRendererDetail(rowID: 20, eventType: "custom.depth", content: depthData),
+      identity: .durable(rowID: 20)
+    )
+    let depthResult = preparer.prepare(depthRequest)
+    XCTAssertEqual(depthResult.preparation.presentedKind, .genericJSON)
+    XCTAssertEqual(depthResult.preparation.generic.prettyState, .prepared)
+    XCTAssertEqual(depthResult.preparation.generic.treeState?.nodes.count, 1)
+
+    let repeatedEntry = Array("\"a\":0".utf8)
+    var hundredThousandEntries = Data()
+    hundredThousandEntries.reserveCapacity(600_001)
+    hundredThousandEntries.append(0x7B)
+    for index in 0..<100_000 {
+      if index > 0 { hundredThousandEntries.append(0x2C) }
+      hundredThousandEntries.append(contentsOf: repeatedEntry)
+    }
+    hundredThousandEntries.append(0x7D)
+    let entryRequest = try model.select(
+      detail: makeRendererDetail(
+        rowID: 21,
+        eventType: "table.maximum-entries",
+        content: hundredThousandEntries
+      ),
+      identity: .durable(rowID: 21)
+    )
+    let entryResult = preparer.prepare(entryRequest)
+    guard case .table(let entryTable)? = entryResult.preparation.specialized else {
+      return XCTFail("Expected bounded table preparation for the 100,000-entry fixture")
+    }
+    XCTAssertEqual(entryTable.rows.count, ViewerTablePreparation.maximumRetainedRows)
+    XCTAssertEqual(entryTable.scannedEntryCount, 4_096)
+    XCTAssertTrue(entryTable.hasMore)
+    XCTAssertLessThanOrEqual(
+      entryTable.derivedTextBytes,
+      ViewerTablePreparation.maximumDerivedTextBytes
+    )
+
+    let oneMiB = 1 * 1_024 * 1_024
+    var maximumKeyData = Data("{\"".utf8)
+    maximumKeyData.append(Data(repeating: 0x61, count: oneMiB))
+    maximumKeyData.append(Data("\":0}".utf8))
+    let keyRequest = try model.select(
+      detail: makeRendererDetail(
+        rowID: 22,
+        eventType: "table.maximum-key",
+        content: maximumKeyData
+      ),
+      identity: .durable(rowID: 22)
+    )
+    let keyResult = preparer.prepare(keyRequest)
+    XCTAssertEqual(keyResult.preparation.presentedKind, .genericJSON)
+    XCTAssertEqual(keyResult.preparation.fallbackReason, .inputTooLarge)
+    var keyTree = try XCTUnwrap(keyResult.preparation.generic.treeState)
+    let keyNodes = try keyTree.expand(nodeID: 0, offset: 0, data: maximumKeyData)
+    let keyNode = try XCTUnwrap(keyNodes.first)
+    XCTAssertEqual(keyNode.keyRange?.count, oneMiB + 2)
+    XCTAssertLessThanOrEqual(
+      try keyTree.focusedAccessibilityText(nodeID: keyNode.id, data: maximumKeyData).utf8.count,
+      ViewerJSONInspectionLimits.maximumFocusedAccessibilityBytes
+    )
+
+    var maximumMessageData = Data("{\"message\":\"".utf8)
+    maximumMessageData.append(Data(repeating: 0x78, count: oneMiB))
+    maximumMessageData.append(Data("\"}".utf8))
+    let messageRequest = try model.select(
+      detail: makeRendererDetail(
+        rowID: 23,
+        eventType: "log.maximum-message",
+        content: maximumMessageData
+      ),
+      identity: .durable(rowID: 23)
+    )
+    let messageResult = preparer.prepare(messageRequest)
+    XCTAssertEqual(messageResult.preparation.presentedKind, .genericJSON)
+    XCTAssertEqual(messageResult.preparation.fallbackReason, .inputTooLarge)
+    XCTAssertEqual(messageResult.preparation.generic.prettyState, .chunkedRawOnly)
+
+    let maximumEventBytes = ViewerJSONInspectionLimits.maximumCanonicalBytes
+    var maximumEventData = Data([0x22])
+    maximumEventData.reserveCapacity(maximumEventBytes)
+    maximumEventData.append(Data(repeating: 0x78, count: maximumEventBytes - 2))
+    maximumEventData.append(0x22)
+    let maximumRequest = try model.select(
+      detail: makeRendererDetail(
+        rowID: 24,
+        eventType: "custom.maximum-event",
+        content: maximumEventData
+      ),
+      identity: .durable(rowID: 24)
+    )
+    let maximumResult = preparer.prepare(maximumRequest)
+    XCTAssertTrue(model.apply(maximumResult))
+    XCTAssertEqual(model.canonicalBuffer?.contentByteCount, maximumEventBytes)
+    XCTAssertEqual(maximumResult.preparation.presentedKind, .genericJSON)
+    XCTAssertEqual(maximumResult.preparation.generic.prettyState, .chunkedRawOnly)
+    XCTAssertEqual(maximumResult.preparation.generic.rawChunkCount, 256)
+    XCTAssertEqual(maximumResult.preparation.generic.treeState?.nodes.count, 1)
+    XCTAssertEqual(try model.rawChunk(at: 0).byteRange.count, 64 * 1_024)
+    XCTAssertEqual(try model.rawChunk(at: 255).byteRange.count, 64 * 1_024)
+    XCTAssertLessThanOrEqual(
+      try model.rawChunk(at: 255).focusedAccessibilityText.utf8.count,
+      ViewerJSONInspectionLimits.maximumFocusedAccessibilityBytes
+    )
+
+    let diagnostics = [
+      String(reflecting: depthResult.preparation),
+      String(reflecting: entryTable),
+      String(reflecting: keyResult.preparation),
+      String(reflecting: messageResult.preparation),
+      String(reflecting: maximumResult.preparation),
+    ].joined()
+    XCTAssertFalse(diagnostics.contains(String(repeating: "x", count: 32)))
+    XCTAssertTrue(Mirror(reflecting: maximumResult.preparation).children.isEmpty)
+  }
+
+  @MainActor
+  func testInspectorPreparationCancelsReplacedGenerationAndClearsCanonicalBuffer() async throws {
+    let runtimeLogicalID = UUID()
+    let model = ViewerEventInspectorModel(runtimeLogicalID: runtimeLogicalID)
+    let queue = DispatchQueue(label: "com.nearwire.viewer.tests.renderer-replacement")
+    let gate = DispatchSemaphore(value: 0)
+    queue.async { gate.wait() }
+    let service = ViewerRendererPreparationService(queue: queue)
+    let results = LockedRendererResultCollection()
+    let completed = expectation(description: "All rapid renderer generations completed")
+    completed.expectedFulfillmentCount = 64
+    var requests: [(request: ViewerRendererPreparationRequest, data: Data)] = []
+    for index in 0..<64 {
+      let data = try JSONSerialization.data(
+        withJSONObject: ["message": "selection-\(index)-secret"]
+      )
+      let rowID = Int64(index + 10)
+      let request = try model.select(
+        detail: makeRendererDetail(
+          rowID: rowID,
+          eventType: "log.selection",
+          content: data
+        ),
+        identity: .durable(rowID: rowID)
+      )
+      requests.append((request, data))
+      service.submit(request) { result in
+        results.append(result)
+        completed.fulfill()
+      }
+    }
+    XCTAssertEqual(results.values.count, 63)
+    XCTAssertEqual(service.pendingWorkCount, 1)
+    XCTAssertEqual(service.retainedRequestLimit, 2)
+    XCTAssertEqual(service.retainedRequestCountForTesting, 1)
+    gate.signal()
+    await fulfillment(of: [completed], timeout: 2)
+
+    XCTAssertEqual(results.values.count, 64)
+    for prior in requests.dropLast() {
+      let result = try XCTUnwrap(results.values.first { $0.token == prior.request.token })
+      XCTAssertEqual(result.preparation.fallbackReason, .cancelled)
+      XCTAssertFalse(model.apply(result))
+    }
+    let latest = try XCTUnwrap(requests.last)
+    let latestResult = try XCTUnwrap(
+      results.values.first { $0.token == latest.request.token }
+    )
+    XCTAssertTrue(model.apply(latestResult))
+    XCTAssertEqual(model.canonicalBuffer?.content, latest.data)
+    XCTAssertEqual(model.selectedIdentity, latest.request.token.eventIdentity)
+    XCTAssertEqual(model.preparation?.presentedKind, .log)
+    XCTAssertLessThanOrEqual(
+      model.preparation?.generic.rawChunkCount ?? .max,
+      1
+    )
+    model.clear()
+    XCTAssertNil(model.canonicalBuffer)
+    XCTAssertNil(model.preparation)
+    XCTAssertNil(model.selectedIdentity)
+    XCTAssertFalse(model.apply(latestResult))
+  }
+
+  @MainActor
+  func testExplorerHundredThousandRendererReplacementsCancelBeforeDeliveryClaim() async throws {
+    let queue = DispatchQueue(label: "ViewerFoundationTests.renderer-controller-replacements")
+    let workerEntered = DispatchSemaphore(value: 0)
+    let workerRelease = DispatchSemaphore(value: 0)
+    queue.async {
+      workerEntered.signal()
+      workerRelease.wait()
+    }
+    XCTAssertEqual(workerEntered.wait(timeout: .now() + 1), .success)
+
+    let runtimeLogicalID = UUID()
+    let rendererService = ViewerRendererPreparationService(queue: queue)
+    let deliveryClaims = LockedTestCounter()
+    let controller = ViewerEventExplorerController(
+      inputs: ViewerRuntimeExplorerInputs(
+        runtimeLogicalID: runtimeLogicalID,
+        storeGateway: ViewerStoreExplorerGateway(),
+        liveObservations: ViewerLiveEventWindow(runtimeLogicalID: runtimeLogicalID)
+      ),
+      rendererService: rendererService,
+      rendererDeliveryClaimed: { deliveryClaims.increment() }
+    )
+    let request = try controller.inspector.select(
+      detail: makeRendererDetail(
+        rowID: 640,
+        eventType: "log.replacement",
+        content: Data(#"{"message":"renderer-replacement-secret"}"#.utf8)
+      ),
+      identity: .durable(rowID: 640)
+    )
+
+    for _ in 0..<100_000 { controller.submitRendererForTesting(request) }
+
+    XCTAssertEqual(deliveryClaims.value, 0)
+    XCTAssertEqual(rendererService.retainedRequestCountForTesting, 1)
+    XCTAssertEqual(controller.pendingCleanupWorkCount, 1)
+    let cleanup = controller.sealAndClear()
+    let cleanupCompletions = LockedTestCounter()
+    Task {
+      await cleanup.value
+      cleanupCompletions.increment()
+    }
+    await Task.yield()
+    XCTAssertEqual(cleanupCompletions.value, 0)
+    XCTAssertEqual(controller.pendingCleanupWorkCount, 1)
+
+    workerRelease.signal()
+    await cleanup.value
+    for _ in 0..<100 where cleanupCompletions.value == 0 { await Task.yield() }
+    XCTAssertEqual(cleanupCompletions.value, 1)
+    XCTAssertEqual(controller.pendingCleanupWorkCount, 0)
+    XCTAssertEqual(deliveryClaims.value, 0)
+    XCTAssertEqual(rendererService.retainedRequestCountForTesting, 0)
+    XCTAssertNil(controller.inspector.canonicalBuffer)
+    XCTAssertNil(controller.inspector.preparation)
+  }
+
+  @MainActor
+  func testExplorerBlockedMainActorRetainsBoundedClaimedRendererResults() async throws {
+    let runtimeLogicalID = UUID()
+    let deliveryClaims = LockedTestCounter()
+    let deliveryClaimed = DispatchSemaphore(value: 0)
+    let controller = ViewerEventExplorerController(
+      inputs: ViewerRuntimeExplorerInputs(
+        runtimeLogicalID: runtimeLogicalID,
+        storeGateway: ViewerStoreExplorerGateway(),
+        liveObservations: ViewerLiveEventWindow(runtimeLogicalID: runtimeLogicalID)
+      ),
+      rendererService: ViewerRendererPreparationService(
+        queue: DispatchQueue(label: "ViewerFoundationTests.renderer-blocked-main-actor")
+      ),
+      rendererDeliveryClaimed: {
+        deliveryClaims.increment()
+        deliveryClaimed.signal()
+      }
+    )
+    let smallContent = Data(#"{"message":"bounded"}"#.utf8)
+
+    for index in 0..<255 {
+      let rowID = Int64(700 + index)
+      let request = try controller.inspector.select(
+        detail: makeRendererDetail(
+          rowID: rowID,
+          eventType: "log.blocked-main-actor",
+          content: smallContent
+        ),
+        identity: .durable(rowID: rowID)
+      )
+      controller.submitRendererForTesting(request)
+      XCTAssertEqual(deliveryClaimed.wait(timeout: .now() + 2), .success)
+      XCTAssertLessThanOrEqual(
+        controller.rendererDeliveryRetainedResultCountForTesting,
+        controller.rendererDeliveryMaximumRetainedResultCountForTesting
+      )
+      XCTAssertLessThanOrEqual(controller.pendingCleanupWorkCount, 2)
+    }
+
+    let maximumEventBytes = ViewerJSONInspectionLimits.maximumCanonicalBytes
+    var maximumContent = Data([0x22])
+    maximumContent.reserveCapacity(maximumEventBytes)
+    maximumContent.append(Data(repeating: 0x78, count: maximumEventBytes - 2))
+    maximumContent.append(0x22)
+    let maximumRowID: Int64 = 955
+    let maximumRequest = try controller.inspector.select(
+      detail: makeRendererDetail(
+        rowID: maximumRowID,
+        eventType: "custom.blocked-main-actor-maximum",
+        content: maximumContent
+      ),
+      identity: .durable(rowID: maximumRowID)
+    )
+    controller.submitRendererForTesting(maximumRequest)
+    XCTAssertEqual(deliveryClaimed.wait(timeout: .now() + 10), .success)
+    XCTAssertEqual(deliveryClaims.value, 256)
+    XCTAssertEqual(controller.rendererDeliveryMaximumRetainedResultCountForTesting, 2)
+    XCTAssertLessThanOrEqual(controller.rendererDeliveryRetainedResultCountForTesting, 2)
+    XCTAssertLessThanOrEqual(controller.pendingCleanupWorkCount, 2)
+
+    for _ in 0..<1_000 where controller.pendingCleanupWorkCount != 0 { await Task.yield() }
+    XCTAssertEqual(controller.pendingCleanupWorkCount, 0)
+    XCTAssertEqual(controller.inspector.canonicalBuffer?.contentByteCount, maximumEventBytes)
+    XCTAssertNotNil(controller.inspector.preparation)
+
+    await controller.sealAndClear().value
+    XCTAssertEqual(controller.pendingCleanupWorkCount, 0)
+    XCTAssertEqual(controller.rendererDeliveryRetainedResultCountForTesting, 0)
+    XCTAssertNil(controller.inspector.canonicalBuffer)
+    XCTAssertNil(controller.inspector.preparation)
+  }
+
+  @MainActor
+  func testExplorerCleanupJoinsClaimedContentBearingRendererDelivery() async throws {
+    let runtimeLogicalID = UUID()
+    let deliveryGate = BlockingViewerOperationGate()
+    let rendererService = ViewerRendererPreparationService(
+      queue: DispatchQueue(label: "ViewerFoundationTests.renderer-claimed-delivery")
+    )
+    let controller = ViewerEventExplorerController(
+      inputs: ViewerRuntimeExplorerInputs(
+        runtimeLogicalID: runtimeLogicalID,
+        storeGateway: ViewerStoreExplorerGateway(),
+        liveObservations: ViewerLiveEventWindow(runtimeLogicalID: runtimeLogicalID)
+      ),
+      rendererService: rendererService,
+      rendererDeliveryClaimed: { deliveryGate.run() }
+    )
+    let request = try controller.inspector.select(
+      detail: makeRendererDetail(
+        rowID: 641,
+        eventType: "log.claimed",
+        content: Data(#"{"message":"claimed-renderer-secret"}"#.utf8)
+      ),
+      identity: .durable(rowID: 641)
+    )
+
+    controller.submitRendererForTesting(request)
+    XCTAssertEqual(deliveryGate.waitUntilEntered(), .success)
+    XCTAssertEqual(controller.pendingCleanupWorkCount, 2)
+    let cleanup = controller.sealAndClear()
+    let cleanupCompletions = LockedTestCounter()
+    Task {
+      await cleanup.value
+      cleanupCompletions.increment()
+    }
+    await Task.yield()
+    XCTAssertEqual(cleanupCompletions.value, 0)
+    XCTAssertEqual(controller.pendingCleanupWorkCount, 1)
+    XCTAssertNil(controller.inspector.canonicalBuffer)
+    XCTAssertNil(controller.inspector.preparation)
+
+    deliveryGate.release()
+    await cleanup.value
+    for _ in 0..<100 where cleanupCompletions.value == 0 { await Task.yield() }
+    XCTAssertEqual(cleanupCompletions.value, 1)
+    XCTAssertEqual(controller.pendingCleanupWorkCount, 0)
+    XCTAssertEqual(rendererService.retainedRequestCountForTesting, 0)
+    XCTAssertNil(controller.inspector.canonicalBuffer)
+    XCTAssertNil(controller.inspector.preparation)
+  }
+
+  @MainActor
+  func testBlockedRendererAndComposerCleanupJoinsAndReleasesAllContent() async throws {
+    let rendererQueue = DispatchQueue(label: "ViewerFoundationTests.blocked-renderer-cleanup")
+    let rendererEntered = DispatchSemaphore(value: 0)
+    let rendererGate = DispatchSemaphore(value: 0)
+    rendererQueue.async {
+      rendererEntered.signal()
+      rendererGate.wait()
+    }
+    XCTAssertEqual(rendererEntered.wait(timeout: .now() + 1), .success)
+
+    let inspector = ViewerEventInspectorModel(runtimeLogicalID: UUID())
+    let rendererRequest = try inspector.select(
+      detail: makeRendererDetail(
+        rowID: 700,
+        eventType: "log.cleanup",
+        content: Data(#"{"message":"blocked-renderer-secret"}"#.utf8)
+      ),
+      identity: .durable(rowID: 700)
+    )
+    let rendererService = ViewerRendererPreparationService(queue: rendererQueue)
+    let rendererResults = LockedRendererResultCollection()
+    let rendererFinished = expectation(description: "Cancelled renderer completed")
+    rendererService.submit(rendererRequest) { result in
+      rendererResults.append(result)
+      rendererFinished.fulfill()
+    }
+    XCTAssertEqual(rendererService.pendingWorkCount, 1)
+    let rendererCleanup = rendererService.cancelAndWait()
+
+    let composerQueue = DispatchQueue(label: "ViewerFoundationTests.blocked-composer-cleanup")
+    let composerEntered = DispatchSemaphore(value: 0)
+    let composerGate = DispatchSemaphore(value: 0)
+    composerQueue.async {
+      composerEntered.signal()
+      composerGate.wait()
+    }
+    XCTAssertEqual(composerEntered.wait(timeout: .now() + 1), .success)
+
+    let composer = try ViewerControlComposerModel(
+      runtimeLogicalID: UUID(),
+      activeLimits: .default
+    )
+    XCTAssertEqual(
+      composer.replaceCharacters(
+        field: .eventType,
+        range: NSRange(location: 0, length: 0),
+        replacement: "control.cleanup"
+      ),
+      .applied
+    )
+    XCTAssertEqual(
+      composer.replaceCharacters(
+        field: .content,
+        range: NSRange(location: 0, length: 0),
+        replacement: #"{"message":"blocked-composer-secret"}"#
+      ),
+      .applied
+    )
+    XCTAssertEqual(
+      composer.replaceCharacters(
+        field: .ttl,
+        range: NSRange(location: 0, length: 0),
+        replacement: "60000"
+      ),
+      .applied
+    )
+    let composerRequest = composer.makePreparationRequest()
+    let composerService = ViewerComposerPreparationService(queue: composerQueue)
+    let composerResults = LockedComposerResultCollection()
+    let composerFinished = expectation(description: "Cancelled composer completed")
+    composerService.submit(composerRequest) { result in
+      composerResults.append(result)
+      composerFinished.fulfill()
+    }
+    XCTAssertEqual(composerService.pendingWorkCount, 1)
+    let composerCleanup = composerService.cancelAndWait()
+
+    rendererGate.signal()
+    composerGate.signal()
+    async let rendererJoined: Void = rendererCleanup.value
+    async let composerJoined: Void = composerCleanup.value
+    _ = await (rendererJoined, composerJoined)
+    await fulfillment(of: [rendererFinished, composerFinished], timeout: 1)
+
+    XCTAssertEqual(rendererService.pendingWorkCount, 0)
+    XCTAssertEqual(composerService.pendingWorkCount, 0)
+    let rendererResult = try XCTUnwrap(rendererResults.values.first)
+    XCTAssertEqual(rendererResult.preparation.fallbackReason, .cancelled)
+    guard
+      case .failure(let composerFailure, let diagnostics) =
+        try XCTUnwrap(composerResults.values.first).outcome
+    else { return XCTFail("Expected cancelled composer preparation") }
+    XCTAssertEqual(composerFailure, .cancelled)
+    XCTAssertEqual(diagnostics, ViewerComposerPreparationDiagnostics())
+
+    inspector.clear()
+    composer.clear()
+    XCTAssertNil(inspector.canonicalBuffer)
+    XCTAssertNil(inspector.preparation)
+    XCTAssertThrowsError(try inspector.rawChunk(at: 0))
+    XCTAssertEqual(composer.eventType.value, "")
+    XCTAssertEqual(composer.content.value, "")
+    XCTAssertEqual(composer.ttl.value, "")
+    XCTAssertNil(composer.preparedEvent)
+    XCTAssertFalse(inspector.apply(rendererResult))
+    XCTAssertFalse(composer.apply(try XCTUnwrap(composerResults.values.first)))
+    let diagnosticsText = [
+      String(reflecting: rendererResult),
+      String(reflecting: composerResults.values.first as Any),
+      String(reflecting: ViewerAsyncWorkTracker()),
+    ].joined()
+    XCTAssertFalse(diagnosticsText.contains("blocked-renderer-secret"))
+    XCTAssertFalse(diagnosticsText.contains("blocked-composer-secret"))
+  }
+
+  func testIncrementalTextBuffersEnforceEveryOperatorCapWithoutFullValueRescans() throws {
+    var multibyte = ViewerIncrementalTextBuffer(
+      maximumUTF8Bytes: 8,
+      maximumUnicodeScalars: 4
+    )
+    XCTAssertEqual(
+      multibyte.replaceCharacters(in: NSRange(location: 0, length: 0), with: "é🙂"),
+      .applied
+    )
+    XCTAssertEqual(multibyte.utf8ByteCount, 6)
+    XCTAssertEqual(multibyte.unicodeScalarCount, 2)
+    XCTAssertEqual(multibyte.utf16Count, 3)
+    XCTAssertEqual(
+      multibyte.replaceCharacters(in: NSRange(location: 1, length: 2), with: "ab"),
+      .applied
+    )
+    XCTAssertEqual(multibyte.value, "éab")
+    XCTAssertEqual(multibyte.utf8ByteCount, 4)
+    XCTAssertEqual(multibyte.unicodeScalarCount, 3)
+    XCTAssertEqual(
+      multibyte.replaceCharacters(in: NSRange(location: 3, length: 0), with: "🙂"),
+      .applied
+    )
+    XCTAssertEqual(multibyte.utf8ByteCount, 8)
+    XCTAssertEqual(multibyte.unicodeScalarCount, 4)
+    let acceptedValue = multibyte.value
+    XCTAssertEqual(
+      multibyte.replaceCharacters(in: NSRange(location: 5, length: 0), with: "x"),
+      .rejected(.byteLimit)
+    )
+    XCTAssertEqual(multibyte.value, acceptedValue)
+    XCTAssertEqual(multibyte.diagnostics.appliedEditCount, 3)
+    XCTAssertEqual(multibyte.diagnostics.rejectedEditCount, 1)
+    XCTAssertEqual(multibyte.diagnostics.storageCopyCount, 3)
+    XCTAssertEqual(multibyte.diagnostics.fullValueRescanCount, 0)
+
+    var rapid = ViewerIncrementalTextBuffer(maximumUTF8Bytes: 1)
+    for index in 0..<10_000 {
+      let range = NSRange(location: 0, length: rapid.utf16Count)
+      XCTAssertEqual(
+        rapid.replaceCharacters(in: range, with: index.isMultiple(of: 2) ? "a" : "b"),
+        .applied
+      )
+    }
+    XCTAssertEqual(rapid.utf8ByteCount, 1)
+    XCTAssertEqual(rapid.diagnostics.appliedEditCount, 10_000)
+    XCTAssertEqual(rapid.diagnostics.storageCopyCount, 10_000)
+    XCTAssertEqual(rapid.diagnostics.fullValueRescanCount, 0)
+
+    let expandedLimits = try EventValidationLimits(
+      maximumEncodedContentBytes: 4_194_304,
+      maximumEncodedModelBytes: 16_842_752,
+      maximumTTLMilliseconds: 604_800_000
+    )
+    let composerLimits = try ViewerComposerTextLimits(activeLimits: expandedLimits)
+    XCTAssertEqual(composerLimits.eventTypeBytes, 128)
+    XCTAssertEqual(composerLimits.contentBytes, 4_177_920)
+    XCTAssertEqual(composerLimits.ttlBytes, 9)
+    let contentLimited = try ViewerComposerTextLimits(
+      activeLimits: EventValidationLimits(
+        maximumEncodedContentBytes: 1_048_576,
+        maximumEncodedModelBytes: 134_217_728
+      )
+    )
+    XCTAssertEqual(contentLimited.contentBytes, 1_048_576)
+    let hardCapped = try ViewerComposerTextLimits(
+      activeLimits: EventValidationLimits(
+        maximumEncodedContentBytes: 16_777_216,
+        maximumEncodedModelBytes: 134_217_728
+      )
+    )
+    XCTAssertEqual(
+      hardCapped.contentBytes,
+      (ViewerComposerTextLimits.hardModelBytes - ViewerComposerTextLimits.modelReserveBytes) / 4
+    )
+
+    var ttl = ViewerIncrementalTextBuffer(
+      maximumUTF8Bytes: 9,
+      characterPolicy: .asciiDigits
+    )
+    XCTAssertEqual(
+      ttl.replaceCharacters(in: NSRange(location: 0, length: 0), with: "604800000"),
+      .applied
+    )
+    XCTAssertEqual(
+      try ViewerTTLTextParser.parse(
+        ttl.value,
+        maximumMilliseconds: expandedLimits.maximumTTLMilliseconds
+      ),
+      604_800_000
+    )
+    XCTAssertEqual(
+      ttl.replaceCharacters(in: NSRange(location: 9, length: 0), with: "+"),
+      .rejected(.unsupportedCharacter)
+    )
+    XCTAssertThrowsError(
+      try ViewerTTLTextParser.parse(" 1", maximumMilliseconds: 604_800_000)
+    ) { error in
+      XCTAssertEqual(error as? ViewerTTLValidationError, .invalidSyntax)
+    }
+    for invalidSyntax in ["", "+1", "-1", "1 ", "18446744073709551616"] {
+      XCTAssertThrowsError(
+        try ViewerTTLTextParser.parse(
+          invalidSyntax,
+          maximumMilliseconds: 604_800_000
+        )
+      ) { error in
+        XCTAssertEqual(error as? ViewerTTLValidationError, .invalidSyntax)
+      }
+    }
+    XCTAssertThrowsError(
+      try ViewerTTLTextParser.parse("0", maximumMilliseconds: 604_800_000)
+    ) { error in
+      XCTAssertEqual(error as? ViewerTTLValidationError, .outOfRange)
+    }
+    XCTAssertEqual(
+      try ViewerTTLTextParser.parse("1", maximumMilliseconds: 604_800_000),
+      1
+    )
+    XCTAssertThrowsError(
+      try ViewerTTLTextParser.parse("1234567890", maximumMilliseconds: 604_800_000)
+    ) { error in
+      XCTAssertEqual(error as? ViewerTTLValidationError, .invalidSyntax)
+    }
+    XCTAssertThrowsError(
+      try ViewerTTLTextParser.parse("604800001", maximumMilliseconds: 604_800_000)
+    ) { error in
+      XCTAssertEqual(error as? ViewerTTLValidationError, .outOfRange)
+    }
+
+    var operators = ViewerExplorerOperatorTextBuffers()
+    XCTAssertEqual(
+      operators.replaceCharacters(
+        field: .search,
+        range: NSRange(location: 0, length: 0),
+        replacement: String(repeating: "s", count: 512)
+      ),
+      .applied
+    )
+    XCTAssertEqual(
+      operators.replaceCharacters(
+        field: .search,
+        range: NSRange(location: 512, length: 0),
+        replacement: "x"
+      ),
+      .rejected(.byteLimit)
+    )
+    XCTAssertEqual(
+      operators.replaceCharacters(
+        field: .jsonPath,
+        range: NSRange(location: 0, length: 0),
+        replacement: String(repeating: "p", count: 256)
+      ),
+      .applied
+    )
+    XCTAssertEqual(
+      operators.replaceCharacters(
+        field: .jsonComparison,
+        range: NSRange(location: 0, length: 0),
+        replacement: String(repeating: "v", count: 16 * 1_024)
+      ),
+      .applied
+    )
+    XCTAssertEqual(
+      operators.replaceCharacters(
+        field: .name,
+        range: NSRange(location: 0, length: 0),
+        replacement: String(repeating: "n", count: 80)
+      ),
+      .applied
+    )
+    XCTAssertEqual(
+      operators.replaceCharacters(
+        field: .name,
+        range: NSRange(location: 80, length: 0),
+        replacement: "x"
+      ),
+      .rejected(.scalarLimit)
+    )
+    XCTAssertEqual(
+      operators.replaceCharacters(
+        field: .name,
+        range: NSRange(location: 0, length: 80),
+        replacement: String(repeating: "é", count: 60)
+      ),
+      .applied
+    )
+    XCTAssertEqual(operators.name.utf8ByteCount, 120)
+    XCTAssertEqual(
+      operators.replaceCharacters(
+        field: .name,
+        range: NSRange(location: 60, length: 0),
+        replacement: "x"
+      ),
+      .rejected(.byteLimit)
+    )
+    XCTAssertEqual(
+      operators.replaceCharacters(
+        field: .note,
+        range: NSRange(location: 0, length: 0),
+        replacement: String(repeating: "🙂", count: 4_096)
+      ),
+      .applied
+    )
+    XCTAssertEqual(operators.note.utf8ByteCount, 16 * 1_024)
+    XCTAssertEqual(operators.note.unicodeScalarCount, 4_096)
+    XCTAssertEqual(operators.annotation.maximumUTF8Bytes, 16 * 1_024)
+    XCTAssertEqual(operators.annotation.maximumUnicodeScalars, 4_096)
+    XCTAssertEqual(operators.search.diagnostics.fullValueRescanCount, 0)
+    XCTAssertEqual(operators.note.diagnostics.fullValueRescanCount, 0)
+    XCTAssertTrue(Mirror(reflecting: operators).children.isEmpty)
+  }
+
+  func testComposerPreparerReportsBoundedFailuresWithoutEncodingInvalidInput() throws {
+    let runtimeLogicalID = UUID()
+    let limits = EventValidationLimits.default
+    func request(
+      generation: UInt64,
+      type: String,
+      content: String,
+      ttl: String
+    ) -> ViewerComposerPreparationRequest {
+      ViewerComposerPreparationRequest(
+        token: ViewerComposerGenerationToken(
+          runtimeLogicalID: runtimeLogicalID,
+          generation: generation
+        ),
+        input: ViewerComposerInputSnapshot(
+          eventType: type,
+          contentJSON: content,
+          ttlText: ttl,
+          priority: .normal,
+          policy: .normal,
+          activeLimits: limits
+        )
+      )
+    }
+    let preparer = ViewerComposerPreparer()
+
+    let invalidJSON = preparer.prepare(
+      request(generation: 1, type: "control.test", content: "{", ttl: "60000")
+    )
+    guard case .failure(let invalidJSONError, let invalidJSONDiagnostics) = invalidJSON.outcome
+    else { return XCTFail("Expected invalid JSON") }
+    XCTAssertEqual(invalidJSONError, .invalidContent)
+    XCTAssertEqual(invalidJSONDiagnostics.inputCopyCount, 1)
+    XCTAssertEqual(invalidJSONDiagnostics.contentTraversalCount, 1)
+    XCTAssertEqual(invalidJSONDiagnostics.draftValidationCount, 0)
+    XCTAssertEqual(invalidJSONDiagnostics.encodeCount, 0)
+
+    let reserved = preparer.prepare(
+      request(
+        generation: 2,
+        type: "nearwire.control",
+        content: #"{"value":1}"#,
+        ttl: "60000"
+      )
+    )
+    guard case .failure(let reservedError, let reservedDiagnostics) = reserved.outcome else {
+      return XCTFail("Expected reserved Event type rejection")
+    }
+    XCTAssertEqual(reservedError, .invalidEventType)
+    XCTAssertEqual(reservedDiagnostics.contentTraversalCount, 1)
+    XCTAssertEqual(reservedDiagnostics.draftValidationCount, 0)
+    XCTAssertEqual(reservedDiagnostics.encodeCount, 0)
+
+    let invalidTTL = preparer.prepare(
+      request(generation: 3, type: "control.test", content: #"{"value":1}"#, ttl: "0")
+    )
+    guard case .failure(let ttlError, let ttlDiagnostics) = invalidTTL.outcome else {
+      return XCTFail("Expected TTL rejection")
+    }
+    XCTAssertEqual(ttlError, .invalidTTL)
+    XCTAssertEqual(ttlDiagnostics.contentTraversalCount, 1)
+    XCTAssertEqual(ttlDiagnostics.draftValidationCount, 0)
+    XCTAssertEqual(ttlDiagnostics.encodeCount, 0)
+
+    let cancelled = preparer.prepare(
+      request(generation: 4, type: "control.test", content: #"{"value":1}"#, ttl: "1"),
+      isCancelled: { true }
+    )
+    guard case .failure(let cancellationError, let cancellationDiagnostics) = cancelled.outcome
+    else { return XCTFail("Expected cancellation") }
+    XCTAssertEqual(cancellationError, .cancelled)
+    XCTAssertEqual(cancellationDiagnostics, ViewerComposerPreparationDiagnostics())
+  }
+
+  @MainActor
+  func testComposerPreparationReplacesOneGenerationAndCountsOneSuccessfulPipeline()
+    async throws
+  {
+    let model = try ViewerControlComposerModel(
+      runtimeLogicalID: UUID(),
+      activeLimits: .default
+    )
+    XCTAssertEqual(
+      model.replaceCharacters(
+        field: .eventType,
+        range: NSRange(location: 0, length: 0),
+        replacement: "control.test"
+      ),
+      .applied
+    )
+    XCTAssertEqual(
+      model.replaceCharacters(
+        field: .content,
+        range: NSRange(location: 0, length: 0),
+        replacement: #"{"secret":"first-composer-secret"}"#
+      ),
+      .applied
+    )
+    XCTAssertEqual(
+      model.replaceCharacters(
+        field: .ttl,
+        range: NSRange(location: 0, length: 0),
+        replacement: "60000"
+      ),
+      .applied
+    )
+    model.setPriority(.high)
+    model.setPolicy(.keepLatest)
+    let firstRequest = model.makePreparationRequest()
+
+    let queue = DispatchQueue(label: "com.nearwire.viewer.tests.composer-replacement")
+    let gate = DispatchSemaphore(value: 0)
+    queue.async { gate.wait() }
+    let service = ViewerComposerPreparationService(queue: queue)
+    let results = LockedComposerResultCollection()
+    let completed = expectation(description: "Both composer generations completed")
+    completed.expectedFulfillmentCount = 2
+    service.submit(firstRequest) { result in
+      results.append(result)
+      completed.fulfill()
+    }
+
+    XCTAssertEqual(
+      model.replaceCharacters(
+        field: .content,
+        range: NSRange(location: 0, length: model.content.utf16Count),
+        replacement: #"{"secret":"second-composer-secret"}"#
+      ),
+      .applied
+    )
+    let secondRequest = model.makePreparationRequest()
+    service.submit(secondRequest) { result in
+      results.append(result)
+      completed.fulfill()
+    }
+    XCTAssertEqual(results.values.count, 1)
+    XCTAssertEqual(service.pendingWorkCount, 1)
+    XCTAssertEqual(service.retainedRequestLimit, 2)
+    XCTAssertEqual(service.retainedRequestCountForTesting, 1)
+    gate.signal()
+    await fulfillment(of: [completed], timeout: 2)
+
+    let firstResult = try XCTUnwrap(results.values.first { $0.token == firstRequest.token })
+    let secondResult = try XCTUnwrap(results.values.first { $0.token == secondRequest.token })
+    guard case .failure(let firstError, let firstDiagnostics) = firstResult.outcome else {
+      return XCTFail("Expected replaced generation to cancel")
+    }
+    XCTAssertEqual(firstError, .cancelled)
+    XCTAssertEqual(firstDiagnostics, ViewerComposerPreparationDiagnostics())
+    XCTAssertFalse(model.apply(firstResult))
+
+    guard case .success(let prepared, let diagnostics) = secondResult.outcome else {
+      return XCTFail("Expected latest composer generation to succeed")
+    }
+    XCTAssertEqual(diagnostics.inputCopyCount, 1)
+    XCTAssertEqual(diagnostics.contentTraversalCount, 1)
+    XCTAssertEqual(diagnostics.draftValidationCount, 1)
+    XCTAssertEqual(diagnostics.encodeCount, 1)
+    XCTAssertEqual(prepared.draft.type.rawValue, "control.test")
+    XCTAssertEqual(prepared.draft.priority, .high)
+    XCTAssertEqual(prepared.draft.ttl.milliseconds, 60_000)
+    XCTAssertEqual(prepared.policy, .keepLatest)
+    XCTAssertEqual(
+      String(describing: prepared.queuePolicy), "EventQueuePolicy.keepLatest(redacted)")
+    XCTAssertLessThanOrEqual(
+      prepared.deterministicEncodedByteCount,
+      ViewerPreparedControlEvent.maximumEncodedBytes
+    )
+    XCTAssertTrue(model.apply(secondResult))
+    XCTAssertEqual(
+      model.preparedEvent?.deterministicEncodedByteCount, prepared.deterministicEncodedByteCount)
+
+    let redacted = [
+      String(describing: model),
+      String(reflecting: firstRequest),
+      String(reflecting: secondRequest.input),
+      String(reflecting: secondResult),
+      String(reflecting: prepared),
+    ].joined()
+    XCTAssertFalse(redacted.contains("first-composer-secret"))
+    XCTAssertFalse(redacted.contains("second-composer-secret"))
+    XCTAssertTrue(Mirror(reflecting: secondResult).children.isEmpty)
+
+    model.clear()
+    XCTAssertEqual(model.eventType.value, "")
+    XCTAssertEqual(model.content.value, "")
+    XCTAssertEqual(model.ttl.value, "")
+    XCTAssertNil(model.preparedEvent)
+    XCTAssertNil(model.preparationFailure)
+    XCTAssertFalse(model.apply(secondResult))
+  }
+
+  @MainActor
+  func testApplicationCreatesOneRuntimeBundlePerStartAndCleansFailedRuntimeBeforeRetry()
+    async throws
+  {
+    let created = expectation(description: "A fresh runtime bundle was created")
+    created.expectedFulfillmentCount = 2
+    let capture = LockedRuntimeComponentCapture()
+    let generations = ViewerManagerGenerationSource()
+    let model = ViewerApplicationModel(
+      preferences: ViewerPreferences(requiresApproval: { false }, setRequiresApproval: { _ in }),
+      dependencies: ViewerRuntimeDependencies(
+        loadIdentity: { throw ViewerPairingCodeGenerationError() },
+        resetTLSIdentity: {},
+        resetAllIdentity: {},
+        generatePairingCode: { try PairingCode("ABCDEF") },
+        makeRuntimeComponents: { runtimeLogicalID in
+          let components = ViewerRuntimeComponents.make(
+            runtimeLogicalID: runtimeLogicalID,
+            managerGeneration: generations.next()
+          )
+          capture.append(components)
+          created.fulfill()
+          return components
+        }
+      )
+    )
+
+    model.openWindow()
+    await waitForStatus(.failed(.identityUnavailable), in: model)
+    await waitUntilRuntimeCapture({ capture.count == 1 && capture.allLiveWindowsCleared })
+
+    model.retry()
+    await fulfillment(of: [created], timeout: 1)
+    await waitForStatus(.failed(.identityUnavailable), in: model)
+    await waitUntilRuntimeCapture({ capture.count == 2 && capture.allLiveWindowsCleared })
+
+    XCTAssertEqual(capture.managerGenerations, [1, 2])
+    XCTAssertEqual(Set(capture.runtimeLogicalIDs).count, 2)
+    _ = await model.prepareForTermination()
+    XCTAssertEqual(model.status, .stopped)
+  }
+
+  @MainActor
+  func testTerminationJoinsBlockedExplorerCleanupAndFreshRuntimeHasNoPriorContent()
+    async throws
+  {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "NearWire-presentation-cleanup-\(UUID().uuidString)",
+      isDirectory: true
+    )
+    let firstDirectory = root.appendingPathComponent("first", isDirectory: true)
+    let secondDirectory = root.appendingPathComponent("second", isDirectory: true)
+    let firstCoordinator = try ViewerStoreCoordinator(
+      paths: ViewerStorePaths(
+        directory: firstDirectory,
+        database: firstDirectory.appendingPathComponent("NearWire.sqlite")
+      )
+    )
+    let secondCoordinator = try ViewerStoreCoordinator(
+      paths: ViewerStorePaths(
+        directory: secondDirectory,
+        database: secondDirectory.appendingPathComponent("NearWire.sqlite")
+      )
+    )
+    let blockedOperation = BlockingViewerOperationGate()
+    let firstGateway = ViewerStoreExplorerGateway(
+      operationExecutionGate: { blockedOperation.run() }
+    )
+    let secondGateway = ViewerStoreExplorerGateway()
+    firstGateway.install(firstCoordinator)
+    secondGateway.install(secondCoordinator)
+    defer {
+      blockedOperation.release()
+      firstGateway.sealAndWait(originatingFrom: firstCoordinator)
+      secondGateway.sealAndWait(originatingFrom: secondCoordinator)
+      firstCoordinator.closeStorage()
+      secondCoordinator.closeStorage()
+      try? FileManager.default.removeItem(at: root)
+    }
+
+    let listeners = LockedListenerFactory([
+      FakeViewerSecureListener(
+        eventsOnStart: [.ready(port: 49_152), .serviceRegistered(exact: true)]
+      ),
+      FakeViewerSecureListener(
+        eventsOnStart: [.ready(port: 49_153), .serviceRegistered(exact: true)]
+      ),
+    ])
+    let pairingCodes = LockedPairingCodeSequence(["ABCDEF", "MNPQRS"])
+    let generations = ViewerManagerGenerationSource()
     let model = ViewerApplicationModel(
       preferences: ViewerPreferences(requiresApproval: { false }, setRequiresApproval: { _ in }),
       dependencies: ViewerRuntimeDependencies(
         loadIdentity: {
           ViewerPreparedIdentity(
-            installationID: identity,
-            makeListener: { _ in listener }
+            installationID: try EndpointID(rawValue: "viewer-test"),
+            makeListener: { advertisement in try listeners.next(advertisement) }
           )
         },
-        resetTLSIdentity: {
-          resetCount.increment()
-          resetCalled.fulfill()
-        },
+        resetTLSIdentity: {},
         resetAllIdentity: {},
-        generatePairingCode: { try PairingCode("ABCDEF") },
-        makeHandoffOwner: {
-          FakeAdmissionHandoffOwner(shutdownOperation: { await cleanupGate.wait() })
+        generatePairingCode: { try pairingCodes.next() },
+        makeRuntimeComponents: { runtimeLogicalID in
+          let generation = generations.next()
+          return ViewerRuntimeComponents.make(
+            runtimeLogicalID: runtimeLogicalID,
+            managerGeneration: generation,
+            storeGateway: generation == 1 ? firstGateway : secondGateway
+          )
         }
       )
     )
+
     model.openWindow()
     await waitForStatus(.listening(code: "ABCDEF", paused: false), in: model)
-    XCTAssertEqual(model.status, .listening(code: "ABCDEF", paused: false))
+    XCTAssertEqual(blockedOperation.waitUntilEntered(), .success)
+    let firstExplorer = try XCTUnwrap(model.explorerController)
+    let firstComposer = try XCTUnwrap(model.composerController)
+    XCTAssertTrue(firstExplorer.replaceFilterText(.search, with: "prior-filter-secret"))
+    XCTAssertFalse(
+      firstExplorer.replaceFilterText(.search, with: String(repeating: "x", count: 513))
+    )
+    XCTAssertNotNil(firstExplorer.filterValidationMessage)
+    let retainedRendererRequest = try firstExplorer.inspector.select(
+      detail: makeRendererDetail(
+        rowID: 701,
+        eventType: "custom.cleanup",
+        content: Data(#"{"payload":{"message":"prior-inspector-secret"}}"#.utf8)
+      ),
+      identity: .durable(rowID: 701)
+    )
+    let retainedRendererResult = ViewerRendererPreparer().prepare(retainedRendererRequest)
+    XCTAssertTrue(firstExplorer.inspector.apply(retainedRendererResult))
+    XCTAssertNotNil(firstExplorer.inspector.canonicalBuffer)
+    XCTAssertNotNil(firstExplorer.inspector.preparation?.generic.treeState)
+    XCTAssertFalse(try firstExplorer.inspector.rawChunk(at: 0).text.isEmpty)
+    XCTAssertTrue(firstComposer.replaceWhole(.content, with: #"{"prior":"composer-secret"}"#))
 
-    model.resetTLSIdentity()
-    cleanupGate.waitUntilEntered()
-    XCTAssertEqual(resetCount.value, 0)
+    let completionCount = LockedTestCounter()
+    let termination = Task { @MainActor in
+      let outcome = await model.prepareForTermination()
+      completionCount.increment()
+      return outcome
+    }
+    await Task.yield()
     XCTAssertEqual(model.status, .stopping)
-    cleanupGate.open()
-    await fulfillment(of: [resetCalled], timeout: 1)
+    XCTAssertGreaterThan(firstExplorer.pendingCleanupWorkCount, 0)
+    try await Task.sleep(nanoseconds: 20_000_000)
+    XCTAssertEqual(completionCount.value, 0)
+
+    blockedOperation.release()
+    let terminationOutcome = await termination.value
+    XCTAssertEqual(terminationOutcome, .completed)
+    XCTAssertEqual(completionCount.value, 1)
+    XCTAssertEqual(model.status, .stopped)
+    XCTAssertNil(model.explorerController)
+    XCTAssertNil(model.composerController)
+    XCTAssertEqual(firstExplorer.pendingCleanupWorkCount, 0)
+    XCTAssertEqual(firstComposer.pendingCleanupWorkCount, 0)
+    XCTAssertEqual(firstExplorer.filterDraft.searchText, "")
+    XCTAssertNil(firstExplorer.filterValidationMessage)
+    XCTAssertTrue(firstExplorer.model.timelineRows.isEmpty)
+    XCTAssertTrue(firstExplorer.model.recordingRows.isEmpty)
+    XCTAssertTrue(firstExplorer.model.deviceRows.isEmpty)
+    XCTAssertTrue(firstExplorer.model.gapRows.isEmpty)
+    XCTAssertNil(firstExplorer.model.pendingRefreshSignal)
+    XCTAssertNil(firstExplorer.inspector.canonicalBuffer)
+    XCTAssertNil(firstExplorer.inspector.preparation)
+    XCTAssertNil(firstExplorer.rawChunk)
+    XCTAssertNil(firstExplorer.inspectorTreeState)
+    XCTAssertFalse(firstExplorer.inspector.apply(retainedRendererResult))
+    XCTAssertEqual(firstComposer.eventType, "")
+    XCTAssertEqual(firstComposer.contentJSON, "")
+    XCTAssertEqual(firstComposer.ttlText, "")
+    let oldDiagnostics = [
+      String(reflecting: firstExplorer),
+      String(reflecting: firstComposer),
+    ].joined()
+    XCTAssertFalse(oldDiagnostics.contains("prior-filter-secret"))
+    XCTAssertFalse(oldDiagnostics.contains("composer-secret"))
+
+    model.openWindow()
+    await waitForStatus(.listening(code: "MNPQRS", paused: false), in: model)
+    let freshExplorer = try XCTUnwrap(model.explorerController)
+    let freshComposer = try XCTUnwrap(model.composerController)
+    XCTAssertFalse(freshExplorer === firstExplorer)
+    XCTAssertFalse(freshComposer === firstComposer)
+    XCTAssertEqual(freshExplorer.filterDraft.searchText, "")
+    XCTAssertTrue(freshExplorer.model.timelineRows.isEmpty)
+    XCTAssertEqual(freshComposer.contentJSON, "")
+    let freshTerminationOutcome = await model.prepareForTermination()
+    XCTAssertEqual(freshTerminationOutcome, .completed)
   }
 
   @MainActor
@@ -2328,6 +7503,101 @@ final class ViewerFoundationTests: XCTestCase {
     )
   }
 
+  private func makeObservationContext(
+    connectionID: UUID,
+    displayName: String
+  ) throws -> ViewerAdmissionSessionContext {
+    let appID = try EndpointID(rawValue: "observation-app")
+    let viewerID = try EndpointID(rawValue: "observation-viewer")
+    let appHello = try WireHello(
+      productVersion: WireProductVersion("1.0.0"),
+      role: .app,
+      installationID: appID,
+      displayName: displayName,
+      applicationIdentifier: "com.nearwire.observation",
+      applicationVersion: "1.0"
+    )
+    let viewerHello = try WireHello(
+      productVersion: WireProductVersion("1.0.0"),
+      role: .viewer,
+      installationID: viewerID
+    )
+    return ViewerAdmissionSessionContext(
+      connectionID: connectionID,
+      appHello: appHello,
+      viewerHello: viewerHello,
+      negotiation: try WireNegotiator.negotiate(local: viewerHello, remote: appHello),
+      receiveChunkBytes: 64 * 1_024
+    )
+  }
+
+  private func makeObservationEnvelope(
+    id: EventID = EventID(),
+    typeRawValue: String = "test.observation",
+    content: JSONValue,
+    createdAt: Date,
+    monotonicTimestampNanoseconds: UInt64 = 500,
+    sessionEpoch: SessionEpoch,
+    sequence: UInt64 = 0,
+    priority: EventPriority = .normal,
+    ttl: EventTTL = .default,
+    causality: EventCausality = EventCausality(),
+    schemaVersion: EventSchemaVersion = .current
+  ) throws -> EventEnvelope {
+    let appID = try EndpointID(rawValue: "observation-app")
+    let viewerID = try EndpointID(rawValue: "observation-viewer")
+    return try EventEnvelope(
+      id: id,
+      type: EventType.user(typeRawValue),
+      content: content,
+      createdAt: createdAt,
+      monotonicTimestampNanoseconds: monotonicTimestampNanoseconds,
+      source: EventEndpoint(role: .app, id: appID),
+      target: EventEndpoint(role: .viewer, id: viewerID),
+      direction: .appToViewer,
+      sessionEpoch: sessionEpoch,
+      sequence: EventSequence(sequence),
+      priority: priority,
+      ttl: ttl,
+      causality: causality,
+      schemaVersion: schemaVersion
+    )
+  }
+
+  private func makeRendererDetail(
+    rowID: Int64,
+    eventType: String,
+    content: Data
+  ) -> ViewerStoredEventDetail {
+    ViewerStoredEventDetail(
+      summary: ViewerStoredEventRow(
+        rowID: rowID,
+        deviceSessionID: 1,
+        direction: "appToViewer",
+        wireSequence: rowID,
+        eventUUID: "renderer-event-\(rowID)",
+        eventType: eventType,
+        contentByteCount: Int64(content.count),
+        createdWallMilliseconds: rowID,
+        viewerWallMilliseconds: rowID,
+        viewerMonotonicNanoseconds: rowID,
+        priority: "normal",
+        recordingRevision: 1,
+        deviceRevision: 1,
+        resolvedDisposition: "buffered"
+      ),
+      contentJSON: content,
+      deviceLogicalID: UUID(),
+      installationAlias: "App 00000001",
+      connectionAlias: "connection-1",
+      originMonotonicNanoseconds: rowID,
+      ttlMilliseconds: 60_000,
+      schemaVersion: 1,
+      correlationEventUUID: nil,
+      replyToEventUUID: nil
+    )
+  }
+
   private func calendarYear(_ date: Date) -> Int {
     var calendar = Calendar(identifier: .gregorian)
     calendar.timeZone = TimeZone(secondsFromGMT: 0)!
@@ -2352,6 +7622,45 @@ final class ViewerFoundationTests: XCTestCase {
   }
 
   @MainActor
+  private func waitUntilRuntimeCapture(
+    _ condition: @escaping () -> Bool,
+    file: StaticString = #filePath,
+    line: UInt = #line
+  ) async {
+    for _ in 0..<1_000 {
+      if condition() { return }
+      await Task.yield()
+    }
+    XCTAssertTrue(condition(), file: file, line: line)
+  }
+
+  @MainActor
+  private func waitUntilExplorer(
+    _ condition: @escaping @MainActor () -> Bool,
+    file: StaticString = #filePath,
+    line: UInt = #line
+  ) async {
+    for _ in 0..<1_000 {
+      if condition() { return }
+      await Task.yield()
+    }
+    XCTFail("Timed out waiting for Explorer state", file: file, line: line)
+  }
+
+  private func waitForAdmissionOccupancy(
+    _ expectedCount: Int,
+    in manager: ViewerAdmissionManager,
+    file: StaticString = #filePath,
+    line: UInt = #line
+  ) async {
+    for _ in 0..<1_000 {
+      if manager.occupiedCount == expectedCount { return }
+      await Task.yield()
+    }
+    XCTAssertEqual(manager.occupiedCount, expectedCount, file: file, line: line)
+  }
+
+  @MainActor
   private func makeApplicationModel(
     listenerFactory: LockedListenerFactory,
     pairingCodes: LockedPairingCodeSequence
@@ -2373,6 +7682,18 @@ final class ViewerFoundationTests: XCTestCase {
   }
 }
 
+@MainActor
+private func descendantViews<ViewType: NSView>(
+  of type: ViewType.Type,
+  in root: NSView
+) -> [ViewType] {
+  root.subviews.flatMap { child in
+    var matches = descendantViews(of: type, in: child)
+    if let match = child as? ViewType { matches.insert(match, at: 0) }
+    return matches
+  }
+}
+
 private final class LockedTestCounter: @unchecked Sendable {
   private let lock = NSLock()
   private var storage = 0
@@ -2388,6 +7709,64 @@ private final class LockedTestCounter: @unchecked Sendable {
     defer { lock.unlock() }
     return storage
   }
+}
+
+private final class BlockingViewerOperationGate: @unchecked Sendable {
+  private let lock = NSLock()
+  private let entered = DispatchSemaphore(value: 0)
+  private let resume = DispatchSemaphore(value: 0)
+  private var shouldBlock = true
+
+  func run() {
+    lock.lock()
+    let blocks = shouldBlock
+    shouldBlock = false
+    lock.unlock()
+    guard blocks else { return }
+    entered.signal()
+    _ = resume.wait(timeout: .now() + 5)
+  }
+
+  func waitUntilEntered() -> DispatchTimeoutResult {
+    entered.wait(timeout: .now() + 2)
+  }
+
+  func release() {
+    resume.signal()
+  }
+}
+
+private final class BlockingViewerMonotonicClock: @unchecked Sendable {
+  private let lock = NSLock()
+  private let entered = DispatchSemaphore(value: 0)
+  private let resume = DispatchSemaphore(value: 0)
+  private var callCount = 0
+  private var blocked = false
+
+  var isBlocked: Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    return blocked
+  }
+
+  func now() -> UInt64 {
+    lock.lock()
+    callCount += 1
+    let shouldBlock = callCount == 2
+    if shouldBlock { blocked = true }
+    lock.unlock()
+    if shouldBlock {
+      entered.signal()
+      resume.wait()
+    }
+    return 0
+  }
+
+  func waitUntilBlocked() -> DispatchTimeoutResult {
+    entered.wait(timeout: .now() + 2)
+  }
+
+  func release() { resume.signal() }
 }
 
 extension ViewerPendingAppSummary {
@@ -2417,6 +7796,267 @@ private final class LockedCoalescerBox: @unchecked Sendable {
     lock.lock()
     defer { lock.unlock() }
     return storage
+  }
+}
+
+private final class ExplorerLiveObservationSpy: ViewerLiveObservationProviding, @unchecked Sendable
+{
+  let runtimeLogicalID: UUID
+
+  private let lock = NSLock()
+  private var storedSnapshot: ViewerLiveProjectionSnapshot
+  private var storedPausedValues: [Bool] = []
+  private var storedVisibleValues: [ViewerExplorerDurableVisibility] = []
+  private var snapshotRequests = 0
+
+  init(snapshot: ViewerLiveProjectionSnapshot) {
+    runtimeLogicalID = snapshot.runtimeLogicalID
+    storedSnapshot = snapshot
+  }
+
+  func snapshot() -> ViewerLiveProjectionSnapshot {
+    lock.lock()
+    snapshotRequests += 1
+    let snapshot = storedSnapshot
+    lock.unlock()
+    return snapshot
+  }
+
+  func setRefreshHandler(_ handler: @escaping @Sendable (UInt64) -> Void) {}
+
+  func storeStateChanged(_ state: ViewerStoreStatus.State) {}
+
+  func setPresentationPaused(_ paused: Bool) {
+    lock.lock()
+    storedPausedValues.append(paused)
+    lock.unlock()
+  }
+
+  func durableRowBecameVisible(key: ViewerEventJournalKey, observationID: UUID) {
+    lock.lock()
+    storedVisibleValues.append(
+      ViewerExplorerDurableVisibility(
+        key: key,
+        observationID: observationID,
+        durableRowID: 0
+      )
+    )
+    lock.unlock()
+  }
+
+  var snapshotRequestCount: Int {
+    lock.lock()
+    defer { lock.unlock() }
+    return snapshotRequests
+  }
+
+  var pausedValues: [Bool] {
+    lock.lock()
+    defer { lock.unlock() }
+    return storedPausedValues
+  }
+
+  var visibleValues: [ViewerExplorerDurableVisibility] {
+    lock.lock()
+    defer { lock.unlock() }
+    return storedVisibleValues
+  }
+}
+
+private final class ExplorerStoreDriverSpy: @unchecked Sendable {
+  private struct Pending<Completion> {
+    let completion: Completion
+    let validity: ExplorerStoreDriverValidity
+  }
+
+  private let lock = NSLock()
+  private var releases: [Pending<ViewerExplorerStoreDriver.VoidCompletion>] = []
+  private var queries: [Pending<ViewerExplorerStoreDriver.QueryCompletion>] = []
+  private var pages: [Pending<ViewerExplorerStoreDriver.PageCompletion>] = []
+  private var gaps: [Pending<ViewerExplorerStoreDriver.GapCompletion>] = []
+  private var releaseRequests = 0
+  private var queryRequests = 0
+  private var pageRequests = 0
+  private var gapRequests = 0
+  private var rejectsNextQuerySynchronously = false
+  private var rejectsNextPageSynchronously = false
+  private var rejectsNextGapsSynchronously = false
+
+  lazy var driver = ViewerExplorerStoreDriver(
+    endTraversal: { [weak self] completion in
+      self?.appendRelease(completion)
+        ?? ViewerExplorerStoreOperationToken(deliveryIsValid: { false })
+    },
+    replaceQuery: { [weak self] _, _, completion in
+      self?.appendQuery(completion)
+        ?? ViewerExplorerStoreOperationToken(deliveryIsValid: { false })
+    },
+    loadTailPage: { [weak self] _, completion in
+      self?.appendPage(completion)
+        ?? ViewerExplorerStoreOperationToken(deliveryIsValid: { false })
+    },
+    loadTailGaps: { [weak self] _, _, completion in
+      self?.appendGaps(completion)
+        ?? ViewerExplorerStoreOperationToken(deliveryIsValid: { false })
+    }
+  )
+
+  var releaseRequestCount: Int { locked { releaseRequests } }
+  var queryRequestCount: Int { locked { queryRequests } }
+  var pageRequestCount: Int { locked { pageRequests } }
+  var gapRequestCount: Int { locked { gapRequests } }
+
+  func completeNextRelease(_ result: Result<Void, ViewerStoreExplorerFailure>) {
+    let pending = locked { releases.isEmpty ? nil : releases.removeFirst() }
+    pending?.completion(result)
+  }
+
+  func completeNextQuery(_ result: Result<ViewerQuerySnapshot, ViewerStoreExplorerFailure>) {
+    let pending = locked { queries.isEmpty ? nil : queries.removeFirst() }
+    pending?.completion(result)
+  }
+
+  func completeNextPage(_ result: Result<ViewerEventPage, ViewerStoreExplorerFailure>) {
+    let pending = locked { pages.isEmpty ? nil : pages.removeFirst() }
+    pending?.completion(result)
+  }
+
+  func completeNextGaps(_ result: Result<ViewerGapPage, ViewerStoreExplorerFailure>) {
+    let pending = locked { gaps.isEmpty ? nil : gaps.removeFirst() }
+    pending?.completion(result)
+  }
+
+  func invalidateNextRelease() { locked { releases.first?.validity.invalidate() } }
+  func invalidateNextQuery() { locked { queries.first?.validity.invalidate() } }
+  func invalidateNextPage() { locked { pages.first?.validity.invalidate() } }
+  func invalidateNextGaps() { locked { gaps.first?.validity.invalidate() } }
+  func rejectNextQuerySynchronously() { locked { rejectsNextQuerySynchronously = true } }
+  func rejectNextPageSynchronously() { locked { rejectsNextPageSynchronously = true } }
+  func rejectNextGapsSynchronously() { locked { rejectsNextGapsSynchronously = true } }
+
+  private func appendRelease(
+    _ completion: @escaping ViewerExplorerStoreDriver.VoidCompletion
+  ) -> ViewerExplorerStoreOperationToken {
+    let validity = ExplorerStoreDriverValidity()
+    lock.lock()
+    releaseRequests += 1
+    releases.append(Pending(completion: completion, validity: validity))
+    lock.unlock()
+    return ViewerExplorerStoreOperationToken(deliveryIsValid: { validity.isValid })
+  }
+
+  private func appendQuery(
+    _ completion: @escaping ViewerExplorerStoreDriver.QueryCompletion
+  ) -> ViewerExplorerStoreOperationToken {
+    let validity = ExplorerStoreDriverValidity()
+    lock.lock()
+    queryRequests += 1
+    let rejectsSynchronously = rejectsNextQuerySynchronously
+    rejectsNextQuerySynchronously = false
+    if rejectsSynchronously {
+      lock.unlock()
+      validity.invalidate()
+      completion(.failure(.storeReplaced))
+      return ViewerExplorerStoreOperationToken(deliveryIsValid: { validity.isValid })
+    }
+    queries.append(Pending(completion: completion, validity: validity))
+    lock.unlock()
+    return ViewerExplorerStoreOperationToken(deliveryIsValid: { validity.isValid })
+  }
+
+  private func appendPage(
+    _ completion: @escaping ViewerExplorerStoreDriver.PageCompletion
+  ) -> ViewerExplorerStoreOperationToken {
+    let validity = ExplorerStoreDriverValidity()
+    lock.lock()
+    pageRequests += 1
+    let rejectsSynchronously = rejectsNextPageSynchronously
+    rejectsNextPageSynchronously = false
+    if rejectsSynchronously {
+      lock.unlock()
+      validity.invalidate()
+      completion(.failure(.storeReplaced))
+      return ViewerExplorerStoreOperationToken(deliveryIsValid: { validity.isValid })
+    }
+    pages.append(Pending(completion: completion, validity: validity))
+    lock.unlock()
+    return ViewerExplorerStoreOperationToken(deliveryIsValid: { validity.isValid })
+  }
+
+  private func appendGaps(
+    _ completion: @escaping ViewerExplorerStoreDriver.GapCompletion
+  ) -> ViewerExplorerStoreOperationToken {
+    let validity = ExplorerStoreDriverValidity()
+    lock.lock()
+    gapRequests += 1
+    let rejectsSynchronously = rejectsNextGapsSynchronously
+    rejectsNextGapsSynchronously = false
+    if rejectsSynchronously {
+      lock.unlock()
+      validity.invalidate()
+      completion(.failure(.storeReplaced))
+      return ViewerExplorerStoreOperationToken(deliveryIsValid: { validity.isValid })
+    }
+    gaps.append(Pending(completion: completion, validity: validity))
+    lock.unlock()
+    return ViewerExplorerStoreOperationToken(deliveryIsValid: { validity.isValid })
+  }
+
+  private func locked<T>(_ body: () -> T) -> T {
+    lock.lock()
+    defer { lock.unlock() }
+    return body()
+  }
+}
+
+private final class ExplorerStoreDriverValidity: @unchecked Sendable {
+  private let lock = NSLock()
+  private var valid = true
+
+  func invalidate() {
+    lock.lock()
+    valid = false
+    lock.unlock()
+  }
+
+  var isValid: Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    return valid
+  }
+}
+
+private final class LockedRendererResultCollection: @unchecked Sendable {
+  private let lock = NSLock()
+  private var storedValues: [ViewerRendererPreparationResult] = []
+
+  func append(_ value: ViewerRendererPreparationResult) {
+    lock.lock()
+    storedValues.append(value)
+    lock.unlock()
+  }
+
+  var values: [ViewerRendererPreparationResult] {
+    lock.lock()
+    defer { lock.unlock() }
+    return storedValues
+  }
+}
+
+private final class LockedComposerResultCollection: @unchecked Sendable {
+  private let lock = NSLock()
+  private var storedValues: [ViewerComposerPreparationResult] = []
+
+  func append(_ value: ViewerComposerPreparationResult) {
+    lock.lock()
+    storedValues.append(value)
+    lock.unlock()
+  }
+
+  var values: [ViewerComposerPreparationResult] {
+    lock.lock()
+    defer { lock.unlock() }
+    return storedValues
   }
 }
 
@@ -2740,6 +8380,337 @@ private final class AsyncTestGate: @unchecked Sendable {
   }
 }
 
+private final class RuntimeComponentJournalSpy: ViewerSessionJournaling, @unchecked Sendable {
+  private let lock = NSLock()
+  private let endGate: AsyncTestGate
+  private var started: [UUID] = []
+  private var ended: [UUID] = []
+
+  init(endGate: AsyncTestGate) { self.endGate = endGate }
+
+  var startedRuntimeIDs: [UUID] {
+    lock.lock()
+    defer { lock.unlock() }
+    return started
+  }
+
+  var endedRuntimeIDs: [UUID] {
+    lock.lock()
+    defer { lock.unlock() }
+    return ended
+  }
+
+  func runtimeStarted(
+    logicalID: UUID,
+    wallMilliseconds: Int64,
+    monotonicNanoseconds: UInt64
+  ) {
+    lock.lock()
+    started.append(logicalID)
+    lock.unlock()
+  }
+
+  func sessionStarted(runtimeLogicalID: UUID, _ context: ViewerAdmissionSessionContext) {}
+  func eventCommitted(
+    _ observation: ViewerCommittedEventObservation,
+    outcome: @escaping @Sendable (ViewerEventJournalOutcome) -> Void
+  ) { outcome(.accepted) }
+  func uplinkTerminated(
+    runtimeLogicalID: UUID,
+    connectionID: UUID,
+    direction: EventDirection,
+    wireSequence: UInt64,
+    disposition: ViewerStoredDisposition,
+    monotonicNanoseconds: UInt64
+  ) {}
+  func policyChanged(
+    runtimeLogicalID: UUID,
+    connectionID: UUID,
+    policy: ViewerRatePolicy,
+    monotonicNanoseconds: UInt64
+  ) {}
+  func dropsChanged(
+    runtimeLogicalID: UUID,
+    connectionID: UUID,
+    samples: [ViewerDropJournalSample],
+    monotonicNanoseconds: UInt64
+  ) {}
+  func sessionEnded(
+    runtimeLogicalID: UUID,
+    connectionID: UUID,
+    wallMilliseconds: Int64,
+    monotonicNanoseconds: UInt64
+  ) {}
+  func retryStorage() {}
+
+  func runtimeEnded(
+    logicalID: UUID,
+    wallMilliseconds: Int64,
+    monotonicNanoseconds: UInt64
+  ) async {
+    await endGate.wait()
+    appendEnded(logicalID)
+  }
+
+  private func appendEnded(_ logicalID: UUID) {
+    lock.lock()
+    ended.append(logicalID)
+    lock.unlock()
+  }
+}
+
+private final class CommittedObservationJournalSpy: ViewerSessionJournaling, @unchecked Sendable {
+  private let lock = NSLock()
+  private var storedObservations: [ViewerCommittedEventObservation] = []
+  private var projections: [ViewerEventJournalKey: ViewerDurableEventProjection] = [:]
+
+  var observations: [ViewerCommittedEventObservation] {
+    lock.lock()
+    defer { lock.unlock() }
+    return storedObservations
+  }
+
+  var commitCount: Int {
+    lock.lock()
+    defer { lock.unlock() }
+    return storedObservations.count
+  }
+
+  func runtimeStarted(logicalID: UUID, wallMilliseconds: Int64, monotonicNanoseconds: UInt64) {}
+  func sessionStarted(runtimeLogicalID: UUID, _ context: ViewerAdmissionSessionContext) {}
+  func eventCommitted(
+    _ observation: ViewerCommittedEventObservation,
+    outcome: @escaping @Sendable (ViewerEventJournalOutcome) -> Void
+  ) {
+    lock.lock()
+    storedObservations.append(observation)
+    let result: ViewerEventJournalOutcome
+    if let existing = projections[observation.key] {
+      result =
+        existing == observation.durableProjection
+        ? .identical : .journalConflict
+    } else {
+      projections[observation.key] = observation.durableProjection
+      result = .accepted
+    }
+    lock.unlock()
+    outcome(result)
+  }
+  func uplinkTerminated(
+    runtimeLogicalID: UUID,
+    connectionID: UUID,
+    direction: EventDirection,
+    wireSequence: UInt64,
+    disposition: ViewerStoredDisposition,
+    monotonicNanoseconds: UInt64
+  ) {}
+  func policyChanged(
+    runtimeLogicalID: UUID,
+    connectionID: UUID,
+    policy: ViewerRatePolicy,
+    monotonicNanoseconds: UInt64
+  ) {}
+  func dropsChanged(
+    runtimeLogicalID: UUID,
+    connectionID: UUID,
+    samples: [ViewerDropJournalSample],
+    monotonicNanoseconds: UInt64
+  ) {}
+  func sessionEnded(
+    runtimeLogicalID: UUID,
+    connectionID: UUID,
+    wallMilliseconds: Int64,
+    monotonicNanoseconds: UInt64
+  ) {}
+  func retryStorage() {}
+  func runtimeEnded(
+    logicalID: UUID,
+    wallMilliseconds: Int64,
+    monotonicNanoseconds: UInt64
+  ) async {}
+}
+
+private final class LockedJournalOutcomeCollection: @unchecked Sendable {
+  private let lock = NSLock()
+  private var storedValues: [ViewerEventJournalOutcome] = []
+
+  func append(_ value: ViewerEventJournalOutcome) {
+    lock.lock()
+    storedValues.append(value)
+    lock.unlock()
+  }
+
+  var values: [ViewerEventJournalOutcome] {
+    lock.lock()
+    defer { lock.unlock() }
+    return storedValues
+  }
+}
+
+private final class LockedUInt64Collection: @unchecked Sendable {
+  private let lock = NSLock()
+  private var storedValues: [UInt64] = []
+
+  func append(_ value: UInt64) {
+    lock.lock()
+    storedValues.append(value)
+    lock.unlock()
+  }
+
+  var values: [UInt64] {
+    lock.lock()
+    defer { lock.unlock() }
+    return storedValues
+  }
+}
+
+private final class ManualLiveRefreshScheduler: @unchecked Sendable {
+  private struct Job {
+    let delay: UInt64
+    let action: @Sendable () -> Void
+  }
+
+  private let lock = NSLock()
+  private var currentNanoseconds: UInt64 = 0
+  private var jobs: [Job] = []
+
+  var value: ViewerLiveRefreshScheduler {
+    ViewerLiveRefreshScheduler(
+      now: { [weak self] in self?.now() ?? 0 },
+      scheduleOnMain: { [weak self] delay, action in self?.schedule(delay: delay, action: action) }
+    )
+  }
+
+  var explorerValue: ViewerExplorerRefreshScheduler {
+    ViewerExplorerRefreshScheduler(
+      now: { [weak self] in self?.now() ?? 0 },
+      scheduleOnMain: { [weak self] delay, action in self?.schedule(delay: delay, action: action) }
+    )
+  }
+
+  var pendingCount: Int {
+    lock.lock()
+    defer { lock.unlock() }
+    return jobs.count
+  }
+
+  var nextDelay: UInt64? {
+    lock.lock()
+    defer { lock.unlock() }
+    return jobs.first?.delay
+  }
+
+  func runNext() {
+    let job: Job?
+    lock.lock()
+    if jobs.isEmpty {
+      job = nil
+    } else {
+      job = jobs.removeFirst()
+      if let job {
+        let (advanced, overflow) = currentNanoseconds.addingReportingOverflow(job.delay)
+        currentNanoseconds = overflow ? UInt64.max : advanced
+      }
+    }
+    lock.unlock()
+    job?.action()
+  }
+
+  private func now() -> UInt64 {
+    lock.lock()
+    defer { lock.unlock() }
+    return currentNanoseconds
+  }
+
+  private func schedule(delay: UInt64, action: @escaping @Sendable () -> Void) {
+    lock.lock()
+    jobs.append(Job(delay: delay, action: action))
+    lock.unlock()
+  }
+}
+
+@MainActor
+private final class ExplorerRefreshCapture {
+  private(set) var tokens: [ViewerExplorerPresentationToken] = []
+  private(set) var signals: [ViewerExplorerRefreshSignal] = []
+
+  func append(token: ViewerExplorerPresentationToken, signal: ViewerExplorerRefreshSignal) {
+    tokens.append(token)
+    signals.append(signal)
+  }
+
+  var count: Int { signals.count }
+}
+
+private final class SteppingNanosecondClock: @unchecked Sendable {
+  private let lock = NSLock()
+  private var values: [UInt64]
+  private var last: UInt64
+
+  init(values: [UInt64]) {
+    self.values = values
+    last = values.last ?? 0
+  }
+
+  func now() -> UInt64 {
+    lock.lock()
+    defer { lock.unlock() }
+    guard !values.isEmpty else { return last }
+    let value = values.removeFirst()
+    last = value
+    return value
+  }
+}
+
+private final class LockedRuntimeComponentCapture: @unchecked Sendable {
+  private struct Entry {
+    let runtimeLogicalID: UUID
+    let managerGeneration: UInt64
+    let liveWindow: ViewerLiveEventWindow
+  }
+
+  private let lock = NSLock()
+  private var entries: [Entry] = []
+
+  func append(_ components: ViewerRuntimeComponents) {
+    guard let liveWindow = components.liveObservations as? ViewerLiveEventWindow else { return }
+    lock.lock()
+    entries.append(
+      Entry(
+        runtimeLogicalID: components.runtimeLogicalID,
+        managerGeneration: components.managerGeneration,
+        liveWindow: liveWindow
+      )
+    )
+    lock.unlock()
+  }
+
+  var count: Int {
+    lock.lock()
+    defer { lock.unlock() }
+    return entries.count
+  }
+
+  var runtimeLogicalIDs: [UUID] {
+    lock.lock()
+    defer { lock.unlock() }
+    return entries.map(\.runtimeLogicalID)
+  }
+
+  var managerGenerations: [UInt64] {
+    lock.lock()
+    defer { lock.unlock() }
+    return entries.map(\.managerGeneration)
+  }
+
+  var allLiveWindowsCleared: Bool {
+    lock.lock()
+    let windows = entries.map(\.liveWindow)
+    lock.unlock()
+    return windows.allSatisfy(\.isCleared)
+  }
+}
+
 private final class ManualAdmissionScheduler: @unchecked Sendable {
   private struct Waiter {
     let id: UUID
@@ -2849,7 +8820,11 @@ private final class LockedHandleCollection: @unchecked Sendable {
   }
 }
 
-private final class FakeAdmissionHandoffOwner: ViewerAdmissionHandoffOwning, @unchecked Sendable {
+private final class FakeAdmissionHandoffOwner: ViewerAdmissionHandoffOwning,
+  ViewerSessionControlling, @unchecked Sendable
+{
+  let runtimeLogicalID: UUID
+  let managerGeneration: UInt64
   private let lock = NSLock()
   private let onTransfer: @Sendable (ViewerAdmissionHandle) -> Void
   private let shutdownOperation: @Sendable () async -> Void
@@ -2858,12 +8833,29 @@ private final class FakeAdmissionHandoffOwner: ViewerAdmissionHandoffOwning, @un
   private var shutdownTask: Task<Void, Never>?
 
   init(
+    runtimeLogicalID: UUID = UUID(),
+    managerGeneration: UInt64 = 1,
     onTransfer: @escaping @Sendable (ViewerAdmissionHandle) -> Void = { _ in },
     shutdownOperation: @escaping @Sendable () async -> Void = {}
   ) {
+    self.runtimeLogicalID = runtimeLogicalID
+    self.managerGeneration = managerGeneration
     self.onTransfer = onTransfer
     self.shutdownOperation = shutdownOperation
   }
+
+  func setSnapshotHandler(_ handler: @escaping @Sendable ([ViewerSessionSnapshot]) -> Void) {
+    handler([])
+  }
+
+  func disconnect(connectionID: UUID) {}
+  func updatePolicy(connectionID: UUID, policy: ViewerRatePolicy) {}
+  func controlTargets() -> [ViewerControlTarget] { [] }
+  func send(
+    _ prepared: ViewerPreparedControlEvent,
+    to capabilities: [ViewerControlTargetCapability]
+  ) throws -> [ViewerControlTargetResult] { [] }
+  func setNickname(_ nickname: String?, route: ViewerLogicalRoute) -> Bool { false }
 
   func transfer(_ handle: ViewerAdmissionHandle) -> Bool {
     lock.lock()
@@ -3123,4 +9115,22 @@ private final class FakeIdentityPersistence: ViewerIdentityPersistence, @uncheck
     }
     lock.unlock()
   }
+}
+
+private func currentFoundationProcessPhysicalFootprintBytes() -> UInt64? {
+  var information = task_vm_info_data_t()
+  var count = mach_msg_type_number_t(
+    MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size
+  )
+  let result = withUnsafeMutablePointer(to: &information) { pointer in
+    pointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { rebound in
+      task_info(
+        mach_task_self_,
+        task_flavor_t(TASK_VM_INFO),
+        rebound,
+        &count
+      )
+    }
+  }
+  return result == KERN_SUCCESS ? information.phys_footprint : nil
 }

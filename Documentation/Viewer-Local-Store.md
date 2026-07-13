@@ -68,6 +68,11 @@ The filesystem-capacity check uses the standard macOS volume available-capacity 
 
 JSON exports are unencrypted and are outside Viewer quota and retention. `device-N` and `connection-N` are pseudonyms, not redaction. Event types, content, and metadata can still identify people, devices, secrets, or applications. The selected destination or its provider may synchronize or back up the file. Operators must review the preflight disclosure before sharing an export.
 
-## Current UI boundary
+## Event Explorer integration
 
-This change exposes only storage configuration, status, cleanup, and retry in the native Viewer. History lists, Event timeline/detail UI, search controls, pin/delete workflows, export selection, control composition, and performance charts remain intentionally absent. Their internal store seams are reserved for `viewer-event-explorer-control`.
+The local store remains the authority for durable history, query snapshots, recording revisions,
+leases, cleanup, and export. The native Event Explorer consumes those bounded services without
+exposing SQLite, SQL, paths, or coordinator ownership to presentation code. Live-versus-recorded
+semantics, history UI, filters, renderers, recording operations, export workflow, and control
+composition are documented in [Viewer-Event-Explorer.md](Viewer-Event-Explorer.md). Performance
+charts remain a separate capability.

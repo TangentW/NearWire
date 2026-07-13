@@ -20,8 +20,8 @@ struct ViewerPreparedIdentity: @unchecked Sendable {
 struct ViewerRuntimeDependencies: @unchecked Sendable {
   static let live: ViewerRuntimeDependencies = {
     let store = ViewerIdentityStore.live
-    let storeRuntime = ViewerStoreRuntime()
-    let journal: any ViewerSessionJournaling = storeRuntime
+    let storeRuntime = ViewerStoreRuntime(startupMode: .asynchronous)
+    let managerGenerations = ViewerManagerGenerationSource()
     return ViewerRuntimeDependencies(
       loadIdentity: {
         let identity = try store.loadOrCreate()
@@ -40,12 +40,15 @@ struct ViewerRuntimeDependencies: @unchecked Sendable {
       generatePairingCode: { try ViewerPairingCodeGenerator.live.generate() },
       cleanupTimeoutNanoseconds: ViewerAdmissionManager.cleanupTimeoutNanoseconds,
       scheduler: .live,
-      makeHandoffOwner: {
-        ViewerMultiDeviceSessionManager(
+      makeRuntimeComponents: { runtimeLogicalID in
+        ViewerRuntimeComponents.make(
+          runtimeLogicalID: runtimeLogicalID,
+          managerGeneration: managerGenerations.next(),
           scheduler: .live,
           preferences: ViewerDevicePreferences(),
           uplinkSink: { _, _ in },
-          journal: journal
+          durableJournal: storeRuntime,
+          storeGateway: storeRuntime.explorerGateway
         )
       },
       loadStorageConfiguration: {
@@ -73,7 +76,7 @@ struct ViewerRuntimeDependencies: @unchecked Sendable {
   let generatePairingCode: @Sendable () throws -> PairingCode
   let cleanupTimeoutNanoseconds: UInt64
   let scheduler: ViewerAdmissionScheduler
-  let makeHandoffOwner: @Sendable () -> any ViewerAdmissionHandoffOwning
+  let makeRuntimeComponents: @Sendable (UUID) -> ViewerRuntimeComponents
   let loadStorageConfiguration: @Sendable () -> ViewerStorageConfiguration
   let saveStorageConfiguration: @Sendable (ViewerStorageConfiguration) -> Void
   let loadStoreStatus: @Sendable () -> ViewerStoreStatus
@@ -88,9 +91,7 @@ struct ViewerRuntimeDependencies: @unchecked Sendable {
     generatePairingCode: @escaping @Sendable () throws -> PairingCode,
     cleanupTimeoutNanoseconds: UInt64 = ViewerAdmissionManager.cleanupTimeoutNanoseconds,
     scheduler: ViewerAdmissionScheduler = .live,
-    makeHandoffOwner: @escaping @Sendable () -> any ViewerAdmissionHandoffOwning = {
-      ViewerPlaceholderHandoffOwner()
-    },
+    makeRuntimeComponents: (@Sendable (UUID) -> ViewerRuntimeComponents)? = nil,
     loadStorageConfiguration: @escaping @Sendable () -> ViewerStorageConfiguration = { .default },
     saveStorageConfiguration: @escaping @Sendable (ViewerStorageConfiguration) -> Void = { _ in },
     loadStoreStatus: @escaping @Sendable () -> ViewerStoreStatus = {
@@ -115,7 +116,17 @@ struct ViewerRuntimeDependencies: @unchecked Sendable {
     self.generatePairingCode = generatePairingCode
     self.cleanupTimeoutNanoseconds = cleanupTimeoutNanoseconds
     self.scheduler = scheduler
-    self.makeHandoffOwner = makeHandoffOwner
+    if let makeRuntimeComponents {
+      self.makeRuntimeComponents = makeRuntimeComponents
+    } else {
+      let managerGenerations = ViewerManagerGenerationSource()
+      self.makeRuntimeComponents = { runtimeLogicalID in
+        ViewerRuntimeComponents.make(
+          runtimeLogicalID: runtimeLogicalID,
+          managerGeneration: managerGenerations.next()
+        )
+      }
+    }
     self.loadStorageConfiguration = loadStorageConfiguration
     self.saveStorageConfiguration = saveStorageConfiguration
     self.loadStoreStatus = loadStoreStatus
@@ -314,5 +325,92 @@ final class ViewerSessionSnapshotCoalescer: @unchecked Sendable {
     if !continues { taskScheduled = false }
     lock.unlock()
     if continues { scheduleDrain() }
+  }
+}
+
+final class ViewerStoreStatusRefreshCoordinator: @unchecked Sendable {
+  typealias Load = @Sendable () -> ViewerStoreStatus
+  typealias Delivery = @MainActor @Sendable (ViewerStoreStatus) -> Void
+
+  private let lock = NSLock()
+  private let queue = DispatchQueue(label: "com.nearwire.viewer.store-status-refresh")
+  private let completionGroup = DispatchGroup()
+  private let load: Load
+  private let delivery: Delivery
+  private var active = true
+  private var running = false
+  private var dirty = false
+
+  init(load: @escaping Load, delivery: @escaping Delivery) {
+    self.load = load
+    self.delivery = delivery
+  }
+
+  func request() {
+    lock.lock()
+    guard active else {
+      lock.unlock()
+      return
+    }
+    guard !running else {
+      dirty = true
+      lock.unlock()
+      return
+    }
+    running = true
+    completionGroup.enter()
+    lock.unlock()
+    scheduleLoad()
+  }
+
+  func deactivateAndWait() -> Task<Void, Never> {
+    lock.lock()
+    active = false
+    dirty = false
+    lock.unlock()
+    let group = completionGroup
+    return Task {
+      await withCheckedContinuation { continuation in
+        group.notify(queue: .global(qos: .utility)) { continuation.resume() }
+      }
+    }
+  }
+
+  var pendingWorkCountForTesting: Int {
+    lock.lock()
+    defer { lock.unlock() }
+    return running ? 1 : 0
+  }
+
+  var hasDirtySuccessorForTesting: Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    return dirty
+  }
+
+  private func scheduleLoad() {
+    queue.async { [self] in
+      let value = load()
+      Task { @MainActor [self] in self.deliverAndContinue(value) }
+    }
+  }
+
+  @MainActor
+  private func deliverAndContinue(_ value: ViewerStoreStatus) {
+    lock.lock()
+    let shouldDeliver = active
+    lock.unlock()
+    if shouldDeliver { delivery(value) }
+
+    lock.lock()
+    if active, dirty {
+      dirty = false
+      lock.unlock()
+      scheduleLoad()
+    } else {
+      running = false
+      lock.unlock()
+      completionGroup.leave()
+    }
   }
 }

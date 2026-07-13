@@ -7,6 +7,8 @@ import Foundation
 @_spi(NearWireInternal) public struct WireEventRecord: Equatable, Sendable {
   public let envelope: EventEnvelope
   public let remainingTTLNanoseconds: UInt64
+  public let canonicalContentData: Data
+  public let precomputedDeterministicEncodedByteCount: Int
 
   public init(
     envelope: EventEnvelope,
@@ -29,6 +31,12 @@ import Foundation
     }
     self.envelope = envelope
     remainingTTLNanoseconds = deadline - now
+    canonicalContentData = try envelope.content.deterministicData()
+    precomputedDeterministicEncodedByteCount = try Self.encodedByteCount(
+      envelope: envelope,
+      remainingTTLNanoseconds: remainingTTLNanoseconds,
+      canonicalContentByteCount: canonicalContentData.count
+    )
   }
 
   public init(
@@ -49,6 +57,12 @@ import Foundation
     }
     self.envelope = envelope
     self.remainingTTLNanoseconds = remainingTTLNanoseconds
+    canonicalContentData = try envelope.content.deterministicData()
+    precomputedDeterministicEncodedByteCount = try Self.encodedByteCount(
+      envelope: envelope,
+      remainingTTLNanoseconds: remainingTTLNanoseconds,
+      canonicalContentByteCount: canonicalContentData.count
+    )
   }
 
   private static func validatedOriginDeadline(for envelope: EventEnvelope) throws -> UInt64 {
@@ -90,12 +104,13 @@ import Foundation
       envelope: envelope,
       receivedAtNanoseconds: receivedAtNanoseconds,
       deadlineNanoseconds: deadline,
-      deterministicEncodedByteCount: try deterministicEncodedByteCount()
+      deterministicEncodedByteCount: try deterministicEncodedByteCount(),
+      canonicalContentData: canonicalContentData
     )
   }
 
   public func deterministicEncodedByteCount() throws -> Int {
-    try jsonValue().deterministicData().count
+    precomputedDeterministicEncodedByteCount
   }
 
   /// Returns the exact V1 record maximum for content already bounded by `eventLimits`.
@@ -160,6 +175,18 @@ import Foundation
   }
 
   func jsonValue() throws -> JSONValue {
+    try Self.jsonValue(
+      envelope: envelope,
+      remainingTTLNanoseconds: remainingTTLNanoseconds,
+      content: envelope.content
+    )
+  }
+
+  private static func jsonValue(
+    envelope: EventEnvelope,
+    remainingTTLNanoseconds: UInt64,
+    content: JSONValue
+  ) throws -> JSONValue {
     guard let createdAt = WireDateCodec.format(envelope.createdAt) else {
       throw WireProtocolError(
         code: .invalidMessage,
@@ -174,7 +201,7 @@ import Foundation
         } ?? .null,
         "replyTo": envelope.causality.replyTo.map { .string($0.rawValue) } ?? .null,
       ]),
-      "content": envelope.content,
+      "content": content,
       "createdAt": .string(createdAt),
       "direction": .string(envelope.direction.rawValue),
       "id": .string(envelope.id.rawValue),
@@ -189,6 +216,28 @@ import Foundation
       "ttlMilliseconds": envelope.ttl.milliseconds.wireJSONValue,
       "type": .string(envelope.type.rawValue),
     ])
+  }
+
+  private static func encodedByteCount(
+    envelope: EventEnvelope,
+    remainingTTLNanoseconds: UInt64,
+    canonicalContentByteCount: Int
+  ) throws -> Int {
+    let placeholder = try jsonValue(
+      envelope: envelope,
+      remainingTTLNanoseconds: remainingTTLNanoseconds,
+      content: .null
+    )
+    let wrapperBytes = try placeholder.deterministicData().count - 4
+    let (total, overflow) = wrapperBytes.addingReportingOverflow(canonicalContentByteCount)
+    guard wrapperBytes >= 0, !overflow else {
+      throw WireProtocolError(
+        code: .arithmeticOverflow,
+        path: "event",
+        message: "Event byte accounting overflowed."
+      )
+    }
+    return total
   }
 
   init(
@@ -353,6 +402,7 @@ extension WireEventRecord: CustomReflectable, CustomStringConvertible,
   public let receivedAtNanoseconds: UInt64
   public let deadlineNanoseconds: UInt64
   public let deterministicEncodedByteCount: Int
+  public let canonicalContentData: Data
 
   public func isExpired(nowOnReceiverClockNanoseconds now: UInt64) throws -> Bool {
     guard now >= receivedAtNanoseconds else {

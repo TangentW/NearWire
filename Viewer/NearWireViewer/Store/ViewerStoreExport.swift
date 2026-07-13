@@ -15,6 +15,11 @@ struct ViewerExportSnapshot: Equatable, Sendable {
   let annotationUpperRowID: Int64
 }
 
+struct ViewerCompleteExportScope: Equatable, Sendable {
+  let recordingID: Int64
+  let snapshot: ViewerExportSnapshot
+}
+
 struct ViewerExportDisclosure: Codable, Equatable, Sendable {
   let format: String
   let version: Int
@@ -65,16 +70,18 @@ private final class ViewerExportCancellation: @unchecked Sendable {
   private let lock = NSLock()
   private var nextGeneration: UInt64 = 1
   private var activeGeneration: UInt64?
+  private var activeOperationID: UUID?
   private var cancelledGeneration: UInt64?
   private var committingGeneration: UInt64?
 
-  func begin() throws -> UInt64 {
+  func begin(operationID: UUID?) throws -> UInt64 {
     lock.lock()
     defer { lock.unlock() }
     guard activeGeneration == nil else { throw ViewerStoreError.busy }
     let generation = nextGeneration
     nextGeneration = nextGeneration == UInt64.max ? 1 : nextGeneration + 1
     activeGeneration = generation
+    activeOperationID = operationID
     cancelledGeneration = nil
     return generation
   }
@@ -82,6 +89,14 @@ private final class ViewerExportCancellation: @unchecked Sendable {
   func cancelActive() {
     lock.lock()
     if committingGeneration != activeGeneration {
+      cancelledGeneration = activeGeneration
+    }
+    lock.unlock()
+  }
+
+  func cancel(operationID: UUID) {
+    lock.lock()
+    if activeOperationID == operationID, committingGeneration != activeGeneration {
       cancelledGeneration = activeGeneration
     }
     lock.unlock()
@@ -110,6 +125,7 @@ private final class ViewerExportCancellation: @unchecked Sendable {
   func finish(_ generation: UInt64) {
     lock.lock()
     if activeGeneration == generation { activeGeneration = nil }
+    if activeGeneration == nil { activeOperationID = nil }
     if cancelledGeneration == generation { cancelledGeneration = nil }
     if committingGeneration == generation { committingGeneration = nil }
     lock.unlock()
@@ -143,11 +159,12 @@ final class ViewerStoreExportService: @unchecked Sendable {
     self.filePhases = filePhases
   }
 
-  func preflight(recordingID: Int64) throws -> (
+  func preflight(recordingID: Int64, operationID: UUID? = nil) throws -> (
     eventCount: Int64, disclosure: ViewerExportDisclosure
   ) {
     let recordingID = try validated(recordingID)
-    let count = try pool.exportReader.run(budget: .export()) { database in
+    let count = try pool.exportReader.run(operationID: operationID, budget: .export()) {
+      database in
       try requireVisibleRecording(recordingID, database: database)
       let statement = try ViewerSQLiteStatement(
         database: database,
@@ -161,12 +178,43 @@ final class ViewerStoreExportService: @unchecked Sendable {
     return (count, .current)
   }
 
+  func makeCompleteScope(
+    recordingID: Int64,
+    operationID: UUID? = nil
+  ) throws -> ViewerCompleteExportScope {
+    let recordingID = try validated(recordingID)
+    let snapshot = try captureSnapshot(querySnapshot: nil, operationID: operationID)
+    return ViewerCompleteExportScope(recordingID: recordingID, snapshot: snapshot)
+  }
+
   func preflight(
-    traversal: ViewerEventTraversal
+    scope: ViewerCompleteExportScope,
+    operationID: UUID? = nil
+  ) throws -> (eventCount: Int64, disclosure: ViewerExportDisclosure) {
+    let recordingID = try validated(scope.recordingID)
+    let count = try pool.exportReader.run(operationID: operationID, budget: .export()) {
+      database in
+      try requireVisibleRecording(recordingID, database: database)
+      let statement = try ViewerSQLiteStatement(
+        database: database,
+        sql: "SELECT COUNT(*) FROM Events WHERE recordingID=?1 AND rowID<=?2"
+      )
+      try statement.bind(recordingID, at: 1)
+      try statement.bind(scope.snapshot.eventUpperRowID, at: 2)
+      guard try statement.step() else { throw ViewerStoreError.corruptStore }
+      return statement.int64(at: 0)
+    }
+    return (count, .current)
+  }
+
+  func preflight(
+    traversal: ViewerEventTraversal,
+    operationID: UUID? = nil
   ) throws -> (eventCount: Int64, disclosure: ViewerExportDisclosure) {
     try leases.validateQuery(traversal.lease)
     let compiled = try ViewerEventQueryCompiler.compile(traversal.query)
-    let count = try pool.exportReader.run(budget: .export()) { database in
+    let count = try pool.exportReader.run(operationID: operationID, budget: .export()) {
+      database in
       try requireVisibleRecording(traversal.query.recordingID, database: database)
       let sql =
         "SELECT COUNT(*) FROM Events e WHERE e.recordingID=? AND e.rowID<=? AND e.recordingID NOT IN (SELECT recordingID FROM Tombstones) AND \(compiled.predicateSQL)"
@@ -189,22 +237,93 @@ final class ViewerStoreExportService: @unchecked Sendable {
     return (count, .current)
   }
 
-  func export(recordingID: Int64, to destination: URL) throws {
+  func preflight(
+    scope: ViewerFilteredExportScope,
+    operationID: UUID? = nil
+  ) throws -> (eventCount: Int64, disclosure: ViewerExportDisclosure) {
+    let compiled = try ViewerEventQueryCompiler.compile(scope.query)
+    let count = try pool.exportReader.run(operationID: operationID, budget: .export()) {
+      database in
+      try requireVisibleRecording(scope.query.recordingID, database: database)
+      let sql =
+        "SELECT COUNT(*) FROM Events e WHERE e.recordingID=? AND e.rowID<=? AND e.recordingID NOT IN (SELECT recordingID FROM Tombstones) AND \(compiled.predicateSQL)"
+      let bindStatement: (ViewerSQLiteStatement) throws -> Void = { statement in
+        try self.bindQuery(
+          recordingID: scope.query.recordingID,
+          eventUpperRowID: scope.snapshot.eventUpperRowID,
+          compiled: compiled,
+          querySnapshot: scope.snapshot,
+          to: statement,
+          startingAt: 1
+        )
+      }
+      try ViewerQueryPlanGate.validate(sql: sql, database: database, bind: bindStatement)
+      let statement = try ViewerSQLiteStatement(database: database, sql: sql)
+      try bindStatement(statement)
+      guard try statement.step() else { throw ViewerStoreError.corruptStore }
+      return statement.int64(at: 0)
+    }
+    return (count, .current)
+  }
+
+  func export(
+    recordingID: Int64,
+    to destination: URL,
+    operationID: UUID? = nil
+  ) throws {
     try export(
       recordingID: validated(recordingID),
       compiledQuery: nil,
       querySnapshot: nil,
-      to: destination
+      fixedSnapshot: nil,
+      to: destination,
+      operationID: operationID
     )
   }
 
-  func export(traversal: ViewerEventTraversal, to destination: URL) throws {
+  func export(
+    scope: ViewerCompleteExportScope,
+    to destination: URL,
+    operationID: UUID? = nil
+  ) throws {
+    try export(
+      recordingID: validated(scope.recordingID),
+      compiledQuery: nil,
+      querySnapshot: nil,
+      fixedSnapshot: scope.snapshot,
+      to: destination,
+      operationID: operationID
+    )
+  }
+
+  func export(
+    traversal: ViewerEventTraversal,
+    to destination: URL,
+    operationID: UUID? = nil
+  ) throws {
     try leases.validateQuery(traversal.lease)
     try export(
       recordingID: traversal.query.recordingID,
       compiledQuery: ViewerEventQueryCompiler.compile(traversal.query),
       querySnapshot: traversal.snapshot,
-      to: destination
+      fixedSnapshot: nil,
+      to: destination,
+      operationID: operationID
+    )
+  }
+
+  func export(
+    scope: ViewerFilteredExportScope,
+    to destination: URL,
+    operationID: UUID? = nil
+  ) throws {
+    try export(
+      recordingID: scope.query.recordingID,
+      compiledQuery: ViewerEventQueryCompiler.compile(scope.query),
+      querySnapshot: scope.snapshot,
+      fixedSnapshot: nil,
+      to: destination,
+      operationID: operationID
     )
   }
 
@@ -212,13 +331,17 @@ final class ViewerStoreExportService: @unchecked Sendable {
     recordingID: Int64,
     compiledQuery: ViewerCompiledQuery?,
     querySnapshot: ViewerQuerySnapshot?,
-    to destination: URL
+    fixedSnapshot: ViewerExportSnapshot?,
+    to destination: URL,
+    operationID: UUID?
   ) throws {
-    let generation = try cancellation.begin()
+    let generation = try cancellation.begin(operationID: operationID)
     defer { cancellation.finish(generation) }
     let lease = try leases.acquireExport(recordingID: recordingID)
     defer { leases.release(lease) }
-    let snapshot = try captureSnapshot(querySnapshot: querySnapshot)
+    let snapshot =
+      try fixedSnapshot
+      ?? captureSnapshot(querySnapshot: querySnapshot, operationID: operationID)
     try validate(lease: lease, generation: generation)
     let temporary = try secureTemporarySibling(for: destination)
     var committed = false
@@ -246,7 +369,8 @@ final class ViewerStoreExportService: @unchecked Sendable {
         querySnapshot: querySnapshot,
         lease: lease,
         generation: generation,
-        handle: handle
+        handle: handle,
+        operationID: operationID
       )
       try filePhases.reach(.afterWrite)
       try validate(lease: lease, generation: generation)
@@ -276,6 +400,19 @@ final class ViewerStoreExportService: @unchecked Sendable {
     pool.exportReader.cancelCurrentOperation()
   }
 
+  func cancel(operationID: UUID) {
+    cancellation.cancel(operationID: operationID)
+    pool.exportReader.cancel(operationID: operationID)
+  }
+
+  func clearCancellation(operationID: UUID) {
+    pool.exportReader.clearCancellation(operationID: operationID)
+  }
+
+  var cancelledOperationCountForTesting: Int {
+    pool.exportReader.cancelledOperationCountForTesting
+  }
+
   private func writeExport(
     recordingID: Int64,
     snapshot: ViewerExportSnapshot,
@@ -283,18 +420,20 @@ final class ViewerStoreExportService: @unchecked Sendable {
     querySnapshot: ViewerQuerySnapshot?,
     lease: ViewerStoreLeaseRegistry.Lease,
     generation: UInt64,
-    handle: FileHandle
+    handle: FileHandle,
+    operationID: UUID?
   ) throws {
     let disclosure = try ViewerCanonicalJSON.encode(ViewerExportDisclosure.current)
     try write(Data("{\"schemaVersion\":1,\"disclosure\":".utf8), to: handle, generation: generation)
     try write(disclosure, to: handle, generation: generation)
     try write(Data(",\"session\":".utf8), to: handle, generation: generation)
     try writeSession(
-      recordingID: recordingID, snapshot: snapshot, handle: handle, generation: generation)
+      recordingID: recordingID, snapshot: snapshot, handle: handle, generation: generation,
+      operationID: operationID)
     try write(Data(",\"devices\":[".utf8), to: handle, generation: generation)
     try writeDevices(
       recordingID: recordingID, snapshot: snapshot, handle: handle, lease: lease,
-      generation: generation)
+      generation: generation, operationID: operationID)
     try write(Data("],\"events\":[".utf8), to: handle, generation: generation)
     try writeEvents(
       recordingID: recordingID,
@@ -303,16 +442,17 @@ final class ViewerStoreExportService: @unchecked Sendable {
       querySnapshot: querySnapshot,
       handle: handle,
       lease: lease,
-      generation: generation
+      generation: generation,
+      operationID: operationID
     )
     try write(Data("],\"gaps\":[".utf8), to: handle, generation: generation)
     try writeGaps(
       recordingID: recordingID, snapshot: snapshot, handle: handle, lease: lease,
-      generation: generation)
+      generation: generation, operationID: operationID)
     try write(Data("],\"annotations\":[".utf8), to: handle, generation: generation)
     try writeAnnotations(
       recordingID: recordingID, snapshot: snapshot, handle: handle, lease: lease,
-      generation: generation)
+      generation: generation, operationID: operationID)
     try write(Data("]}".utf8), to: handle, generation: generation)
   }
 
@@ -321,13 +461,17 @@ final class ViewerStoreExportService: @unchecked Sendable {
     snapshot: ViewerExportSnapshot,
     handle: FileHandle,
     lease: ViewerStoreLeaseRegistry.Lease,
-    generation: UInt64
+    generation: UInt64,
+    operationID: UUID?
   ) throws {
     var cursor: Int64 = 0
     var first = true
     while true {
       try validate(lease: lease, generation: generation)
-      let rows: [Data] = try pool.exportReader.run(budget: .export()) { database in
+      let rows: [Data] = try pool.exportReader.run(
+        operationID: operationID,
+        budget: .export()
+      ) { database in
         let statement = try ViewerSQLiteStatement(
           database: database,
           sql:
@@ -374,14 +518,18 @@ final class ViewerStoreExportService: @unchecked Sendable {
     querySnapshot: ViewerQuerySnapshot?,
     handle: FileHandle,
     lease: ViewerStoreLeaseRegistry.Lease,
-    generation: UInt64
+    generation: UInt64,
+    operationID: UUID?
   ) throws {
     var cursorMonotonic: Int64 = -1
     var cursorRowID: Int64 = 0
     var first = true
     while true {
       try validate(lease: lease, generation: generation)
-      let rows: [(Int64, Int64, Data)] = try pool.exportReader.run(budget: .export()) { database in
+      let rows: [(Int64, Int64, Data)] = try pool.exportReader.run(
+        operationID: operationID,
+        budget: .export()
+      ) { database in
         let predicateSQL = compiledQuery.map { " AND \($0.predicateSQL)" } ?? ""
         let sql =
           "SELECT e.rowID,a.ordinal,d.connectionOrdinal,e.direction,e.wireSequence,e.eventUUID,e.eventType,e.contentJSON,e.createdWallMs,e.viewerWallMs,e.viewerMonotonicNs,e.priority,(SELECT disposition FROM EventDispositionVersions x WHERE x.eventID=e.rowID AND x.rowID<=? ORDER BY x.rowID DESC LIMIT 1),e.originMonotonicNs,e.ttlMs,e.schemaVersion,e.correlationEventUUID,e.replyToEventUUID FROM Events e JOIN DeviceSessions d ON d.rowID=e.deviceSessionID JOIN InstallationAliases a ON a.rowID=d.installationAliasID WHERE e.recordingID=? AND e.recordingID<=? AND e.rowID<=? AND d.rowID<=? AND a.rowID<=?\(predicateSQL) AND (e.viewerMonotonicNs>? OR (e.viewerMonotonicNs=? AND e.rowID>?)) AND e.recordingID NOT IN (SELECT recordingID FROM Tombstones) ORDER BY e.viewerMonotonicNs,e.rowID LIMIT 1"
@@ -468,9 +616,11 @@ final class ViewerStoreExportService: @unchecked Sendable {
     recordingID: Int64,
     snapshot: ViewerExportSnapshot,
     handle: FileHandle,
-    generation: UInt64
+    generation: UInt64,
+    operationID: UUID?
   ) throws {
-    let row: Data = try pool.exportReader.run(budget: .export()) { database in
+    let row: Data = try pool.exportReader.run(operationID: operationID, budget: .export()) {
+      database in
       let statement = try ViewerSQLiteStatement(
         database: database,
         sql:
@@ -498,13 +648,17 @@ final class ViewerStoreExportService: @unchecked Sendable {
     snapshot: ViewerExportSnapshot,
     handle: FileHandle,
     lease: ViewerStoreLeaseRegistry.Lease,
-    generation: UInt64
+    generation: UInt64,
+    operationID: UUID?
   ) throws {
     var cursor: Int64 = 0
     var first = true
     while true {
       try validate(lease: lease, generation: generation)
-      let rows: [(Int64, Data)] = try pool.exportReader.run(budget: .export()) { database in
+      let rows: [(Int64, Data)] = try pool.exportReader.run(
+        operationID: operationID,
+        budget: .export()
+      ) { database in
         let statement = try ViewerSQLiteStatement(
           database: database,
           sql:
@@ -555,13 +709,17 @@ final class ViewerStoreExportService: @unchecked Sendable {
     snapshot: ViewerExportSnapshot,
     handle: FileHandle,
     lease: ViewerStoreLeaseRegistry.Lease,
-    generation: UInt64
+    generation: UInt64,
+    operationID: UUID?
   ) throws {
     var cursor: Int64 = 0
     var first = true
     while true {
       try validate(lease: lease, generation: generation)
-      let rows: [(Int64, Data)] = try pool.exportReader.run(budget: .export()) { database in
+      let rows: [(Int64, Data)] = try pool.exportReader.run(
+        operationID: operationID,
+        budget: .export()
+      ) { database in
         let statement = try ViewerSQLiteStatement(
           database: database,
           sql:
@@ -597,9 +755,10 @@ final class ViewerStoreExportService: @unchecked Sendable {
   }
 
   private func captureSnapshot(
-    querySnapshot: ViewerQuerySnapshot?
+    querySnapshot: ViewerQuerySnapshot?,
+    operationID: UUID?
   ) throws -> ViewerExportSnapshot {
-    try pool.exportReader.run(budget: .export()) { database in
+    try pool.exportReader.run(operationID: operationID, budget: .export()) { database in
       try ViewerSQLiteConnection.execute("BEGIN", on: database)
       defer { try? ViewerSQLiteConnection.execute("COMMIT", on: database) }
       return ViewerExportSnapshot(

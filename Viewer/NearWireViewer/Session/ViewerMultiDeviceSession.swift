@@ -99,6 +99,7 @@ extension ViewerDownlinkPolicy: CustomReflectable, CustomStringConvertible,
 struct ViewerDownlinkJournalEvent: Sendable {
   let envelope: EventEnvelope
   let deterministicEncodedByteCount: Int
+  let canonicalContentData: Data
 }
 
 extension ViewerDownlinkJournalEvent: CustomReflectable, CustomStringConvertible,
@@ -509,6 +510,40 @@ final class ViewerDeviceSession: ViewerAdmissionSessionReceiving, @unchecked Sen
         return false
       }
     }) ?? false
+  }
+
+  func enqueuePreparedControl(
+    _ prepared: ViewerPreparedControlEvent
+  ) -> ViewerControlTargetOutcome {
+    (try? core.performSynchronousSessionOperation { [self] in
+      guard state == .active else { return .notActive }
+      do {
+        let now = scheduler.now()
+        let pending = try PendingEvent(
+          id: EventID(),
+          value: prepared.draft,
+          priority: prepared.draft.priority,
+          ttl: prepared.draft.ttl,
+          policy: prepared.queuePolicy,
+          accountedByteCount: prepared.deterministicEncodedByteCount,
+          enqueuedAtNanoseconds: now
+        )
+        let result = try downlinkQueue.enqueue(
+          pending,
+          nowOnQueueClockNanoseconds: now
+        )
+        addLocalDrops(
+          overflow: result.overflowDroppedEventIDs.count,
+          expired: result.expiredEventIDs.count,
+          coalesced: result.coalescedEventID == nil ? 0 : 1
+        )
+        scheduleServiceWake(now: now)
+        publishSnapshot(now: now)
+        return result.isBuffered ? .queued : .queueRejected
+      } catch {
+        return .queueRejected
+      }
+    }) ?? .notActive
   }
 
   func disconnect(category: ViewerSessionTerminalCategory) {
@@ -979,7 +1014,8 @@ final class ViewerDeviceSession: ViewerAdmissionSessionReceiving, @unchecked Sen
         journalEvents.append(
           ViewerDownlinkJournalEvent(
             envelope: envelope,
-            deterministicEncodedByteCount: try record.deterministicEncodedByteCount()
+            deterministicEncodedByteCount: try record.deterministicEncodedByteCount(),
+            canonicalContentData: record.canonicalContentData
           )
         )
       }

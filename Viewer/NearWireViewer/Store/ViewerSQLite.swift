@@ -107,6 +107,15 @@ enum ViewerStoreFileSecurity {
     }
   }
 
+  static func validatePrivateTemporaryDirectory(_ url: URL) throws {
+    var info = stat()
+    guard lstat(url.path, &info) == 0,
+      (info.st_mode & S_IFMT) == S_IFDIR,
+      (info.st_mode & 0o777) == 0o700,
+      info.st_uid == geteuid()
+    else { throw ViewerStoreError.invalidPath }
+  }
+
   private static func rejectSymbolicLink(
     at url: URL,
     allowMissing: Bool,
@@ -157,6 +166,183 @@ struct ViewerStoreDiskGuard: Sendable {
       available >= required
     else { throw ViewerStoreError.capacityExceeded }
   }
+
+  func availableBytes(at directory: URL) throws -> Int64 {
+    guard let available = try availableCapacity(directory), available >= 0 else {
+      throw ViewerStoreError.capacityExceeded
+    }
+    return available
+  }
+}
+
+enum ViewerStoreMigrationPhase: Equatable, Sendable {
+  case preparing
+  case index(Int)
+  case validating
+  case needsSpace
+  case cancelled
+  case failed
+}
+
+final class ViewerStoreMigrationToken: @unchecked Sendable {
+  private let lock = NSLock()
+  private var cancelled = false
+
+  func cancel() {
+    lock.lock()
+    cancelled = true
+    lock.unlock()
+  }
+
+  var isCancelled: Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    return cancelled
+  }
+}
+
+final class ViewerStoreAutomaticMigrationGate: @unchecked Sendable {
+  static let shared = ViewerStoreAutomaticMigrationGate()
+
+  private let lock = NSLock()
+  private var claimedDatabasePaths: Set<String> = []
+
+  func claim(_ database: URL) -> Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    return claimedDatabasePaths.insert(database.standardizedFileURL.path).inserted
+  }
+}
+
+final class ViewerStoreMigrationControl: @unchecked Sendable {
+  static let baseHeadroomBytes: Int64 = 512 * 1_024 * 1_024
+  static let footprintMultiplier: Int64 = 6
+  static let liveVolumeFloorBytes: Int64 = 256 * 1_024 * 1_024
+  static let progressInstructionInterval: Int32 = 10_000
+
+  private let paths: ViewerStorePaths
+  private let stateLock = NSLock()
+  private let temporaryDirectory: URL
+  private let fileManager: FileManager
+  private let diskGuard: ViewerStoreDiskGuard
+  private let volumeIdentifier: @Sendable (URL) throws -> UInt64
+  private let allocatedFootprintOverride: (@Sendable () throws -> Int64)?
+  private let authorizeAttempt: @Sendable () -> Bool
+  private let isCancelled: @Sendable () -> Bool
+  private let phaseObserver: @Sendable (ViewerStoreMigrationPhase) -> Void
+  private let progressObserver: @Sendable () -> Void
+  private let phaseGate: @Sendable (ViewerStoreMigrationPhase) throws -> Void
+  private var beganMigration = false
+
+  init(
+    paths: ViewerStorePaths,
+    temporaryDirectory: URL = FileManager.default.temporaryDirectory,
+    fileManager: FileManager = .default,
+    diskGuard: ViewerStoreDiskGuard = .live,
+    volumeIdentifier: @escaping @Sendable (URL) throws -> UInt64 = {
+      var info = stat()
+      guard stat($0.path, &info) == 0 else { throw ViewerStoreError.invalidPath }
+      return UInt64(info.st_dev)
+    },
+    allocatedFootprintOverride: (@Sendable () throws -> Int64)? = nil,
+    authorizeAttempt: @escaping @Sendable () -> Bool = { true },
+    isCancelled: @escaping @Sendable () -> Bool = { false },
+    phaseObserver: @escaping @Sendable (ViewerStoreMigrationPhase) -> Void = { _ in },
+    progressObserver: @escaping @Sendable () -> Void = {},
+    phaseGate: @escaping @Sendable (ViewerStoreMigrationPhase) throws -> Void = { _ in }
+  ) {
+    self.paths = paths
+    self.temporaryDirectory = temporaryDirectory
+    self.fileManager = fileManager
+    self.diskGuard = diskGuard
+    self.volumeIdentifier = volumeIdentifier
+    self.allocatedFootprintOverride = allocatedFootprintOverride
+    self.authorizeAttempt = authorizeAttempt
+    self.isCancelled = isCancelled
+    self.phaseObserver = phaseObserver
+    self.progressObserver = progressObserver
+    self.phaseGate = phaseGate
+  }
+
+  func prepareForVersionOne() throws {
+    guard authorizeAttempt() else { throw ViewerStoreError.unavailable }
+    stateLock.lock()
+    beganMigration = true
+    stateLock.unlock()
+    try enter(.preparing)
+    try ViewerStoreFileSecurity.validatePrivateTemporaryDirectory(temporaryDirectory)
+    let allocated = try allocatedStoreFootprint()
+    let (multiplied, multiplyOverflow) = allocated.multipliedReportingOverflow(
+      by: Self.footprintMultiplier
+    )
+    let (required, addOverflow) = Self.baseHeadroomBytes.addingReportingOverflow(multiplied)
+    guard !multiplyOverflow, !addOverflow else {
+      throw ViewerStoreError.capacityExceeded
+    }
+    guard try volumesHaveAvailableBytes(required) else {
+      throw ViewerStoreError.capacityExceeded
+    }
+  }
+
+  func beforeIndex(_ index: Int) throws { try enter(.index(index)) }
+
+  func beforeValidation() throws { try enter(.validating) }
+
+  func progressFailure() -> ViewerStoreError? {
+    progressObserver()
+    if isCancelled() { return .cancelled }
+    guard (try? volumesHaveAvailableBytes(Self.liveVolumeFloorBytes)) == true else {
+      return .capacityExceeded
+    }
+    return nil
+  }
+
+  func reportFailure(_ error: Error) {
+    stateLock.lock()
+    let shouldReport = beganMigration
+    stateLock.unlock()
+    guard shouldReport else { return }
+    switch error as? ViewerStoreError {
+    case .capacityExceeded: phaseObserver(.needsSpace)
+    case .cancelled: phaseObserver(.cancelled)
+    default: phaseObserver(.failed)
+    }
+  }
+
+  private func enter(_ phase: ViewerStoreMigrationPhase) throws {
+    if isCancelled() {
+      throw ViewerStoreError.cancelled
+    }
+    phaseObserver(phase)
+    try phaseGate(phase)
+    if isCancelled() { throw ViewerStoreError.cancelled }
+  }
+
+  private func allocatedStoreFootprint() throws -> Int64 {
+    if let allocatedFootprintOverride {
+      let value = try allocatedFootprintOverride()
+      guard value >= 0 else { throw ViewerStoreError.capacityExceeded }
+      return value
+    }
+    var result: Int64 = 0
+    for url in [paths.database, paths.wal, paths.sharedMemory] {
+      guard fileManager.fileExists(atPath: url.path) else { continue }
+      let values = try url.resourceValues(forKeys: [.fileAllocatedSizeKey, .fileSizeKey])
+      let bytes = Int64(values.fileAllocatedSize ?? values.fileSize ?? 0)
+      let (next, overflow) = result.addingReportingOverflow(bytes)
+      guard bytes >= 0, !overflow else { throw ViewerStoreError.capacityExceeded }
+      result = next
+    }
+    return result
+  }
+
+  private func volumesHaveAvailableBytes(_ required: Int64) throws -> Bool {
+    guard try diskGuard.availableBytes(at: paths.directory) >= required else { return false }
+    if try volumeIdentifier(paths.directory) == volumeIdentifier(temporaryDirectory) {
+      return true
+    }
+    return try diskGuard.availableBytes(at: temporaryDirectory) >= required
+  }
 }
 
 final class ViewerSQLiteCancellation: @unchecked Sendable {
@@ -177,19 +363,27 @@ final class ViewerSQLiteCancellation: @unchecked Sendable {
 }
 
 private final class ViewerSQLiteProgressContext {
-  enum TerminationReason { case cancelled, workLimitExceeded }
-
   let cancellation: ViewerSQLiteCancellation
   let generation: UInt64
-  let deadline: ContinuousClock.Instant
-  var remainingSteps: Int
-  var terminationReason: TerminationReason?
+  let deadline: ContinuousClock.Instant?
+  let instructionInterval: Int
+  let externalCheck: (() -> ViewerStoreError?)?
+  var remainingSteps: Int?
+  var terminationError: ViewerStoreError?
 
-  init(cancellation: ViewerSQLiteCancellation, generation: UInt64, budget: ViewerSQLiteBudget) {
+  init(
+    cancellation: ViewerSQLiteCancellation,
+    generation: UInt64,
+    budget: ViewerSQLiteBudget?,
+    instructionInterval: Int32,
+    externalCheck: (() -> ViewerStoreError?)?
+  ) {
     self.cancellation = cancellation
     self.generation = generation
-    deadline = budget.deadline
-    remainingSteps = budget.maximumVirtualMachineSteps
+    deadline = budget?.deadline
+    self.instructionInterval = Int(instructionInterval)
+    self.externalCheck = externalCheck
+    remainingSteps = budget?.maximumVirtualMachineSteps
   }
 }
 
@@ -198,22 +392,51 @@ private let viewerSQLiteProgressCallback: @convention(c) (UnsafeMutableRawPointe
   guard let pointer else { return 1 }
   let context = Unmanaged<ViewerSQLiteProgressContext>.fromOpaque(pointer).takeUnretainedValue()
   if context.cancellation.isCancelled(generation: context.generation) {
-    context.terminationReason = .cancelled
+    context.terminationError = .cancelled
     return 1
   }
-  context.remainingSteps -= 1_000
-  if context.remainingSteps <= 0 || ContinuousClock.now >= context.deadline {
-    context.terminationReason = .workLimitExceeded
+  if let error = context.externalCheck?() {
+    context.terminationError = error
     return 1
+  }
+  if let remainingSteps = context.remainingSteps {
+    let next = remainingSteps - context.instructionInterval
+    context.remainingSteps = next
+    if next <= 0 || (context.deadline.map { ContinuousClock.now >= $0 } ?? false) {
+      context.terminationError = .workLimitExceeded
+      return 1
+    }
   }
   return 0
 }
 
 final class ViewerSQLiteConnection: @unchecked Sendable {
   enum Role: String, Sendable {
+    case migrationWriter
     case writer
     case queryReader
     case exportReader
+  }
+
+  enum TemporaryStorage: Sendable {
+    case memory(cacheKiB: Int)
+    case file(cacheKiB: Int)
+
+    static let normal = TemporaryStorage.memory(cacheKiB: 8 * 1_024)
+    static let migration = TemporaryStorage.file(cacheKiB: 32 * 1_024)
+
+    fileprivate var pragmaValue: String {
+      switch self {
+      case .memory: return "MEMORY"
+      case .file: return "FILE"
+      }
+    }
+
+    fileprivate var cacheKiB: Int {
+      switch self {
+      case .memory(let cacheKiB), .file(let cacheKiB): return cacheKiB
+      }
+    }
   }
 
   let role: Role
@@ -222,9 +445,16 @@ final class ViewerSQLiteConnection: @unchecked Sendable {
   private let cancellation = ViewerSQLiteCancellation()
   private var database: OpaquePointer?
   private var activeGeneration: UInt64?
+  private var activeOperationID: UUID?
+  private var cancelledOperationIDs: Set<UUID> = []
   private var nextGeneration: UInt64 = 1
 
-  init(role: Role, path: String, readOnly: Bool = false) throws {
+  init(
+    role: Role,
+    path: String,
+    readOnly: Bool = false,
+    temporaryStorage: TemporaryStorage = .normal
+  ) throws {
     self.role = role
     queue = DispatchQueue(label: "com.nearwire.viewer.sqlite.\(role.rawValue)")
     let requestedURL = URL(fileURLWithPath: path)
@@ -253,7 +483,11 @@ final class ViewerSQLiteConnection: @unchecked Sendable {
     }
     database = pointer
     do {
-      try configure(pointer: pointer, readOnly: readOnly)
+      try configure(
+        pointer: pointer,
+        readOnly: readOnly,
+        temporaryStorage: temporaryStorage
+      )
     } catch {
       sqlite3_close_v2(pointer)
       database = nil
@@ -271,17 +505,27 @@ final class ViewerSQLiteConnection: @unchecked Sendable {
       let pointer = database
       database = nil
       activeGeneration = nil
+      activeOperationID = nil
+      cancelledOperationIDs.removeAll(keepingCapacity: false)
       stateLock.unlock()
       if let pointer { sqlite3_close_v2(pointer) }
     }
   }
 
   func run<T>(
+    operationID: UUID? = nil,
     budget: ViewerSQLiteBudget? = nil,
+    progressInstructionInterval: Int32 = 1_000,
+    progressCheck: (() -> ViewerStoreError?)? = nil,
     failureHandler: ((Error) -> Void)? = nil,
     _ body: (OpaquePointer) throws -> T
   ) throws -> T {
     try queue.sync {
+      guard progressInstructionInterval > 0 else {
+        let error = ViewerStoreError.invalidValue
+        failureHandler?(error)
+        throw error
+      }
       guard let database else {
         let error = ViewerStoreError.unavailable
         failureHandler?(error)
@@ -290,26 +534,41 @@ final class ViewerSQLiteConnection: @unchecked Sendable {
       let generation = nextGeneration
       nextGeneration &+= 1
       stateLock.lock()
+      if let operationID, cancelledOperationIDs.contains(operationID) {
+        stateLock.unlock()
+        let error = ViewerStoreError.cancelled
+        failureHandler?(error)
+        throw error
+      }
       activeGeneration = generation
+      activeOperationID = operationID
       stateLock.unlock()
       var retainedContext: Unmanaged<ViewerSQLiteProgressContext>?
       var progressContext: ViewerSQLiteProgressContext?
-      if let budget {
+      if budget != nil || progressCheck != nil {
         let context = ViewerSQLiteProgressContext(
           cancellation: cancellation,
           generation: generation,
-          budget: budget
+          budget: budget,
+          instructionInterval: progressInstructionInterval,
+          externalCheck: progressCheck
         )
         progressContext = context
         let retained = Unmanaged.passRetained(context)
         retainedContext = retained
-        sqlite3_progress_handler(database, 1_000, viewerSQLiteProgressCallback, retained.toOpaque())
+        sqlite3_progress_handler(
+          database,
+          progressInstructionInterval,
+          viewerSQLiteProgressCallback,
+          retained.toOpaque()
+        )
       }
       defer {
         sqlite3_progress_handler(database, 0, nil, nil)
         retainedContext?.release()
         stateLock.lock()
         activeGeneration = nil
+        activeOperationID = nil
         stateLock.unlock()
       }
       do {
@@ -318,8 +577,8 @@ final class ViewerSQLiteConnection: @unchecked Sendable {
         let reportedError: Error
         if cancellation.isCancelled(generation: generation) {
           reportedError = ViewerStoreError.cancelled
-        } else if progressContext?.terminationReason == .workLimitExceeded {
-          reportedError = ViewerStoreError.workLimitExceeded
+        } else if let terminationError = progressContext?.terminationError {
+          reportedError = terminationError
         } else {
           reportedError = error
         }
@@ -338,6 +597,28 @@ final class ViewerSQLiteConnection: @unchecked Sendable {
     cancellation.cancel(generation: generation)
     sqlite3_interrupt(database)
     stateLock.unlock()
+  }
+
+  func cancel(operationID: UUID) {
+    stateLock.lock()
+    cancelledOperationIDs.insert(operationID)
+    if activeOperationID == operationID, let generation = activeGeneration, let database {
+      cancellation.cancel(generation: generation)
+      sqlite3_interrupt(database)
+    }
+    stateLock.unlock()
+  }
+
+  func clearCancellation(operationID: UUID) {
+    stateLock.lock()
+    cancelledOperationIDs.remove(operationID)
+    stateLock.unlock()
+  }
+
+  var cancelledOperationCountForTesting: Int {
+    stateLock.lock()
+    defer { stateLock.unlock() }
+    return cancelledOperationIDs.count
   }
 
   func execute(_ sql: String) throws {
@@ -386,9 +667,16 @@ final class ViewerSQLiteConnection: @unchecked Sendable {
     }
   }
 
-  private func configure(pointer: OpaquePointer, readOnly: Bool) throws {
+  private func configure(
+    pointer: OpaquePointer,
+    readOnly: Bool,
+    temporaryStorage: TemporaryStorage
+  ) throws {
     sqlite3_extended_result_codes(pointer, 1)
-    sqlite3_busy_timeout(pointer, role == .writer ? 1_000 : 250)
+    sqlite3_busy_timeout(
+      pointer,
+      role == .writer || role == .migrationWriter ? 1_000 : 250
+    )
     var defensiveResult: Int32 = 0
     let defensiveConfiguration = nearwire_sqlite3_db_config(
       pointer,
@@ -411,7 +699,8 @@ final class ViewerSQLiteConnection: @unchecked Sendable {
     }
     try Self.execute("PRAGMA defensive=ON", on: pointer)
     try Self.execute("PRAGMA trusted_schema=OFF", on: pointer)
-    try Self.execute("PRAGMA temp_store=MEMORY", on: pointer)
+    try Self.execute("PRAGMA temp_store=\(temporaryStorage.pragmaValue)", on: pointer)
+    try Self.execute("PRAGMA cache_size=-\(temporaryStorage.cacheKiB)", on: pointer)
     try Self.execute("PRAGMA foreign_keys=ON", on: pointer)
     try Self.execute("PRAGMA secure_delete=ON", on: pointer)
     if readOnly {
@@ -506,6 +795,9 @@ final class ViewerSQLiteStatement {
 
 final class ViewerSQLitePool: @unchecked Sendable {
   enum ConstructionEvent: Equatable, Sendable {
+    case migrationWriterOpened
+    case migrationCompleted
+    case migrationWriterClosed
     case writerOpened
     case schemaAccepted
     case queryReaderOpened
@@ -522,6 +814,7 @@ final class ViewerSQLitePool: @unchecked Sendable {
     migrating paths: ViewerStorePaths,
     fileManager: FileManager = .default,
     diskGuard: ViewerStoreDiskGuard = .live,
+    migrationControl: ViewerStoreMigrationControl? = nil,
     constructionObserver: @escaping @Sendable (ConstructionEvent) -> Void = { _ in }
   ) throws {
     self.paths = paths
@@ -530,10 +823,33 @@ final class ViewerSQLitePool: @unchecked Sendable {
     // Fail before creating or opening SQLite files when the volume cannot preserve the reserve.
     try diskGuard.requireReserve(at: paths.directory, plannedBytes: 4 * 1_024 * 1_024)
     try ViewerStoreFileSecurity.secureStoreFiles(paths, fileManager: fileManager)
+    let migrationWriter = try ViewerSQLiteConnection(
+      role: .migrationWriter,
+      path: paths.database.path,
+      temporaryStorage: .migration
+    )
+    constructionObserver(.migrationWriterOpened)
+    try ViewerStoreFileSecurity.secureStoreFiles(paths, fileManager: fileManager)
+    do {
+      try ViewerStoreSchema.migrate(
+        migrationWriter,
+        control: migrationControl
+          ?? ViewerStoreMigrationControl(
+            paths: paths,
+            fileManager: fileManager,
+            diskGuard: diskGuard
+          )
+      )
+      constructionObserver(.migrationCompleted)
+    } catch {
+      migrationWriter.close()
+      constructionObserver(.migrationWriterClosed)
+      throw error
+    }
+    migrationWriter.close()
+    constructionObserver(.migrationWriterClosed)
     let writer = try ViewerSQLiteConnection(role: .writer, path: paths.database.path)
     constructionObserver(.writerOpened)
-    try ViewerStoreFileSecurity.secureStoreFiles(paths, fileManager: fileManager)
-    try ViewerStoreSchema.migrate(writer)
     try Self.probeWriter(writer)
     constructionObserver(.schemaAccepted)
     let queryReader = try ViewerSQLiteConnection(
@@ -567,6 +883,8 @@ final class ViewerSQLitePool: @unchecked Sendable {
 
   private static func probeWriter(_ writer: ViewerSQLiteConnection) throws {
     try writer.run { database in
+      try ViewerStoreSchema.probe(database)
+      try ViewerStoreSchema.probeExplorerPlans(database)
       let statement = try ViewerSQLiteStatement(database: database, sql: "PRAGMA quick_check(1)")
       guard try statement.step(), statement.string(at: 0) == "ok" else {
         throw ViewerStoreError.corruptStore
@@ -575,6 +893,8 @@ final class ViewerSQLitePool: @unchecked Sendable {
         try ViewerStoreSchema.scalarString("PRAGMA journal_mode", database: database)
           .lowercased() == "wal",
         try ViewerStoreSchema.scalarInt64("PRAGMA synchronous", database: database) == 2,
+        try ViewerStoreSchema.scalarInt64("PRAGMA temp_store", database: database) == 2,
+        try ViewerStoreSchema.scalarInt64("PRAGMA cache_size", database: database) == -8 * 1_024,
         try ViewerStoreSchema.scalarInt64(
           "SELECT json_extract('{\"nearwire\":1}', '$.nearwire')",
           database: database
@@ -588,7 +908,9 @@ final class ViewerSQLitePool: @unchecked Sendable {
       try reader.run { database in
         guard try ViewerStoreSchema.scalarInt64("PRAGMA query_only", database: database) == 1,
           try ViewerStoreSchema.scalarInt64("PRAGMA foreign_keys", database: database) == 1,
-          try ViewerStoreSchema.scalarInt64("PRAGMA temp_store", database: database) == 2
+          try ViewerStoreSchema.scalarInt64("PRAGMA temp_store", database: database) == 2,
+          try ViewerStoreSchema.scalarInt64("PRAGMA cache_size", database: database)
+            == -8 * 1_024
         else { throw ViewerStoreError.unavailable }
       }
     }

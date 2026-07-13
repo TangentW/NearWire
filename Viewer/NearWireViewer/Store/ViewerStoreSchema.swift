@@ -3,48 +3,122 @@ import Foundation
 import SQLite3
 
 enum ViewerStoreSchema {
-  static let currentVersion: Int64 = 1
+  static let currentVersion: Int64 = 2
 
-  static func migrate(_ connection: ViewerSQLiteConnection) throws {
-    try connection.run { database in
-      let version = try scalarInt64("PRAGMA user_version", database: database)
-      guard version <= currentVersion else { throw ViewerStoreError.unsupportedSchema }
-      guard version >= 0 else { throw ViewerStoreError.corruptStore }
-      if version == 0 {
-        guard
-          try scalarInt64(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type IN ('table','view','trigger') AND name NOT LIKE 'sqlite_%'",
-            database: database
-          ) == 0
-        else { throw ViewerStoreError.corruptStore }
-        try ViewerSQLiteConnection.execute("PRAGMA auto_vacuum=INCREMENTAL", on: database)
-        try ViewerSQLiteConnection.execute("VACUUM", on: database)
-        try ViewerSQLiteConnection.execute("BEGIN IMMEDIATE", on: database)
-        do {
-          try ViewerSQLiteConnection.execute(schemaVersion1, on: database)
-          try ViewerSQLiteConnection.execute("PRAGMA user_version=1", on: database)
-          try ViewerSQLiteConnection.execute("COMMIT", on: database)
-        } catch {
-          try? ViewerSQLiteConnection.execute("ROLLBACK", on: database)
-          throw error
+  static func migrate(
+    _ connection: ViewerSQLiteConnection,
+    control: ViewerStoreMigrationControl? = nil
+  ) throws {
+    let version = try connection.run { database in
+      try scalarInt64("PRAGMA user_version", database: database)
+    }
+    guard version <= currentVersion else { throw ViewerStoreError.unsupportedSchema }
+    guard version >= 0 else { throw ViewerStoreError.corruptStore }
+    do {
+      switch version {
+      case 0:
+        try connection.run { database in
+          guard
+            try scalarInt64(
+              "SELECT COUNT(*) FROM sqlite_master WHERE type IN ('table','view','trigger') AND name NOT LIKE 'sqlite_%'",
+              database: database
+            ) == 0
+          else { throw ViewerStoreError.corruptStore }
+          try ViewerSQLiteConnection.execute("PRAGMA auto_vacuum=INCREMENTAL", on: database)
+          try ViewerSQLiteConnection.execute("VACUUM", on: database)
+          try ViewerSQLiteConnection.execute("BEGIN IMMEDIATE", on: database)
+          do {
+            try ViewerSQLiteConnection.execute(schemaVersion1, on: database)
+            for statement in schemaVersion2IndexStatements {
+              try ViewerSQLiteConnection.execute(statement, on: database)
+            }
+            try ViewerSQLiteConnection.execute("PRAGMA user_version=2", on: database)
+            try probe(
+              database,
+              requiredTemporaryStore: 1,
+              requiredCacheSize: -32 * 1_024
+            )
+            try probeExplorerPlans(database)
+            try ViewerSQLiteConnection.execute("COMMIT", on: database)
+          } catch {
+            try? ViewerSQLiteConnection.execute("ROLLBACK", on: database)
+            throw error
+          }
         }
+      case 1:
+        try control?.prepareForVersionOne()
+        let progressCheck: () -> ViewerStoreError? = { control?.progressFailure() }
+        try connection.run(
+          progressInstructionInterval: ViewerStoreMigrationControl.progressInstructionInterval,
+          progressCheck: progressCheck
+        ) { database in
+          try probe(
+            database,
+            requiresExplorerIndexes: false,
+            requiredTemporaryStore: 1,
+            requiredCacheSize: -32 * 1_024
+          )
+          try ViewerSQLiteConnection.execute("BEGIN IMMEDIATE", on: database)
+          do {
+            for (offset, statement) in schemaVersion2IndexStatements.enumerated() {
+              try control?.beforeIndex(offset + 1)
+              try ViewerSQLiteConnection.execute(statement, on: database)
+            }
+            try control?.beforeValidation()
+            try ViewerSQLiteConnection.execute("PRAGMA user_version=2", on: database)
+            try probe(
+              database,
+              requiredTemporaryStore: 1,
+              requiredCacheSize: -32 * 1_024
+            )
+            try probeExplorerPlans(database)
+            try ViewerSQLiteConnection.execute("COMMIT", on: database)
+          } catch {
+            try? ViewerSQLiteConnection.execute("ROLLBACK", on: database)
+            throw error
+          }
+        }
+      case 2:
+        try connection.run { database in
+          try probe(
+            database,
+            requiredTemporaryStore: 1,
+            requiredCacheSize: -32 * 1_024
+          )
+          try probeExplorerPlans(database)
+        }
+      default:
+        throw ViewerStoreError.unsupportedSchema
       }
-      try probe(database)
+    } catch {
+      control?.reportFailure(error)
+      throw error
     }
   }
 
-  static func probe(_ database: OpaquePointer) throws {
+  static func probe(
+    _ database: OpaquePointer,
+    requiresExplorerIndexes: Bool = true,
+    requiredTemporaryStore: Int64 = 2,
+    requiredCacheSize: Int64 = -8 * 1_024
+  ) throws {
     guard try scalarInt64("PRAGMA foreign_keys", database: database) == 1,
       try scalarInt64("PRAGMA secure_delete", database: database) == 1,
-      try scalarString("PRAGMA temp_store", database: database) == "2",
+      try scalarInt64("PRAGMA temp_store", database: database) == requiredTemporaryStore,
+      try scalarInt64("PRAGMA cache_size", database: database) == requiredCacheSize,
       try scalarInt64("PRAGMA auto_vacuum", database: database) == 2
     else { throw ViewerStoreError.unavailable }
-    let required = [
+    var required = [
       "Recordings", "RecordingVersions", "DeviceSessions", "DeviceSessionVersions",
       "InstallationAliases", "Events", "EventDispositionVersions", "PolicyVersions",
       "DropVersions", "GapVersions", "AnnotationVersions", "StoreMetadata", "Tombstones",
       "EventSearch",
     ]
+    if requiresExplorerIndexes {
+      required.append(contentsOf: [
+        "EventCausalityLookup", "GapTimelineAllDevices", "GapTimelineByDevice",
+      ])
+    }
     let statement = try ViewerSQLiteStatement(
       database: database,
       sql: "SELECT 1 FROM sqlite_master WHERE name=?1 LIMIT 1"
@@ -103,6 +177,34 @@ enum ViewerStoreSchema {
     )
     try ftsProbe.bind("\"nearwire-feature-probe\"", at: 1)
     guard try ftsProbe.step() else { throw ViewerStoreError.unavailable }
+  }
+
+  static func probeExplorerPlans(_ database: OpaquePointer) throws {
+    let requiredPlans = [
+      (
+        "SELECT e.rowID FROM Events e WHERE e.recordingID=1 AND e.deviceSessionID=1 AND e.eventUUID='00000000-0000-0000-0000-000000000000' AND e.rowID<=9223372036854775807 ORDER BY e.rowID LIMIT 9",
+        "EventCausalityLookup"
+      ),
+      (
+        "SELECT g.rowID FROM GapVersions g WHERE g.recordingID=1 AND g.rowID<=9223372036854775807 ORDER BY g.lastViewerWallMs,g.rowID LIMIT 32",
+        "GapTimelineAllDevices"
+      ),
+      (
+        "SELECT g.rowID FROM GapVersions g WHERE g.recordingID=1 AND g.deviceSessionID=1 AND g.rowID<=9223372036854775807 ORDER BY g.lastViewerWallMs,g.rowID LIMIT 32",
+        "GapTimelineByDevice"
+      ),
+    ]
+    for (query, expectedIndex) in requiredPlans {
+      let statement = try ViewerSQLiteStatement(
+        database: database,
+        sql: "EXPLAIN QUERY PLAN \(query)"
+      )
+      var details: [String] = []
+      while try statement.step() { details.append(statement.string(at: 3)) }
+      guard details.contains(where: { $0.contains(expectedIndex) }),
+        !details.contains(where: { $0.contains("USE TEMP B-TREE") })
+      else { throw ViewerStoreError.unavailable }
+    }
   }
 
   static func scalarInt64(_ sql: String, database: OpaquePointer) throws -> Int64 {
@@ -328,6 +430,12 @@ enum ViewerStoreSchema {
 
     INSERT INTO StoreMetadata(key, integerValue) VALUES ('logicalQuotaBytes', 0);
     """
+
+  static let schemaVersion2IndexStatements = [
+    "CREATE INDEX EventCausalityLookup ON Events(recordingID, deviceSessionID, eventUUID, rowID)",
+    "CREATE INDEX GapTimelineAllDevices ON GapVersions(recordingID, lastViewerWallMs, rowID)",
+    "CREATE INDEX GapTimelineByDevice ON GapVersions(recordingID, deviceSessionID, lastViewerWallMs, rowID)",
+  ]
 }
 
 enum ViewerCanonicalJSON {

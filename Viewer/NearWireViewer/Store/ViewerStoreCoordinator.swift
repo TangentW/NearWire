@@ -9,11 +9,9 @@ protocol ViewerSessionJournaling: AnyObject, Sendable {
     monotonicNanoseconds: UInt64
   )
   func sessionStarted(runtimeLogicalID: UUID, _ context: ViewerAdmissionSessionContext)
-  func uplinkCommitted(
-    runtimeLogicalID: UUID,
-    connectionID: UUID,
-    event: WireReceivedEvent,
-    initialDisposition: ViewerStoredDisposition
+  func eventCommitted(
+    _ observation: ViewerCommittedEventObservation,
+    outcome: @escaping @Sendable (ViewerEventJournalOutcome) -> Void
   )
   func uplinkTerminated(
     runtimeLogicalID: UUID,
@@ -21,12 +19,6 @@ protocol ViewerSessionJournaling: AnyObject, Sendable {
     direction: EventDirection,
     wireSequence: UInt64,
     disposition: ViewerStoredDisposition,
-    monotonicNanoseconds: UInt64
-  )
-  func transportAdmitted(
-    runtimeLogicalID: UUID,
-    connectionID: UUID,
-    events: [ViewerDownlinkJournalEvent],
     monotonicNanoseconds: UInt64
   )
   func policyChanged(
@@ -58,24 +50,16 @@ protocol ViewerSessionJournaling: AnyObject, Sendable {
 final class ViewerNoopSessionJournal: ViewerSessionJournaling, @unchecked Sendable {
   func runtimeStarted(logicalID: UUID, wallMilliseconds: Int64, monotonicNanoseconds: UInt64) {}
   func sessionStarted(runtimeLogicalID: UUID, _ context: ViewerAdmissionSessionContext) {}
-  func uplinkCommitted(
-    runtimeLogicalID: UUID,
-    connectionID: UUID,
-    event: WireReceivedEvent,
-    initialDisposition: ViewerStoredDisposition
-  ) {}
+  func eventCommitted(
+    _ observation: ViewerCommittedEventObservation,
+    outcome: @escaping @Sendable (ViewerEventJournalOutcome) -> Void
+  ) { outcome(.unavailable) }
   func uplinkTerminated(
     runtimeLogicalID: UUID,
     connectionID: UUID,
     direction: EventDirection,
     wireSequence: UInt64,
     disposition: ViewerStoredDisposition,
-    monotonicNanoseconds: UInt64
-  ) {}
-  func transportAdmitted(
-    runtimeLogicalID: UUID,
-    connectionID: UUID,
-    events: [ViewerDownlinkJournalEvent],
     monotonicNanoseconds: UInt64
   ) {}
   func policyChanged(
@@ -110,6 +94,8 @@ final class ViewerStoreCoordinator: @unchecked Sendable, CustomReflectable,
   struct Services: @unchecked Sendable {
     let eventStore: ViewerEventStore
     let maintenance: ViewerStoreMaintenance
+    let catalog: ViewerStoreCatalogService
+    let diagnostics: ViewerStoreDiagnosticService
     let query: ViewerStoreQueryService
     let export: ViewerStoreExportService
     let preferences: ViewerStoragePreferences
@@ -140,6 +126,12 @@ final class ViewerStoreCoordinator: @unchecked Sendable, CustomReflectable,
     var lastWireSequence: UInt64?
   }
 
+  private enum RuntimeEndState {
+    case idle
+    case ending
+    case ended
+  }
+
   private let pool: ViewerSQLitePool
   private let preferences: ViewerStoragePreferences
   private let eventStore: ViewerEventStore
@@ -163,6 +155,12 @@ final class ViewerStoreCoordinator: @unchecked Sendable, CustomReflectable,
   private var nondurableUnavailableFirstWallMilliseconds: Int64?
   private var nondurableUnavailableLastWallMilliseconds: Int64?
   private let preparationDropLock = NSLock()
+  private let storageCloseLock = NSLock()
+  private let storageCloseGroup = DispatchGroup()
+  private let runtimeEndLock = NSLock()
+  private var storageCloseStarted = false
+  private var runtimeEndState = RuntimeEndState.idle
+  private var runtimeEndWaiters: [CheckedContinuation<Bool, Never>] = []
   private var preparationDrops: [UUID: Int64] = [:]
   private var unattributedPreparationDrops: Int64 = 0
 
@@ -171,6 +169,7 @@ final class ViewerStoreCoordinator: @unchecked Sendable, CustomReflectable,
     preferences: ViewerStoragePreferences = ViewerStoragePreferences(),
     scheduler: ViewerAdmissionScheduler = .live,
     diskGuard: ViewerStoreDiskGuard = .live,
+    migrationControl: ViewerStoreMigrationControl? = nil,
     writeGate: @escaping @Sendable () throws -> Void = {},
     maintenanceExecutionGate: @escaping @Sendable () -> Void = {}
   ) throws {
@@ -178,7 +177,11 @@ final class ViewerStoreCoordinator: @unchecked Sendable, CustomReflectable,
     let pipelineBudget = ViewerJournalPipelineBudget()
     self.pipelineBudget = pipelineBudget
     preparationQueue = ViewerJournalPreparationQueue(budget: pipelineBudget)
-    pool = try ViewerSQLitePool(migrating: paths, diskGuard: diskGuard)
+    pool = try ViewerSQLitePool(
+      migrating: paths,
+      diskGuard: diskGuard,
+      migrationControl: migrationControl
+    )
     let preferenceBox = ViewerStoragePreferenceBox(preferences)
     let statusMetadata = ViewerStoreStatusMetadataBox()
     let statusSignal = ViewerStoreStatusSignal()
@@ -265,6 +268,8 @@ final class ViewerStoreCoordinator: @unchecked Sendable, CustomReflectable,
     Services(
       eventStore: eventStore,
       maintenance: maintenance,
+      catalog: ViewerStoreCatalogService(pool: pool),
+      diagnostics: ViewerStoreDiagnosticService(pool: pool, leases: leases),
       query: ViewerStoreQueryService(pool: pool, leases: leases),
       export: ViewerStoreExportService(pool: pool, leases: leases),
       preferences: preferences,
@@ -383,23 +388,29 @@ final class ViewerStoreCoordinator: @unchecked Sendable, CustomReflectable,
     }
   }
 
-  func uplinkCommitted(
-    connectionID: UUID,
-    event: WireReceivedEvent,
-    initialDisposition: ViewerStoredDisposition
+  func eventCommitted(
+    _ observation: ViewerCommittedEventObservation,
+    outcome: @escaping @Sendable (ViewerEventJournalOutcome) -> Void
   ) {
+    let connectionID = observation.key.connectionID
     guard
       let pipelineBytes = try? ViewerStoreQuota.eventPipelineReservation(
-        canonicalEventBytes: event.deterministicEncodedByteCount
+        canonicalEventBytes: observation.deterministicEventBytes
       )
     else {
       recordPreparationDrop(connectionID: connectionID)
+      outcome(.unavailable)
       return
     }
-    let accepted = preparationQueue.offer(bytes: Int64(pipelineBytes)) { [weak self] reservation in
-      guard let self else { return }
+    let accepted = preparationQueue.offer(bytes: Int64(pipelineBytes)) {
+      [weak self] reservation in
+      guard let self else {
+        outcome(.unavailable)
+        return
+      }
       guard let context = self.devices[connectionID] else {
         self.recordNondurableUnavailableIfTracked(connectionID: connectionID, count: 1)
+        outcome(.unavailable)
         return
       }
       self.flushPreparationDrops(connectionID: connectionID, context: context)
@@ -407,31 +418,37 @@ final class ViewerStoreCoordinator: @unchecked Sendable, CustomReflectable,
         let prepared = try ViewerPreparedEventObservation(
           recording: context.recording,
           device: context.device,
-          envelope: event.envelope,
-          viewerMonotonicNanoseconds: event.receivedAtNanoseconds,
-          deterministicEventBytes: event.deterministicEncodedByteCount,
-          initialDisposition: initialDisposition
+          committed: observation
         )
-        if self.ingress.admit(prepared, reservation: reservation) != .admitted {
+        if self.ingress.admit(
+          prepared,
+          reservation: reservation,
+          outcome: outcome
+        ) != .admitted {
           self.recordGap(
             context: context,
             reason: "storeIngressFull",
             count: 1,
-            direction: .appToViewer,
-            wireSequence: event.envelope.sequence.rawValue
+            direction: observation.key.direction,
+            wireSequence: observation.key.wireSequence
           )
+          outcome(.unavailable)
         }
       } catch {
         self.recordGap(
           context: context,
           reason: "storePreparationFailed",
           count: 1,
-          direction: .appToViewer,
-          wireSequence: event.envelope.sequence.rawValue
+          direction: observation.key.direction,
+          wireSequence: observation.key.wireSequence
         )
+        outcome(.unavailable)
       }
     }
-    if !accepted { recordPreparationDrop(connectionID: connectionID) }
+    if !accepted {
+      recordPreparationDrop(connectionID: connectionID)
+      outcome(.unavailable)
+    }
   }
 
   func uplinkTerminated(
@@ -511,60 +528,6 @@ final class ViewerStoreCoordinator: @unchecked Sendable, CustomReflectable,
     }
     if !accepted { orphanPreparationDrops(connectionID: connectionID, additional: 1) }
     return accepted
-  }
-
-  func transportAdmitted(
-    connectionID: UUID,
-    events: [ViewerDownlinkJournalEvent],
-    monotonicNanoseconds: UInt64
-  ) {
-    for event in events {
-      guard
-        let pipelineBytes = try? ViewerStoreQuota.eventPipelineReservation(
-          canonicalEventBytes: event.deterministicEncodedByteCount
-        )
-      else {
-        recordPreparationDrop(connectionID: connectionID)
-        continue
-      }
-      let accepted = preparationQueue.offer(bytes: Int64(pipelineBytes)) {
-        [weak self, event] reservation in
-        guard let self else { return }
-        guard let context = self.devices[connectionID] else {
-          self.recordNondurableUnavailableIfTracked(connectionID: connectionID, count: 1)
-          return
-        }
-        self.flushPreparationDrops(connectionID: connectionID, context: context)
-        do {
-          let prepared = try ViewerPreparedEventObservation(
-            recording: context.recording,
-            device: context.device,
-            envelope: event.envelope,
-            viewerMonotonicNanoseconds: monotonicNanoseconds,
-            deterministicEventBytes: event.deterministicEncodedByteCount,
-            initialDisposition: .transportAdmitted
-          )
-          if self.ingress.admit(prepared, reservation: reservation) != .admitted {
-            self.recordGap(
-              context: context,
-              reason: "downlinkJournalFull",
-              count: 1,
-              direction: .viewerToApp,
-              wireSequence: event.envelope.sequence.rawValue
-            )
-          }
-        } catch {
-          self.recordGap(
-            context: context,
-            reason: "downlinkJournalPreparationFailed",
-            count: 1,
-            direction: .viewerToApp,
-            wireSequence: event.envelope.sequence.rawValue
-          )
-        }
-      }
-      if !accepted { recordPreparationDrop(connectionID: connectionID) }
-    }
   }
 
   func policyChanged(
@@ -707,11 +670,11 @@ final class ViewerStoreCoordinator: @unchecked Sendable, CustomReflectable,
   }
 
   func closeStorage() {
-    maintenanceOwner.close()
-    pool.close()
+    closeOwnedStorage()
   }
 
   func runtimeEnded(wallMilliseconds: Int64, monotonicNanoseconds: UInt64) async {
+    guard await claimRuntimeEndOwnership() else { return }
     maintenanceOwner.runtimeEnded()
     maintenanceOwner.waitForQuiescence()
     await withCheckedContinuation { continuation in
@@ -772,17 +735,60 @@ final class ViewerStoreCoordinator: @unchecked Sendable, CustomReflectable,
           self.runtimeLogicalID = nil
           self.runtimeStartedWallMilliseconds = nil
           self.runtimeStartedMonotonicNanoseconds = nil
-          self.maintenanceOwner.close()
-          self.pool.close()
+          self.closeOwnedStorage()
           continuation.resume()
         }
       }
       if !accepted {
-        self.maintenanceOwner.close()
-        self.pool.close()
+        self.closeOwnedStorage()
         continuation.resume()
       }
     }
+    finishRuntimeEndOwnership()
+  }
+
+  private func claimRuntimeEndOwnership() async -> Bool {
+    await withCheckedContinuation { continuation in
+      runtimeEndLock.lock()
+      switch runtimeEndState {
+      case .idle:
+        runtimeEndState = .ending
+        runtimeEndLock.unlock()
+        continuation.resume(returning: true)
+      case .ending:
+        runtimeEndWaiters.append(continuation)
+        runtimeEndLock.unlock()
+      case .ended:
+        runtimeEndLock.unlock()
+        continuation.resume(returning: false)
+      }
+    }
+  }
+
+  private func finishRuntimeEndOwnership() {
+    runtimeEndLock.lock()
+    runtimeEndState = .ended
+    let waiters = runtimeEndWaiters
+    runtimeEndWaiters.removeAll(keepingCapacity: false)
+    runtimeEndLock.unlock()
+    for waiter in waiters { waiter.resume(returning: false) }
+  }
+
+  private func closeOwnedStorage() {
+    storageCloseLock.lock()
+    if storageCloseStarted {
+      storageCloseLock.unlock()
+      storageCloseGroup.wait()
+      return
+    }
+    storageCloseStarted = true
+    storageCloseGroup.enter()
+    storageCloseLock.unlock()
+
+    maintenanceOwner.close()
+    statusSignal.deactivateAndWait()
+    pool.close()
+    storageCloseGroup.leave()
   }
 
   private func recordPreparationDrop(connectionID: UUID) {
@@ -905,6 +911,7 @@ final class ViewerStoreCoordinator: @unchecked Sendable, CustomReflectable,
     let device = try eventStore.beginDeviceSession(
       recording: recording,
       installationID: context.appHello.installationID.rawValue,
+      logicalID: context.connectionID,
       wallMilliseconds: Self.wallMilliseconds(),
       monotonicNanoseconds: DispatchTime.now().uptimeNanoseconds,
       partialHistory: partial,
@@ -1296,6 +1303,11 @@ enum ViewerStoreReopenResourceEvent: Equatable, Sendable {
   case terminalCloseWaiting
 }
 
+enum ViewerStoreStartupMode: Equatable, Sendable {
+  case synchronous
+  case asynchronous
+}
+
 private final class ViewerStoreReopenConstructionLease: @unchecked Sendable {
   private let completion = DispatchGroup()
 
@@ -1330,7 +1342,7 @@ final class ViewerStoreRuntime: ViewerSessionJournaling, @unchecked Sendable,
   }
 
   private enum ReopenRequest: Equatable {
-    case automatic(runtimeLogicalID: UUID)
+    case automatic(runtimeLogicalID: UUID?)
     case explicit(runtimeLogicalID: UUID?)
   }
 
@@ -1338,6 +1350,7 @@ final class ViewerStoreRuntime: ViewerSessionJournaling, @unchecked Sendable,
     let request: ReopenRequest
     let generation: UInt64
     let lease: ViewerStoreReopenConstructionLease
+    let migrationToken: ViewerStoreMigrationToken
   }
 
   private let lock = NSLock()
@@ -1345,10 +1358,15 @@ final class ViewerStoreRuntime: ViewerSessionJournaling, @unchecked Sendable,
   private let preferences: ViewerStoragePreferences
   private let scheduler: ViewerAdmissionScheduler
   private let paths: ViewerStorePaths?
+  private let diskGuard: ViewerStoreDiskGuard
+  private let migrationTemporaryDirectory: URL
+  private let automaticMigrationAuthorization: @Sendable (URL) -> Bool
+  private let migrationPhaseGate: @Sendable (ViewerStoreMigrationPhase) throws -> Void
   private let coordinatorWriteGate: @Sendable () throws -> Void
   private let reopenExecutionGate: @Sendable () -> Void
   private let reopenResourceObserver: @Sendable (ViewerStoreReopenResourceEvent) -> Void
   private let outwardStatusSignal = ViewerStoreStatusSignal()
+  let explorerGateway: ViewerStoreExplorerGateway
   private var coordinator: ViewerStoreCoordinator?
   private var coordinatorRuntimeLogicalID: UUID?
   private var runtimeContext: RuntimeContext?
@@ -1359,6 +1377,7 @@ final class ViewerStoreRuntime: ViewerSessionJournaling, @unchecked Sendable,
   private var reopenRequest: ReopenRequest?
   private var reopenAttemptGeneration: UInt64 = 0
   private var reopenConstruction: ReopenConstruction?
+  private var migrationStatus: ViewerStoreMigrationStatus?
   private var needsRuntimeReopen = false
   private var coordinatorNeedsRecovery = false
   private var settingsRevision: UInt64 = 0
@@ -1370,6 +1389,14 @@ final class ViewerStoreRuntime: ViewerSessionJournaling, @unchecked Sendable,
     preferences: ViewerStoragePreferences = ViewerStoragePreferences(),
     scheduler: ViewerAdmissionScheduler = .live,
     paths: ViewerStorePaths? = try? ViewerStorePaths.applicationSupport(),
+    startupMode: ViewerStoreStartupMode = .synchronous,
+    diskGuard: ViewerStoreDiskGuard = .live,
+    migrationTemporaryDirectory: URL = FileManager.default.temporaryDirectory,
+    automaticMigrationAuthorization: @escaping @Sendable (URL) -> Bool = {
+      ViewerStoreAutomaticMigrationGate.shared.claim($0)
+    },
+    migrationPhaseGate: @escaping @Sendable (ViewerStoreMigrationPhase) throws -> Void = { _ in },
+    explorerOperationExecutionGate: @escaping @Sendable () -> Void = {},
     coordinatorWriteGate: @escaping @Sendable () throws -> Void = {},
     reopenExecutionGate: @escaping @Sendable () -> Void = {},
     reopenResourceObserver: @escaping @Sendable (ViewerStoreReopenResourceEvent) -> Void = { _ in }
@@ -1377,16 +1404,30 @@ final class ViewerStoreRuntime: ViewerSessionJournaling, @unchecked Sendable,
     self.preferences = preferences
     self.scheduler = scheduler
     self.paths = paths
+    self.diskGuard = diskGuard
+    self.migrationTemporaryDirectory = migrationTemporaryDirectory
+    self.automaticMigrationAuthorization = automaticMigrationAuthorization
+    self.migrationPhaseGate = migrationPhaseGate
+    explorerGateway = ViewerStoreExplorerGateway(
+      operationExecutionGate: explorerOperationExecutionGate
+    )
     self.coordinatorWriteGate = coordinatorWriteGate
     self.reopenExecutionGate = reopenExecutionGate
     self.reopenResourceObserver = reopenResourceObserver
-    coordinator = paths.flatMap {
-      try? ViewerStoreCoordinator(
-        paths: $0,
-        preferences: preferences,
-        scheduler: scheduler,
-        writeGate: coordinatorWriteGate
-      )
+    switch startupMode {
+    case .synchronous:
+      coordinator = paths.flatMap {
+        try? ViewerStoreCoordinator(
+          paths: $0,
+          preferences: preferences,
+          scheduler: scheduler,
+          diskGuard: diskGuard,
+          writeGate: coordinatorWriteGate
+        )
+      }
+    case .asynchronous:
+      coordinator = nil
+      needsRuntimeReopen = true
     }
     outwardStatusSignal.setSnapshotProvider { [weak self] in
       guard let self else { return nil }
@@ -1400,6 +1441,10 @@ final class ViewerStoreRuntime: ViewerSessionJournaling, @unchecked Sendable,
     let signal = outwardStatusSignal
     coordinator?.services.statusSignal.setHandler { [weak signal] snapshot in
       signal?.publish(changedRecordingIDs: Set(snapshot.changedRecordingIDs))
+    }
+    if let coordinator { explorerGateway.install(coordinator) }
+    if startupMode == .asynchronous, paths != nil {
+      scheduleReopen(.automatic(runtimeLogicalID: nil))
     }
   }
 
@@ -1428,11 +1473,13 @@ final class ViewerStoreRuntime: ViewerSessionJournaling, @unchecked Sendable,
     lock.lock()
     let coordinator = coordinator
     let needsRecovery = coordinatorNeedsRecovery
+    let migrationStatus = migrationStatus
     lock.unlock()
     let current = coordinator?.services.eventStore.status()
     if needsRecovery, let current {
       return ViewerStoreStatus(
         state: .unavailable,
+        migration: migrationStatus,
         capacityBytes: current.capacityBytes,
         logicalQuotaBytes: current.logicalQuotaBytes,
         allocatedFootprintBytes: current.allocatedFootprintBytes,
@@ -1445,6 +1492,7 @@ final class ViewerStoreRuntime: ViewerSessionJournaling, @unchecked Sendable,
     return current
       ?? ViewerStoreStatus(
         state: .unavailable,
+        migration: migrationStatus,
         capacityBytes: preferences.load().capacityBytes,
         logicalQuotaBytes: 0,
         allocatedFootprintBytes: 0,
@@ -1497,6 +1545,7 @@ final class ViewerStoreRuntime: ViewerSessionJournaling, @unchecked Sendable,
     lock.unlock()
     if reopenConstructionLease != nil { reopenResourceObserver(.terminalCloseWaiting) }
     reopenConstructionLease?.waitSynchronously()
+    if let coordinator { explorerGateway.sealAndWait(originatingFrom: coordinator) }
     coordinator?.closeStorage()
   }
 
@@ -1512,7 +1561,9 @@ final class ViewerStoreRuntime: ViewerSessionJournaling, @unchecked Sendable,
       return
     }
     invalidateRecoveryAttemptLocked()
-    invalidateReopenAttemptLocked()
+    if reopenRequest != .automatic(runtimeLogicalID: nil) {
+      invalidateReopenAttemptLocked()
+    }
     runtimeContext = RuntimeContext(
       logicalID: logicalID,
       wallMilliseconds: wallMilliseconds,
@@ -1582,15 +1633,15 @@ final class ViewerStoreRuntime: ViewerSessionJournaling, @unchecked Sendable,
     }
   }
 
-  func uplinkCommitted(
-    runtimeLogicalID: UUID,
-    connectionID: UUID,
-    event: WireReceivedEvent,
-    initialDisposition: ViewerStoredDisposition
+  func eventCommitted(
+    _ observation: ViewerCommittedEventObservation,
+    outcome: @escaping @Sendable (ViewerEventJournalOutcome) -> Void
   ) {
+    let runtimeLogicalID = observation.key.runtimeLogicalID
     lock.lock()
     guard runtimeContext?.logicalID == runtimeLogicalID else {
       lock.unlock()
+      outcome(.unavailable)
       return
     }
     let coordinator =
@@ -1598,11 +1649,11 @@ final class ViewerStoreRuntime: ViewerSessionJournaling, @unchecked Sendable,
       ? nil : coordinator
     if coordinator == nil { addMissedLocked(1) }
     lock.unlock()
-    coordinator?.uplinkCommitted(
-      connectionID: connectionID,
-      event: event,
-      initialDisposition: initialDisposition
-    )
+    guard let coordinator else {
+      outcome(.unavailable)
+      return
+    }
+    coordinator.eventCommitted(observation, outcome: outcome)
   }
 
   func uplinkTerminated(
@@ -1628,29 +1679,6 @@ final class ViewerStoreRuntime: ViewerSessionJournaling, @unchecked Sendable,
       direction: direction,
       wireSequence: wireSequence,
       disposition: disposition,
-      monotonicNanoseconds: monotonicNanoseconds
-    )
-  }
-
-  func transportAdmitted(
-    runtimeLogicalID: UUID,
-    connectionID: UUID,
-    events: [ViewerDownlinkJournalEvent],
-    monotonicNanoseconds: UInt64
-  ) {
-    lock.lock()
-    guard runtimeContext?.logicalID == runtimeLogicalID else {
-      lock.unlock()
-      return
-    }
-    let coordinator =
-      coordinatorNeedsRecovery || coordinatorRuntimeLogicalID != runtimeLogicalID
-      ? nil : coordinator
-    if coordinator == nil { addMissedLocked(Int64(events.count)) }
-    lock.unlock()
-    coordinator?.transportAdmitted(
-      connectionID: connectionID,
-      events: events,
       monotonicNanoseconds: monotonicNanoseconds
     )
   }
@@ -1810,6 +1838,7 @@ final class ViewerStoreRuntime: ViewerSessionJournaling, @unchecked Sendable,
       reopenResourceObserver(.runtimeEndWaiting)
       await reopenConstructionLease.waitUntilFinished()
     }
+    if let coordinator { explorerGateway.sealAndWait(originatingFrom: coordinator) }
     await coordinator?.runtimeEnded(
       wallMilliseconds: wallMilliseconds,
       monotonicNanoseconds: monotonicNanoseconds
@@ -1895,10 +1924,12 @@ final class ViewerStoreRuntime: ViewerSessionJournaling, @unchecked Sendable,
       return
     }
     let constructionLease = ViewerStoreReopenConstructionLease()
+    let migrationToken = ViewerStoreMigrationToken()
     reopenConstruction = ReopenConstruction(
       request: request,
       generation: generation,
-      lease: constructionLease
+      lease: constructionLease,
+      migrationToken: migrationToken
     )
     lock.unlock()
     defer {
@@ -1910,11 +1941,31 @@ final class ViewerStoreRuntime: ViewerSessionJournaling, @unchecked Sendable,
     }
 
     reopenExecutionGate()
+    let isAutomatic: Bool
+    switch request {
+    case .automatic: isAutomatic = true
+    case .explicit: isAutomatic = false
+    }
     guard let paths,
       let replacement = try? ViewerStoreCoordinator(
         paths: paths,
         preferences: preferences,
         scheduler: scheduler,
+        diskGuard: diskGuard,
+        migrationControl: ViewerStoreMigrationControl(
+          paths: paths,
+          temporaryDirectory: migrationTemporaryDirectory,
+          diskGuard: diskGuard,
+          authorizeAttempt: { [automaticMigrationAuthorization] in
+            !isAutomatic || automaticMigrationAuthorization(paths.database)
+          },
+          isCancelled: { migrationToken.isCancelled },
+          phaseObserver: { [weak self, weak migrationToken] phase in
+            guard let migrationToken else { return }
+            self?.migrationPhaseChanged(phase, token: migrationToken)
+          },
+          phaseGate: migrationPhaseGate
+        ),
         writeGate: coordinatorWriteGate
       )
     else {
@@ -1937,6 +1988,7 @@ final class ViewerStoreRuntime: ViewerSessionJournaling, @unchecked Sendable,
       reopenResourceObserver(.staleCoordinatorClosed)
       return
     }
+    explorerGateway.install(replacement)
     let runtimeContext = runtimeContext
     let sessions = activeSessions.values.sorted {
       $0.connectionID.uuidString < $1.connectionID.uuidString
@@ -1948,6 +2000,7 @@ final class ViewerStoreRuntime: ViewerSessionJournaling, @unchecked Sendable,
     let recoveryAttempt = runtimeContext.map { _ in beginRecoveryAttemptLocked() }
     clearReopenRequestLocked()
     lock.unlock()
+    clearMigrationStatus(token: migrationToken)
     outwardStatusSignal.publish()
     guard let runtimeContext, let recoveryAttempt else { return }
     let accepted = replacement.recoverRuntimeAndSessions(
@@ -2003,10 +2056,10 @@ final class ViewerStoreRuntime: ViewerSessionJournaling, @unchecked Sendable,
   ) -> ViewerStoreReopenConstructionLease? {
     guard let construction = reopenConstruction else { return nil }
     switch construction.request {
-    case .automatic(let requestRuntimeLogicalID),
+    case .automatic(.some(let requestRuntimeLogicalID)),
       .explicit(.some(let requestRuntimeLogicalID)):
       return requestRuntimeLogicalID == runtimeLogicalID ? construction.lease : nil
-    case .explicit(.none):
+    case .automatic(.none), .explicit(.none):
       return nil
     }
   }
@@ -2023,8 +2076,10 @@ final class ViewerStoreRuntime: ViewerSessionJournaling, @unchecked Sendable,
 
   private func reopenRequestMatchesCurrentRuntimeLocked(_ request: ReopenRequest) -> Bool {
     switch request {
-    case .automatic(let runtimeLogicalID), .explicit(.some(let runtimeLogicalID)):
+    case .automatic(.some(let runtimeLogicalID)), .explicit(.some(let runtimeLogicalID)):
       return runtimeContext?.logicalID == runtimeLogicalID
+    case .automatic(.none):
+      return true
     case .explicit(.none):
       return runtimeContext == nil
     }
@@ -2036,6 +2091,7 @@ final class ViewerStoreRuntime: ViewerSessionJournaling, @unchecked Sendable,
   }
 
   private func invalidateReopenAttemptLocked() {
+    reopenConstruction?.migrationToken.cancel()
     reopenAttemptGeneration =
       reopenAttemptGeneration == UInt64.max ? 1 : reopenAttemptGeneration + 1
     clearReopenRequestLocked()
@@ -2056,6 +2112,30 @@ final class ViewerStoreRuntime: ViewerSessionJournaling, @unchecked Sendable,
     }
     lock.unlock()
     lease.finish()
+  }
+
+  private func migrationPhaseChanged(
+    _ phase: ViewerStoreMigrationPhase,
+    token: ViewerStoreMigrationToken
+  ) {
+    lock.lock()
+    guard reopenConstruction?.migrationToken === token else {
+      lock.unlock()
+      return
+    }
+    migrationStatus = ViewerStoreMigrationStatus(phase)
+    lock.unlock()
+    outwardStatusSignal.publish()
+  }
+
+  private func clearMigrationStatus(token: ViewerStoreMigrationToken) {
+    lock.lock()
+    guard reopenConstruction?.migrationToken === token else {
+      lock.unlock()
+      return
+    }
+    migrationStatus = nil
+    lock.unlock()
   }
 
   private func beginRecoveryAttemptLocked() -> (

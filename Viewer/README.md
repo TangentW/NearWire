@@ -14,6 +14,8 @@ After admission, the Viewer owns up to 16 independent App sessions. It completes
 
 The Viewer also records bounded local history through three serialized system-SQLite connections. Storage configuration and safe status are available in the main window. Local schema ownership, permissions, quota and retention semantics, gaps, recovery, query snapshots, and unencrypted JSON export disclosure are documented in [Viewer-Local-Store.md](../Documentation/Viewer-Local-Store.md).
 
+The three-column Event Explorer, transient-versus-recorded semantics, source/device materialization, filtering, pause behavior, bounded renderers, causality inspection, recording operations, JSON export, and memory-only Viewer-to-App composer are documented in [Viewer-Event-Explorer.md](../Documentation/Viewer-Event-Explorer.md).
+
 Identity lifecycle, pairing, listener replacement, admission limits, recovery, sandbox, privacy behavior, and the three-phase stable-signer XCTest command sequence are documented in [Viewer-Foundation.md](../Documentation/Viewer-Foundation.md).
 
 Session ownership, logical correlation, policy negotiation, queue atomicity, receive backpressure, preferences, and the operational workspace are documented in [Viewer-MultiDevice-Flow-Control.md](../Documentation/Viewer-MultiDevice-Flow-Control.md).

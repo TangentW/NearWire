@@ -35,6 +35,7 @@ struct ViewerPreparedEventObservation: Sendable {
   let deterministicEventBytes: Int
   let quotaBytes: Int64
   let initialDisposition: ViewerStoredDisposition?
+  let durableProjection: ViewerDurableEventProjection
 
   init(
     recording: ViewerRecordingHandle,
@@ -50,6 +51,11 @@ struct ViewerPreparedEventObservation: Sendable {
     deterministicEventBytes = event.deterministicEncodedByteCount
     quotaBytes = try ViewerStoreQuota.eventReservation(canonicalEventBytes: deterministicEventBytes)
     initialDisposition = .consumerAccepted
+    durableProjection = try ViewerDurableEventProjection(
+      envelope: event.envelope,
+      canonicalContent: canonicalContent,
+      initialDisposition: .consumerAccepted
+    )
   }
 
   init(
@@ -73,7 +79,36 @@ struct ViewerPreparedEventObservation: Sendable {
     self.deterministicEventBytes = deterministicEventBytes
     quotaBytes = try ViewerStoreQuota.eventReservation(canonicalEventBytes: deterministicEventBytes)
     self.initialDisposition = initialDisposition
+    durableProjection = try ViewerDurableEventProjection(
+      envelope: envelope,
+      canonicalContent: canonicalContent,
+      initialDisposition: initialDisposition
+    )
   }
+
+  init(
+    recording: ViewerRecordingHandle,
+    device: ViewerDeviceSessionHandle,
+    committed observation: ViewerCommittedEventObservation
+  ) throws {
+    self.recording = recording
+    self.device = device
+    envelope = observation.envelope
+    viewerMonotonicNanoseconds = observation.viewerMonotonicNanoseconds
+    viewerWallMilliseconds = observation.viewerWallMilliseconds
+    canonicalContent = observation.durableProjection.canonicalContent
+    deterministicEventBytes = observation.deterministicEventBytes
+    quotaBytes = try ViewerStoreQuota.eventReservation(
+      canonicalEventBytes: observation.deterministicEventBytes
+    )
+    initialDisposition = observation.durableProjection.initialDisposition
+    durableProjection = observation.durableProjection
+  }
+}
+
+struct ViewerEventStoreCommitResult: Equatable, Sendable {
+  let rowID: Int64
+  let outcome: ViewerEventJournalOutcome
 }
 
 extension ViewerPreparedEventObservation: CustomReflectable, CustomStringConvertible,
@@ -182,6 +217,7 @@ struct ViewerStoreStatus: Equatable, Sendable {
   }
 
   let state: State
+  let migration: ViewerStoreMigrationStatus?
   let capacityBytes: Int64
   let logicalQuotaBytes: Int64
   let allocatedFootprintBytes: Int64
@@ -189,6 +225,59 @@ struct ViewerStoreStatus: Equatable, Sendable {
   let pinnedQuotaBytes: Int64
   let estimatedRetainedDurationMilliseconds: Int64?
   let lastCleanupCategory: ViewerStoreCleanupCategory
+
+  init(
+    state: State,
+    migration: ViewerStoreMigrationStatus? = nil,
+    capacityBytes: Int64,
+    logicalQuotaBytes: Int64,
+    allocatedFootprintBytes: Int64,
+    oldestHistoryMilliseconds: Int64?,
+    pinnedQuotaBytes: Int64,
+    estimatedRetainedDurationMilliseconds: Int64?,
+    lastCleanupCategory: ViewerStoreCleanupCategory
+  ) {
+    self.state = state
+    self.migration = migration
+    self.capacityBytes = capacityBytes
+    self.logicalQuotaBytes = logicalQuotaBytes
+    self.allocatedFootprintBytes = allocatedFootprintBytes
+    self.oldestHistoryMilliseconds = oldestHistoryMilliseconds
+    self.pinnedQuotaBytes = pinnedQuotaBytes
+    self.estimatedRetainedDurationMilliseconds = estimatedRetainedDurationMilliseconds
+    self.lastCleanupCategory = lastCleanupCategory
+  }
+}
+
+enum ViewerStoreMigrationStatus: Equatable, Sendable {
+  case preparing
+  case updatingIndex(Int)
+  case validating
+  case needsSpace
+  case cancelled
+  case failed
+
+  var message: String {
+    switch self {
+    case .preparing: return "Preparing history update"
+    case .updatingIndex(let index): return "Updating history index \(index)/3"
+    case .validating: return "Validating history update"
+    case .needsSpace: return "Migration needs more disk space"
+    case .cancelled: return "Migration cancelled"
+    case .failed: return "Migration failed"
+    }
+  }
+
+  init(_ phase: ViewerStoreMigrationPhase) {
+    switch phase {
+    case .preparing: self = .preparing
+    case .index(let index): self = .updatingIndex(index)
+    case .validating: self = .validating
+    case .needsSpace: self = .needsSpace
+    case .cancelled: self = .cancelled
+    case .failed: self = .failed
+    }
+  }
 }
 
 enum ViewerStoreCleanupCategory: String, Equatable, Sendable {
@@ -235,14 +324,17 @@ extension ViewerStoreChangeSnapshot: CustomReflectable, CustomStringConvertible,
 final class ViewerStoreStatusSignal: @unchecked Sendable {
   private let lock = NSLock()
   private let queue = DispatchQueue(label: "com.nearwire.viewer.store-status")
+  private let completionGroup = DispatchGroup()
   private var handler: (@Sendable (ViewerStoreChangeSnapshot) -> Void)?
   private var snapshotProvider: (@Sendable () -> ViewerStoreChangeSnapshot?)?
+  private var active = true
   private var scheduled = false
-  private var pending: ViewerStoreChangeSnapshot?
+  private var pendingPublish = false
+  private var pendingChangedRecordingIDs: Set<Int64> = []
 
   func setHandler(_ handler: @escaping @Sendable (ViewerStoreChangeSnapshot) -> Void) {
     lock.lock()
-    self.handler = handler
+    if active { self.handler = handler }
     lock.unlock()
   }
 
@@ -250,70 +342,114 @@ final class ViewerStoreStatusSignal: @unchecked Sendable {
     _ provider: @escaping @Sendable () -> ViewerStoreChangeSnapshot?
   ) {
     lock.lock()
-    snapshotProvider = provider
+    if active { snapshotProvider = provider }
     lock.unlock()
   }
 
   func publish(changedRecordingIDs: Set<Int64> = []) {
     lock.lock()
-    let provider = snapshotProvider
-    lock.unlock()
-    var snapshot =
-      provider?()
-      ?? ViewerStoreChangeSnapshot(
-        changedRecordingIDs: [],
-        eventUpperRowID: 0,
-        status: ViewerStoreStatus(
-          state: .unavailable,
-          capacityBytes: 0,
-          logicalQuotaBytes: 0,
-          allocatedFootprintBytes: 0,
-          oldestHistoryMilliseconds: nil,
-          pinnedQuotaBytes: 0,
-          estimatedRetainedDurationMilliseconds: nil,
-          lastCleanupCategory: .none
-        )
-      )
-    snapshot = ViewerStoreChangeSnapshot(
-      changedRecordingIDs: Array(changedRecordingIDs).sorted().prefix(32).map { $0 },
-      eventUpperRowID: snapshot.eventUpperRowID,
-      status: snapshot.status
-    )
-    lock.lock()
-    if let existing = pending {
-      let mergedIDs = Set(existing.changedRecordingIDs).union(snapshot.changedRecordingIDs)
-      snapshot = ViewerStoreChangeSnapshot(
-        changedRecordingIDs: Array(mergedIDs).sorted().prefix(32).map { $0 },
-        eventUpperRowID: max(existing.eventUpperRowID, snapshot.eventUpperRowID),
-        status: snapshot.status
-      )
+    guard active else {
+      lock.unlock()
+      return
     }
-    pending = snapshot
+    mergeChangedRecordingIDsLocked(changedRecordingIDs)
+    pendingPublish = true
     if scheduled {
       lock.unlock()
       return
     }
     scheduled = true
+    completionGroup.enter()
     lock.unlock()
     queue.async { [weak self] in self?.deliver() }
   }
 
+  func deactivateAndWait() {
+    lock.lock()
+    active = false
+    pendingPublish = false
+    pendingChangedRecordingIDs.removeAll(keepingCapacity: false)
+    handler = nil
+    snapshotProvider = nil
+    lock.unlock()
+    completionGroup.wait()
+  }
+
+  var hasScheduledWorkForTesting: Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    return scheduled
+  }
+
+  var pendingChangedRecordingIDCountForTesting: Int {
+    lock.lock()
+    defer { lock.unlock() }
+    return pendingChangedRecordingIDs.count
+  }
+
   private func deliver() {
     lock.lock()
+    guard active, pendingPublish else {
+      scheduled = false
+      lock.unlock()
+      completionGroup.leave()
+      return
+    }
     let handler = handler
-    let snapshot = pending
-    pending = nil
+    let provider = snapshotProvider
+    let changedRecordingIDs = pendingChangedRecordingIDs.sorted()
+    pendingPublish = false
+    pendingChangedRecordingIDs.removeAll(keepingCapacity: true)
     lock.unlock()
-    if let snapshot { handler?(snapshot) }
+
+    let provided = provider?() ?? Self.unavailableSnapshot
+    let snapshot = ViewerStoreChangeSnapshot(
+      changedRecordingIDs: changedRecordingIDs,
+      eventUpperRowID: provided.eventUpperRowID,
+      status: provided.status
+    )
+
     lock.lock()
-    if pending != nil {
+    let shouldDeliver = active
+    lock.unlock()
+    if shouldDeliver { handler?(snapshot) }
+
+    lock.lock()
+    if active, pendingPublish {
       lock.unlock()
       queue.async { [weak self] in self?.deliver() }
     } else {
       scheduled = false
       lock.unlock()
+      completionGroup.leave()
     }
   }
+
+  private func mergeChangedRecordingIDsLocked(_ recordingIDs: Set<Int64>) {
+    for recordingID in recordingIDs where !pendingChangedRecordingIDs.contains(recordingID) {
+      if pendingChangedRecordingIDs.count < 32 {
+        pendingChangedRecordingIDs.insert(recordingID)
+      } else if let largest = pendingChangedRecordingIDs.max(), recordingID < largest {
+        pendingChangedRecordingIDs.remove(largest)
+        pendingChangedRecordingIDs.insert(recordingID)
+      }
+    }
+  }
+
+  private static let unavailableSnapshot = ViewerStoreChangeSnapshot(
+    changedRecordingIDs: [],
+    eventUpperRowID: 0,
+    status: ViewerStoreStatus(
+      state: .unavailable,
+      capacityBytes: 0,
+      logicalQuotaBytes: 0,
+      allocatedFootprintBytes: 0,
+      oldestHistoryMilliseconds: nil,
+      pinnedQuotaBytes: 0,
+      estimatedRetainedDurationMilliseconds: nil,
+      lastCleanupCategory: .none
+    )
+  )
 }
 
 final class ViewerEventStore: @unchecked Sendable {
@@ -369,36 +505,37 @@ final class ViewerEventStore: @unchecked Sendable {
     return try writeTransaction(
       recoveryPermit: recoveryPermit,
       plan: { _ in 2 * ViewerStoreQuota.structuralReservation },
-      changedRecordingIDs: { [$0.rowID] }
-    ) { database in
-      let insert = try ViewerSQLiteStatement(
-        database: database,
-        sql:
-          "INSERT INTO Recordings(logicalID, startedWallMs, startedMonotonicNs, durableStartReason, quotaBytes, liveQuotaBytes) VALUES(?1, ?2, ?3, ?4, ?5, 0)"
-      )
-      let quota = ViewerStoreQuota.structuralReservation
-      try insert.bind(logicalID.uuidString.lowercased(), at: 1)
-      try insert.bind(wallMilliseconds, at: 2)
-      try insert.bind(checkedInt64(monotonicNanoseconds), at: 3)
-      try insert.bind(reason, at: 4)
-      try insert.bind(quota, at: 5)
-      _ = try insert.step()
-      let rowID = sqlite3_last_insert_rowid(database)
-      try reserveQuota(quota, recordingID: rowID, database: database)
-      try insertRecordingVersion(
-        recordingID: rowID,
-        revision: 1,
-        wallMilliseconds: wallMilliseconds,
-        name: nil,
-        note: nil,
-        pinned: false,
-        state: "active",
-        endedWallMilliseconds: nil,
-        endedMonotonicNanoseconds: nil,
-        database: database
-      )
-      return ViewerRecordingHandle(logicalID: logicalID, rowID: rowID)
-    }
+      changedRecordingIDs: { [$0.rowID] },
+      { database in
+        let insert = try ViewerSQLiteStatement(
+          database: database,
+          sql:
+            "INSERT INTO Recordings(logicalID, startedWallMs, startedMonotonicNs, durableStartReason, quotaBytes, liveQuotaBytes) VALUES(?1, ?2, ?3, ?4, ?5, 0)"
+        )
+        let quota = ViewerStoreQuota.structuralReservation
+        try insert.bind(logicalID.uuidString.lowercased(), at: 1)
+        try insert.bind(wallMilliseconds, at: 2)
+        try insert.bind(checkedInt64(monotonicNanoseconds), at: 3)
+        try insert.bind(reason, at: 4)
+        try insert.bind(quota, at: 5)
+        _ = try insert.step()
+        let rowID = sqlite3_last_insert_rowid(database)
+        try reserveQuota(quota, recordingID: rowID, database: database)
+        try insertRecordingVersion(
+          recordingID: rowID,
+          revision: 1,
+          wallMilliseconds: wallMilliseconds,
+          name: nil,
+          note: nil,
+          pinned: false,
+          state: "active",
+          endedWallMilliseconds: nil,
+          endedMonotonicNanoseconds: nil,
+          database: database
+        )
+        return ViewerRecordingHandle(logicalID: logicalID, rowID: rowID)
+      }
+    )
   }
 
   func beginDeviceSession(
@@ -436,75 +573,82 @@ final class ViewerEventStore: @unchecked Sendable {
           2 * ViewerStoreQuota.structuralReservation
         )
       },
-      changedRecordingIDs: { [$0.recordingID] }
-    ) { database in
-      let alias = try installationAlias(
-        recordingID: recording.rowID,
-        installationID: installationID,
-        database: database
-      )
-      let ordinal = try nextInt64(
-        "SELECT COALESCE(MAX(connectionOrdinal), 0) + 1 FROM DeviceSessions WHERE recordingID=?1",
-        binding: recording.rowID,
-        database: database
-      )
-      let quota = ViewerStoreQuota.structuralReservation
-      try reserveQuota(quota, recordingID: recording.rowID, database: database)
-      let insert = try ViewerSQLiteStatement(
-        database: database,
-        sql:
-          "INSERT INTO DeviceSessions(logicalID, recordingID, installationAliasID, connectionOrdinal, applicationIdentifier, applicationVersion, startedWallMs, startedMonotonicNs, quotaBytes) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"
-      )
-      try insert.bind(logicalID.uuidString.lowercased(), at: 1)
-      try insert.bind(recording.rowID, at: 2)
-      try insert.bind(alias.rowID, at: 3)
-      try insert.bind(ordinal, at: 4)
-      if let applicationIdentifier {
-        try insert.bind(applicationIdentifier, at: 5)
-      } else {
-        try insert.bindNull(at: 5)
+      changedRecordingIDs: { [$0.recordingID] },
+      { database in
+        let alias = try installationAlias(
+          recordingID: recording.rowID,
+          installationID: installationID,
+          database: database
+        )
+        let ordinal = try nextInt64(
+          "SELECT COALESCE(MAX(connectionOrdinal), 0) + 1 FROM DeviceSessions WHERE recordingID=?1",
+          binding: recording.rowID,
+          database: database
+        )
+        let quota = ViewerStoreQuota.structuralReservation
+        try reserveQuota(quota, recordingID: recording.rowID, database: database)
+        let insert = try ViewerSQLiteStatement(
+          database: database,
+          sql:
+            "INSERT INTO DeviceSessions(logicalID, recordingID, installationAliasID, connectionOrdinal, applicationIdentifier, applicationVersion, startedWallMs, startedMonotonicNs, quotaBytes) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"
+        )
+        try insert.bind(logicalID.uuidString.lowercased(), at: 1)
+        try insert.bind(recording.rowID, at: 2)
+        try insert.bind(alias.rowID, at: 3)
+        try insert.bind(ordinal, at: 4)
+        if let applicationIdentifier {
+          try insert.bind(applicationIdentifier, at: 5)
+        } else {
+          try insert.bindNull(at: 5)
+        }
+        if let applicationVersion {
+          try insert.bind(applicationVersion, at: 6)
+        } else {
+          try insert.bindNull(at: 6)
+        }
+        try insert.bind(wallMilliseconds, at: 7)
+        try insert.bind(checkedInt64(monotonicNanoseconds), at: 8)
+        try insert.bind(quota, at: 9)
+        _ = try insert.step()
+        let rowID = sqlite3_last_insert_rowid(database)
+        try insertDeviceVersion(
+          deviceSessionID: rowID,
+          recordingID: recording.rowID,
+          revision: 1,
+          wallMilliseconds: wallMilliseconds,
+          displayName: displayName,
+          state: "active",
+          partialHistory: partialHistory,
+          endedWallMilliseconds: nil,
+          endedMonotonicNanoseconds: nil,
+          database: database
+        )
+        return ViewerDeviceSessionHandle(
+          logicalID: logicalID,
+          rowID: rowID,
+          recordingID: recording.rowID,
+          installationOrdinal: alias.ordinal,
+          connectionOrdinal: ordinal
+        )
       }
-      if let applicationVersion {
-        try insert.bind(applicationVersion, at: 6)
-      } else {
-        try insert.bindNull(at: 6)
-      }
-      try insert.bind(wallMilliseconds, at: 7)
-      try insert.bind(checkedInt64(monotonicNanoseconds), at: 8)
-      try insert.bind(quota, at: 9)
-      _ = try insert.step()
-      let rowID = sqlite3_last_insert_rowid(database)
-      try insertDeviceVersion(
-        deviceSessionID: rowID,
-        recordingID: recording.rowID,
-        revision: 1,
-        wallMilliseconds: wallMilliseconds,
-        displayName: displayName,
-        state: "active",
-        partialHistory: partialHistory,
-        endedWallMilliseconds: nil,
-        endedMonotonicNanoseconds: nil,
-        database: database
-      )
-      return ViewerDeviceSessionHandle(
-        logicalID: logicalID,
-        rowID: rowID,
-        recordingID: recording.rowID,
-        installationOrdinal: alias.ordinal,
-        connectionOrdinal: ordinal
-      )
-    }
+    )
   }
 
   @discardableResult
   func appendEvent(_ observation: ViewerPreparedEventObservation) throws -> Int64 {
-    guard let result = try appendEvents([observation]).first else {
+    guard let result = try appendEventResults([observation]).first else {
       throw ViewerStoreError.unavailable
     }
-    return result
+    return result.rowID
   }
 
   func appendEvents(_ observations: [ViewerPreparedEventObservation]) throws -> [Int64] {
+    try appendEventResults(observations).map(\.rowID)
+  }
+
+  func appendEventResults(
+    _ observations: [ViewerPreparedEventObservation]
+  ) throws -> [ViewerEventStoreCommitResult] {
     guard !observations.isEmpty, observations.count <= 256 else {
       throw ViewerStoreError.invalidValue
     }
@@ -517,10 +661,11 @@ final class ViewerEventStore: @unchecked Sendable {
             self.plannedEventReservation(observation, database: database)
           )
         }
-      }, changedRecordingIDs: { _ in changedRecordingIDs }
-    ) { database in
-      try observations.map { try appendEvent($0, database: database) }
-    }
+      }, changedRecordingIDs: { _ in changedRecordingIDs },
+      { database in
+        try observations.map { try appendEvent($0, database: database) }
+      }
+    )
   }
 
   func appendStructural(_ observation: ViewerStructuralObservation) throws {
@@ -529,202 +674,203 @@ final class ViewerEventStore: @unchecked Sendable {
     try writeTransaction(
       plan: { database in
         try self.plannedStructuralReservation(observation, database: database)
-      }, changedRecordingIDs: { _ in [changedRecordingID] }
-    ) { database in
-      switch observation {
-      case .closeDevice(let device, let wall, let monotonic):
-        guard
-          try latestState(
-            table: "DeviceSessionVersions",
-            ownerColumn: "deviceSessionID",
-            ownerID: device.rowID,
-            database: database
-          ) == "active"
-        else { return }
-        let insert = try ViewerSQLiteStatement(
-          database: database,
-          sql:
-            "INSERT INTO DeviceSessionVersions(deviceSessionID, revision, createdWallMs, displayName, state, partialHistory, endedWallMs, endedMonotonicNs, quotaBytes) SELECT ?1, COALESCE(MAX(revision),0)+1, ?2, (SELECT displayName FROM DeviceSessionVersions WHERE deviceSessionID=?1 ORDER BY revision DESC LIMIT 1), 'closed', (SELECT partialHistory FROM DeviceSessionVersions WHERE deviceSessionID=?1 ORDER BY revision DESC LIMIT 1), ?2, ?3, ?4 FROM DeviceSessionVersions WHERE deviceSessionID=?1 HAVING (SELECT state FROM DeviceSessionVersions WHERE deviceSessionID=?1 ORDER BY revision DESC LIMIT 1)='active'"
-        )
-        let quota = ViewerStoreQuota.structuralReservation
-        try reserveQuota(quota, recordingID: device.recordingID, database: database)
-        try insert.bind(device.rowID, at: 1)
-        try insert.bind(wall, at: 2)
-        try insert.bind(checkedInt64(monotonic), at: 3)
-        try insert.bind(quota, at: 4)
-        _ = try insert.step()
-        guard sqlite3_changes(database) == 1 else { throw ViewerStoreError.corruptStore }
-      case .closeRecording(let recording, let wall, let monotonic):
-        guard
-          try latestState(
-            table: "RecordingVersions",
-            ownerColumn: "recordingID",
-            ownerID: recording.rowID,
-            database: database
-          ) == "active"
-        else { return }
-        let insert = try ViewerSQLiteStatement(
-          database: database,
-          sql:
-            "INSERT INTO RecordingVersions(recordingID, revision, createdWallMs, name, note, pinned, state, endedWallMs, endedMonotonicNs, quotaBytes) SELECT ?1, COALESCE(MAX(revision),0)+1, ?2, (SELECT name FROM RecordingVersions WHERE recordingID=?1 ORDER BY revision DESC LIMIT 1), (SELECT note FROM RecordingVersions WHERE recordingID=?1 ORDER BY revision DESC LIMIT 1), (SELECT pinned FROM RecordingVersions WHERE recordingID=?1 ORDER BY revision DESC LIMIT 1), 'closed', ?2, ?3, ?4 FROM RecordingVersions WHERE recordingID=?1 HAVING (SELECT state FROM RecordingVersions WHERE recordingID=?1 ORDER BY revision DESC LIMIT 1)='active'"
-        )
-        let quota = ViewerStoreQuota.structuralReservation
-        try reserveQuota(quota, recordingID: recording.rowID, database: database)
-        try insert.bind(recording.rowID, at: 1)
-        try insert.bind(wall, at: 2)
-        try insert.bind(checkedInt64(monotonic), at: 3)
-        try insert.bind(quota, at: 4)
-        _ = try insert.step()
-        guard sqlite3_changes(database) == 1 else { throw ViewerStoreError.corruptStore }
-      case .disposition(
-        let recording,
-        let device,
-        let direction,
-        let wireSequence,
-        let value,
-        let wall,
-        let monotonic
-      ):
-        let event = try ViewerSQLiteStatement(
-          database: database,
-          sql:
-            "SELECT rowID FROM Events WHERE recordingID=?1 AND deviceSessionID=?2 AND direction=?3 AND wireSequence=?4"
-        )
-        try event.bind(recording.rowID, at: 1)
-        try event.bind(device.rowID, at: 2)
-        try event.bind(direction.rawValue, at: 3)
-        try event.bind(checkedInt64(wireSequence), at: 4)
-        guard try event.step() else {
+      }, changedRecordingIDs: { _ in [changedRecordingID] },
+      { database in
+        switch observation {
+        case .closeDevice(let device, let wall, let monotonic):
+          guard
+            try latestState(
+              table: "DeviceSessionVersions",
+              ownerColumn: "deviceSessionID",
+              ownerID: device.rowID,
+              database: database
+            ) == "active"
+          else { return }
+          let insert = try ViewerSQLiteStatement(
+            database: database,
+            sql:
+              "INSERT INTO DeviceSessionVersions(deviceSessionID, revision, createdWallMs, displayName, state, partialHistory, endedWallMs, endedMonotonicNs, quotaBytes) SELECT ?1, COALESCE(MAX(revision),0)+1, ?2, (SELECT displayName FROM DeviceSessionVersions WHERE deviceSessionID=?1 ORDER BY revision DESC LIMIT 1), 'closed', (SELECT partialHistory FROM DeviceSessionVersions WHERE deviceSessionID=?1 ORDER BY revision DESC LIMIT 1), ?2, ?3, ?4 FROM DeviceSessionVersions WHERE deviceSessionID=?1 HAVING (SELECT state FROM DeviceSessionVersions WHERE deviceSessionID=?1 ORDER BY revision DESC LIMIT 1)='active'"
+          )
+          let quota = ViewerStoreQuota.structuralReservation
+          try reserveQuota(quota, recordingID: device.recordingID, database: database)
+          try insert.bind(device.rowID, at: 1)
+          try insert.bind(wall, at: 2)
+          try insert.bind(checkedInt64(monotonic), at: 3)
+          try insert.bind(quota, at: 4)
+          _ = try insert.step()
+          guard sqlite3_changes(database) == 1 else { throw ViewerStoreError.corruptStore }
+        case .closeRecording(let recording, let wall, let monotonic):
+          guard
+            try latestState(
+              table: "RecordingVersions",
+              ownerColumn: "recordingID",
+              ownerID: recording.rowID,
+              database: database
+            ) == "active"
+          else { return }
+          let insert = try ViewerSQLiteStatement(
+            database: database,
+            sql:
+              "INSERT INTO RecordingVersions(recordingID, revision, createdWallMs, name, note, pinned, state, endedWallMs, endedMonotonicNs, quotaBytes) SELECT ?1, COALESCE(MAX(revision),0)+1, ?2, (SELECT name FROM RecordingVersions WHERE recordingID=?1 ORDER BY revision DESC LIMIT 1), (SELECT note FROM RecordingVersions WHERE recordingID=?1 ORDER BY revision DESC LIMIT 1), (SELECT pinned FROM RecordingVersions WHERE recordingID=?1 ORDER BY revision DESC LIMIT 1), 'closed', ?2, ?3, ?4 FROM RecordingVersions WHERE recordingID=?1 HAVING (SELECT state FROM RecordingVersions WHERE recordingID=?1 ORDER BY revision DESC LIMIT 1)='active'"
+          )
+          let quota = ViewerStoreQuota.structuralReservation
+          try reserveQuota(quota, recordingID: recording.rowID, database: database)
+          try insert.bind(recording.rowID, at: 1)
+          try insert.bind(wall, at: 2)
+          try insert.bind(checkedInt64(monotonic), at: 3)
+          try insert.bind(quota, at: 4)
+          _ = try insert.step()
+          guard sqlite3_changes(database) == 1 else { throw ViewerStoreError.corruptStore }
+        case .disposition(
+          let recording,
+          let device,
+          let direction,
+          let wireSequence,
+          let value,
+          let wall,
+          let monotonic
+        ):
+          let event = try ViewerSQLiteStatement(
+            database: database,
+            sql:
+              "SELECT rowID FROM Events WHERE recordingID=?1 AND deviceSessionID=?2 AND direction=?3 AND wireSequence=?4"
+          )
+          try event.bind(recording.rowID, at: 1)
+          try event.bind(device.rowID, at: 2)
+          try event.bind(direction.rawValue, at: 3)
+          try event.bind(checkedInt64(wireSequence), at: 4)
+          guard try event.step() else {
+            try appendGapVersion(
+              recording: recording,
+              device: device,
+              sequence: wireSequence,
+              namespace: "transition",
+              reason: "missingInitialEvent.\(value.rawValue)",
+              count: 1,
+              firstWallMilliseconds: wall,
+              lastWallMilliseconds: wall,
+              directions: direction.rawValue,
+              firstWireSequence: wireSequence,
+              lastWireSequence: wireSequence,
+              database: database
+            )
+            return
+          }
+          let eventID = event.int64(at: 0)
+          let existingTerminal = try ViewerSQLiteStatement(
+            database: database,
+            sql:
+              "SELECT disposition FROM EventDispositionVersions WHERE eventID=?1 AND disposition IN ('consumerAccepted','expired','overflowDisplaced','sessionEnded') LIMIT 1"
+          )
+          try existingTerminal.bind(eventID, at: 1)
+          if try existingTerminal.step() {
+            guard existingTerminal.string(at: 0) == value.rawValue else {
+              throw ViewerStoreError.corruptStore
+            }
+            return
+          }
+          let quota = ViewerStoreQuota.structuralReservation
+          try reserveQuota(quota, recordingID: recording.rowID, database: database)
+          let insert = try ViewerSQLiteStatement(
+            database: database,
+            sql:
+              "INSERT INTO EventDispositionVersions(eventID, sequence, disposition, createdWallMs, viewerMonotonicNs, quotaBytes) SELECT ?1, COALESCE(MAX(sequence),0)+1, ?2, ?3, ?4, ?5 FROM EventDispositionVersions WHERE eventID=?1"
+          )
+          try insert.bind(eventID, at: 1)
+          try insert.bind(value.rawValue, at: 2)
+          try insert.bind(wall, at: 3)
+          try insert.bind(checkedInt64(monotonic), at: 4)
+          try insert.bind(quota, at: 5)
+          _ = try insert.step()
+          guard sqlite3_changes(database) == 1 else { throw ViewerStoreError.corruptStore }
+        case .policy(let device, let sequence, let wall, _, let policyJSON):
+          guard policyJSON.count <= 4_096 else { throw ViewerStoreError.invalidValue }
+          let existing = try ViewerSQLiteStatement(
+            database: database,
+            sql: "SELECT policyJSON FROM PolicyVersions WHERE deviceSessionID=?1 AND sequence=?2"
+          )
+          try existing.bind(device.rowID, at: 1)
+          try existing.bind(checkedInt64(sequence), at: 2)
+          if try existing.step() {
+            guard existing.data(at: 0) == policyJSON else { throw ViewerStoreError.corruptStore }
+            return
+          }
+          let quota = ViewerStoreQuota.structuralReservation
+          try reserveQuota(quota, recordingID: device.recordingID, database: database)
+          let insert = try ViewerSQLiteStatement(
+            database: database,
+            sql:
+              "INSERT INTO PolicyVersions(deviceSessionID, sequence, createdWallMs, policyJSON, quotaBytes) VALUES(?1, ?2, ?3, ?4, ?5)"
+          )
+          try insert.bind(device.rowID, at: 1)
+          try insert.bind(checkedInt64(sequence), at: 2)
+          try insert.bind(wall, at: 3)
+          try insert.bind(policyJSON, at: 4)
+          try insert.bind(quota, at: 5)
+          _ = try insert.step()
+        case .drop(let device, let sequence, let wall, _, let reason, let count):
+          guard count > 0, !reason.isEmpty, reason.utf8.count <= 128 else {
+            throw ViewerStoreError.invalidValue
+          }
+          let existing = try ViewerSQLiteStatement(
+            database: database,
+            sql: "SELECT reason,count FROM DropVersions WHERE deviceSessionID=?1 AND sequence=?2"
+          )
+          try existing.bind(device.rowID, at: 1)
+          try existing.bind(checkedInt64(sequence), at: 2)
+          if try existing.step() {
+            guard existing.string(at: 0) == reason, existing.int64(at: 1) == count else {
+              throw ViewerStoreError.corruptStore
+            }
+            return
+          }
+          let latest = try ViewerSQLiteStatement(
+            database: database,
+            sql:
+              "SELECT count FROM DropVersions WHERE deviceSessionID=?1 AND reason=?2 ORDER BY sequence DESC LIMIT 1"
+          )
+          try latest.bind(device.rowID, at: 1)
+          try latest.bind(reason, at: 2)
+          if try latest.step() {
+            let priorCount = latest.int64(at: 0)
+            if priorCount > count { throw ViewerStoreError.staleObservation }
+            if priorCount == count { return }
+          }
+          let quota = ViewerStoreQuota.structuralReservation
+          try reserveQuota(quota, recordingID: device.recordingID, database: database)
+          let insert = try ViewerSQLiteStatement(
+            database: database,
+            sql:
+              "INSERT INTO DropVersions(deviceSessionID, sequence, createdWallMs, reason, count, quotaBytes) VALUES(?1, ?2, ?3, ?4, ?5, ?6)"
+          )
+          try insert.bind(device.rowID, at: 1)
+          try insert.bind(checkedInt64(sequence), at: 2)
+          try insert.bind(wall, at: 3)
+          try insert.bind(reason, at: 4)
+          try insert.bind(count, at: 5)
+          try insert.bind(quota, at: 6)
+          _ = try insert.step()
+        case .gap(
+          let recording, let device, let sequence, let reason, let count,
+          let firstWall, let lastWall, let directions, let firstWire, let lastWire
+        ):
           try appendGapVersion(
             recording: recording,
             device: device,
-            sequence: wireSequence,
-            namespace: "transition",
-            reason: "missingInitialEvent.\(value.rawValue)",
-            count: 1,
-            firstWallMilliseconds: wall,
-            lastWallMilliseconds: wall,
-            directions: direction.rawValue,
-            firstWireSequence: wireSequence,
-            lastWireSequence: wireSequence,
+            sequence: sequence,
+            namespace: "coordinator",
+            reason: reason,
+            count: count,
+            firstWallMilliseconds: firstWall,
+            lastWallMilliseconds: lastWall,
+            directions: directions,
+            firstWireSequence: firstWire,
+            lastWireSequence: lastWire,
             database: database
           )
-          return
         }
-        let eventID = event.int64(at: 0)
-        let existingTerminal = try ViewerSQLiteStatement(
-          database: database,
-          sql:
-            "SELECT disposition FROM EventDispositionVersions WHERE eventID=?1 AND disposition IN ('consumerAccepted','expired','overflowDisplaced','sessionEnded') LIMIT 1"
-        )
-        try existingTerminal.bind(eventID, at: 1)
-        if try existingTerminal.step() {
-          guard existingTerminal.string(at: 0) == value.rawValue else {
-            throw ViewerStoreError.corruptStore
-          }
-          return
-        }
-        let quota = ViewerStoreQuota.structuralReservation
-        try reserveQuota(quota, recordingID: recording.rowID, database: database)
-        let insert = try ViewerSQLiteStatement(
-          database: database,
-          sql:
-            "INSERT INTO EventDispositionVersions(eventID, sequence, disposition, createdWallMs, viewerMonotonicNs, quotaBytes) SELECT ?1, COALESCE(MAX(sequence),0)+1, ?2, ?3, ?4, ?5 FROM EventDispositionVersions WHERE eventID=?1"
-        )
-        try insert.bind(eventID, at: 1)
-        try insert.bind(value.rawValue, at: 2)
-        try insert.bind(wall, at: 3)
-        try insert.bind(checkedInt64(monotonic), at: 4)
-        try insert.bind(quota, at: 5)
-        _ = try insert.step()
-        guard sqlite3_changes(database) == 1 else { throw ViewerStoreError.corruptStore }
-      case .policy(let device, let sequence, let wall, _, let policyJSON):
-        guard policyJSON.count <= 4_096 else { throw ViewerStoreError.invalidValue }
-        let existing = try ViewerSQLiteStatement(
-          database: database,
-          sql: "SELECT policyJSON FROM PolicyVersions WHERE deviceSessionID=?1 AND sequence=?2"
-        )
-        try existing.bind(device.rowID, at: 1)
-        try existing.bind(checkedInt64(sequence), at: 2)
-        if try existing.step() {
-          guard existing.data(at: 0) == policyJSON else { throw ViewerStoreError.corruptStore }
-          return
-        }
-        let quota = ViewerStoreQuota.structuralReservation
-        try reserveQuota(quota, recordingID: device.recordingID, database: database)
-        let insert = try ViewerSQLiteStatement(
-          database: database,
-          sql:
-            "INSERT INTO PolicyVersions(deviceSessionID, sequence, createdWallMs, policyJSON, quotaBytes) VALUES(?1, ?2, ?3, ?4, ?5)"
-        )
-        try insert.bind(device.rowID, at: 1)
-        try insert.bind(checkedInt64(sequence), at: 2)
-        try insert.bind(wall, at: 3)
-        try insert.bind(policyJSON, at: 4)
-        try insert.bind(quota, at: 5)
-        _ = try insert.step()
-      case .drop(let device, let sequence, let wall, _, let reason, let count):
-        guard count > 0, !reason.isEmpty, reason.utf8.count <= 128 else {
-          throw ViewerStoreError.invalidValue
-        }
-        let existing = try ViewerSQLiteStatement(
-          database: database,
-          sql: "SELECT reason,count FROM DropVersions WHERE deviceSessionID=?1 AND sequence=?2"
-        )
-        try existing.bind(device.rowID, at: 1)
-        try existing.bind(checkedInt64(sequence), at: 2)
-        if try existing.step() {
-          guard existing.string(at: 0) == reason, existing.int64(at: 1) == count else {
-            throw ViewerStoreError.corruptStore
-          }
-          return
-        }
-        let latest = try ViewerSQLiteStatement(
-          database: database,
-          sql:
-            "SELECT count FROM DropVersions WHERE deviceSessionID=?1 AND reason=?2 ORDER BY sequence DESC LIMIT 1"
-        )
-        try latest.bind(device.rowID, at: 1)
-        try latest.bind(reason, at: 2)
-        if try latest.step() {
-          let priorCount = latest.int64(at: 0)
-          if priorCount > count { throw ViewerStoreError.staleObservation }
-          if priorCount == count { return }
-        }
-        let quota = ViewerStoreQuota.structuralReservation
-        try reserveQuota(quota, recordingID: device.recordingID, database: database)
-        let insert = try ViewerSQLiteStatement(
-          database: database,
-          sql:
-            "INSERT INTO DropVersions(deviceSessionID, sequence, createdWallMs, reason, count, quotaBytes) VALUES(?1, ?2, ?3, ?4, ?5, ?6)"
-        )
-        try insert.bind(device.rowID, at: 1)
-        try insert.bind(checkedInt64(sequence), at: 2)
-        try insert.bind(wall, at: 3)
-        try insert.bind(reason, at: 4)
-        try insert.bind(count, at: 5)
-        try insert.bind(quota, at: 6)
-        _ = try insert.step()
-      case .gap(
-        let recording, let device, let sequence, let reason, let count,
-        let firstWall, let lastWall, let directions, let firstWire, let lastWire
-      ):
-        try appendGapVersion(
-          recording: recording,
-          device: device,
-          sequence: sequence,
-          namespace: "coordinator",
-          reason: reason,
-          count: count,
-          firstWallMilliseconds: firstWall,
-          lastWallMilliseconds: lastWall,
-          directions: directions,
-          firstWireSequence: firstWire,
-          lastWireSequence: lastWire,
-          database: database
-        )
       }
-    }
+    )
   }
 
   private func plannedStructuralReservation(
@@ -1288,58 +1434,49 @@ final class ViewerEventStore: @unchecked Sendable {
     guard sqlite3_changes(database) == 1 else { throw ViewerStoreError.corruptStore }
   }
 
-  private func existingEventID(
+  private func existingEventResult(
     _ observation: ViewerPreparedEventObservation,
     database: OpaquePointer
-  ) throws -> Int64 {
+  ) throws -> ViewerEventStoreCommitResult {
     let statement = try ViewerSQLiteStatement(
       database: database,
       sql:
-        "SELECT rowID,eventUUID,eventType,contentJSON,createdWallMs,viewerWallMs,originMonotonicNs,viewerMonotonicNs,priority,ttlMs,schemaVersion,deterministicBytes,correlationEventUUID,replyToEventUUID FROM Events WHERE recordingID=?1 AND deviceSessionID=?2 AND direction=?3 AND wireSequence=?4"
+        "SELECT e.rowID,e.eventUUID,e.eventType,e.contentJSON,e.createdWallMs,e.originMonotonicNs,e.priority,e.ttlMs,e.schemaVersion,e.correlationEventUUID,e.replyToEventUUID,(SELECT disposition FROM EventDispositionVersions WHERE eventID=e.rowID AND sequence=0) FROM Events e WHERE e.recordingID=?1 AND e.deviceSessionID=?2 AND e.direction=?3 AND e.wireSequence=?4"
     )
     try statement.bind(observation.recording.rowID, at: 1)
     try statement.bind(observation.device.rowID, at: 2)
     try statement.bind(observation.envelope.direction.rawValue, at: 3)
     try statement.bind(checkedInt64(observation.envelope.sequence.rawValue), at: 4)
-    let envelope = observation.envelope
-    let originMonotonic = try checkedInt64(envelope.monotonicTimestampNanoseconds)
-    let viewerMonotonic = try checkedInt64(observation.viewerMonotonicNanoseconds)
-    let ttlMilliseconds = try checkedInt64(envelope.ttl.milliseconds)
-    guard try statement.step(),
-      statement.string(at: 1) == envelope.id.rawValue,
-      statement.string(at: 2) == envelope.type.rawValue,
-      statement.data(at: 3) == observation.canonicalContent,
-      statement.int64(at: 4) == Int64((envelope.createdAt.timeIntervalSince1970 * 1_000).rounded()),
-      statement.int64(at: 5) == observation.viewerWallMilliseconds,
-      statement.int64(at: 6) == originMonotonic,
-      statement.int64(at: 7) == viewerMonotonic,
-      statement.string(at: 8) == envelope.priority.rawValue,
-      statement.int64(at: 9) == ttlMilliseconds,
-      statement.int64(at: 10) == Int64(envelope.schemaVersion.rawValue),
-      statement.int64(at: 11) == Int64(observation.deterministicEventBytes),
-      optionalString(statement, at: 12) == envelope.causality.correlationID?.rawValue,
-      optionalString(statement, at: 13) == envelope.causality.replyTo?.rawValue
-    else { throw ViewerStoreError.corruptStore }
-    return statement.int64(at: 0)
+    guard try statement.step() else { throw ViewerStoreError.corruptStore }
+    let projection = observation.durableProjection
+    let expectedOriginMonotonic = try checkedInt64(projection.originMonotonicNanoseconds)
+    let expectedTTL = try checkedInt64(projection.ttlMilliseconds)
+    let identical =
+      statement.string(at: 1) == projection.eventID.rawValue
+      && statement.string(at: 2) == projection.eventType.rawValue
+      && statement.data(at: 3) == projection.canonicalContent
+      && statement.int64(at: 4) == projection.createdWallMilliseconds
+      && statement.int64(at: 5) == expectedOriginMonotonic
+      && statement.string(at: 6) == projection.priority.rawValue
+      && statement.int64(at: 7) == expectedTTL
+      && statement.int64(at: 8) == Int64(projection.schemaVersion.rawValue)
+      && optionalString(statement, at: 9) == projection.correlationID?.rawValue
+      && optionalString(statement, at: 10) == projection.replyToID?.rawValue
+      && optionalString(statement, at: 11) == projection.initialDisposition?.rawValue
+    return ViewerEventStoreCommitResult(
+      rowID: statement.int64(at: 0),
+      outcome: identical ? .identical : .journalConflict
+    )
   }
 
   private func appendEvent(
     _ observation: ViewerPreparedEventObservation,
     database: OpaquePointer
-  ) throws -> Int64 {
+  ) throws -> ViewerEventStoreCommitResult {
     if let eventID = try eventRowID(observation, database: database) {
-      _ = try existingEventID(observation, database: database)
-      if let initial = observation.initialDisposition {
-        try insertInitialDisposition(
-          eventID: eventID,
-          disposition: initial,
-          wallMilliseconds: Int64((Date().timeIntervalSince1970 * 1_000).rounded()),
-          monotonicNanoseconds: observation.viewerMonotonicNanoseconds,
-          recordingID: observation.recording.rowID,
-          database: database
-        )
-      }
-      return eventID
+      let result = try existingEventResult(observation, database: database)
+      guard result.rowID == eventID else { throw ViewerStoreError.corruptStore }
+      return result
     }
     try reserveQuota(
       observation.quotaBytes,
@@ -1347,6 +1484,7 @@ final class ViewerEventStore: @unchecked Sendable {
       database: database
     )
     let envelope = observation.envelope
+    let projection = observation.durableProjection
     let statement = try ViewerSQLiteStatement(
       database: database,
       sql:
@@ -1356,23 +1494,23 @@ final class ViewerEventStore: @unchecked Sendable {
     try statement.bind(observation.device.rowID, at: 2)
     try statement.bind(envelope.direction.rawValue, at: 3)
     try statement.bind(checkedInt64(envelope.sequence.rawValue), at: 4)
-    try statement.bind(envelope.id.rawValue, at: 5)
-    try statement.bind(envelope.type.rawValue, at: 6)
-    try statement.bind(observation.canonicalContent, at: 7)
-    try statement.bind(Int64((envelope.createdAt.timeIntervalSince1970 * 1_000).rounded()), at: 8)
+    try statement.bind(projection.eventID.rawValue, at: 5)
+    try statement.bind(projection.eventType.rawValue, at: 6)
+    try statement.bind(projection.canonicalContent, at: 7)
+    try statement.bind(projection.createdWallMilliseconds, at: 8)
     try statement.bind(observation.viewerWallMilliseconds, at: 9)
-    try statement.bind(checkedInt64(envelope.monotonicTimestampNanoseconds), at: 10)
+    try statement.bind(checkedInt64(projection.originMonotonicNanoseconds), at: 10)
     try statement.bind(checkedInt64(observation.viewerMonotonicNanoseconds), at: 11)
-    try statement.bind(envelope.priority.rawValue, at: 12)
-    try statement.bind(checkedInt64(envelope.ttl.milliseconds), at: 13)
-    try statement.bind(Int64(envelope.schemaVersion.rawValue), at: 14)
+    try statement.bind(projection.priority.rawValue, at: 12)
+    try statement.bind(checkedInt64(projection.ttlMilliseconds), at: 13)
+    try statement.bind(Int64(projection.schemaVersion.rawValue), at: 14)
     try statement.bind(Int64(observation.deterministicEventBytes), at: 15)
-    if let correlationID = envelope.causality.correlationID {
+    if let correlationID = projection.correlationID {
       try statement.bind(correlationID.rawValue, at: 16)
     } else {
       try statement.bindNull(at: 16)
     }
-    if let replyTo = envelope.causality.replyTo {
+    if let replyTo = projection.replyToID {
       try statement.bind(replyTo.rawValue, at: 17)
     } else {
       try statement.bindNull(at: 17)
@@ -1386,13 +1524,13 @@ final class ViewerEventStore: @unchecked Sendable {
       try insertInitialDisposition(
         eventID: eventID,
         disposition: initial,
-        wallMilliseconds: Int64((Date().timeIntervalSince1970 * 1_000).rounded()),
+        wallMilliseconds: observation.viewerWallMilliseconds,
         monotonicNanoseconds: observation.viewerMonotonicNanoseconds,
         recordingID: observation.recording.rowID,
         database: database
       )
     }
-    return eventID
+    return ViewerEventStoreCommitResult(rowID: eventID, outcome: .accepted)
   }
 
   private func insertInitialDisposition(
@@ -1458,19 +1596,8 @@ final class ViewerEventStore: @unchecked Sendable {
         observation.initialDisposition == nil ? 0 : ViewerStoreQuota.structuralReservation
       )
     }
-    _ = try existingEventID(observation, database: database)
-    guard let initial = observation.initialDisposition else { return 0 }
-    let existing = try ViewerSQLiteStatement(
-      database: database,
-      sql:
-        "SELECT disposition,viewerMonotonicNs FROM EventDispositionVersions WHERE eventID=?1 AND sequence=0"
-    )
-    try existing.bind(eventID, at: 1)
-    guard try existing.step() else { return ViewerStoreQuota.structuralReservation }
-    let expectedMonotonic = try checkedInt64(observation.viewerMonotonicNanoseconds)
-    guard existing.string(at: 0) == initial.rawValue,
-      existing.int64(at: 1) == expectedMonotonic
-    else { throw ViewerStoreError.corruptStore }
+    let result = try existingEventResult(observation, database: database)
+    guard result.rowID == eventID else { throw ViewerStoreError.corruptStore }
     return 0
   }
 
@@ -1515,34 +1642,36 @@ final class ViewerEventStore: @unchecked Sendable {
             } else {
               self.reportWriteFailureBeforeWriterRelease(error)
             }
+          },
+          { database in
+            try self.writeStateRelay.validate(authorization)
+            try self.writeGate()
+            plannedReservation = try plan(database)
+            guard plannedReservation >= 0 else { throw ViewerStoreError.invalidValue }
+            let currentQuota = try ViewerStoreSchema.scalarInt64(
+              "SELECT integerValue FROM StoreMetadata WHERE key='logicalQuotaBytes'",
+              database: database
+            )
+            let (projectedQuota, overflow) = currentQuota.addingReportingOverflow(
+              plannedReservation)
+            guard !overflow, projectedQuota <= configuration().capacityBytes else {
+              throw ViewerStoreError.capacityExceeded
+            }
+            try pool.diskGuard.requireReserve(
+              at: pool.paths.directory,
+              plannedBytes: plannedReservation
+            )
+            try ViewerSQLiteConnection.execute("BEGIN IMMEDIATE", on: database)
+            do {
+              let result = try body(database)
+              try ViewerSQLiteConnection.execute("COMMIT", on: database)
+              return result
+            } catch {
+              try? ViewerSQLiteConnection.execute("ROLLBACK", on: database)
+              throw error
+            }
           }
-        ) { database in
-          try self.writeStateRelay.validate(authorization)
-          try self.writeGate()
-          plannedReservation = try plan(database)
-          guard plannedReservation >= 0 else { throw ViewerStoreError.invalidValue }
-          let currentQuota = try ViewerStoreSchema.scalarInt64(
-            "SELECT integerValue FROM StoreMetadata WHERE key='logicalQuotaBytes'",
-            database: database
-          )
-          let (projectedQuota, overflow) = currentQuota.addingReportingOverflow(plannedReservation)
-          guard !overflow, projectedQuota <= configuration().capacityBytes else {
-            throw ViewerStoreError.capacityExceeded
-          }
-          try pool.diskGuard.requireReserve(
-            at: pool.paths.directory,
-            plannedBytes: plannedReservation
-          )
-          try ViewerSQLiteConnection.execute("BEGIN IMMEDIATE", on: database)
-          do {
-            let result = try body(database)
-            try ViewerSQLiteConnection.execute("COMMIT", on: database)
-            return result
-          } catch {
-            try? ViewerSQLiteConnection.execute("ROLLBACK", on: database)
-            throw error
-          }
-        }
+        )
         statusSignal.publish(changedRecordingIDs: changedRecordingIDs(result))
         return result
       } catch let error as ViewerStoreError
@@ -1751,6 +1880,7 @@ final class ViewerStoreIngress: @unchecked Sendable, CustomReflectable,
     let observation: ViewerPreparedEventObservation
     let ownershipBytes: Int
     let reservation: ViewerJournalPipelineBudget.Reservation?
+    let outcome: @Sendable (ViewerEventJournalOutcome) -> Void
   }
   private struct StructuralEntry {
     let observation: ViewerStructuralObservation
@@ -1790,7 +1920,8 @@ final class ViewerStoreIngress: @unchecked Sendable, CustomReflectable,
 
   func admit(
     _ event: ViewerPreparedEventObservation,
-    reservation: ViewerJournalPipelineBudget.Reservation? = nil
+    reservation: ViewerJournalPipelineBudget.Reservation? = nil,
+    outcome: @escaping @Sendable (ViewerEventJournalOutcome) -> Void = { _ in }
   ) -> Admission {
     guard event.deterministicEventBytes <= Self.oversizeMaximumBytes else { return .oversize }
     guard
@@ -1809,7 +1940,8 @@ final class ViewerStoreIngress: @unchecked Sendable, CustomReflectable,
     events[eventTail] = EventEntry(
       observation: event,
       ownershipBytes: ownershipBytes,
-      reservation: reservation
+      reservation: reservation,
+      outcome: outcome
     )
     eventTail += 1
     eventBytes += ownershipBytes
@@ -1891,7 +2023,11 @@ final class ViewerStoreIngress: @unchecked Sendable, CustomReflectable,
 
   private func drain() {
     while true {
-      let eventBatch: [(UInt64, ViewerPreparedEventObservation, Int)]
+      let eventBatch:
+        [(
+          UInt64, ViewerPreparedEventObservation, Int,
+          @Sendable (ViewerEventJournalOutcome) -> Void
+        )]
       let structuralEntry: (UInt64, ViewerStructuralObservation)?
       lock.lock()
       if !writeStateRelay.isAutomaticWriteAvailable {
@@ -1919,13 +2055,17 @@ final class ViewerStoreIngress: @unchecked Sendable, CustomReflectable,
       if structuralEntry == nil {
         var key = eventHead
         var bytes = 0
-        var selected: [(UInt64, ViewerPreparedEventObservation, Int)] = []
+        var selected:
+          [(
+            UInt64, ViewerPreparedEventObservation, Int,
+            @Sendable (ViewerEventJournalOutcome) -> Void
+          )] = []
         selected.reserveCapacity(min(events.count, Self.batchMaximumCount))
         while selected.count < Self.batchMaximumCount, let nextEntry = events[key] {
           let nextEvent = nextEntry.observation
           let next = nextEvent.deterministicEventBytes
           if !selected.isEmpty && bytes > Self.batchMaximumBytes - next { break }
-          selected.append((key, nextEvent, nextEntry.ownershipBytes))
+          selected.append((key, nextEvent, nextEntry.ownershipBytes, nextEntry.outcome))
           if selected.count == 1 && next > Self.batchMaximumBytes {
             break
           }
@@ -1938,9 +2078,11 @@ final class ViewerStoreIngress: @unchecked Sendable, CustomReflectable,
       }
       lock.unlock()
 
+      let commitResults: [ViewerEventStoreCommitResult]
       do {
         if let structuralEntry { try store.appendStructural(structuralEntry.1) }
-        if !eventBatch.isEmpty { _ = try store.appendEvents(eventBatch.map(\.1)) }
+        commitResults =
+          eventBatch.isEmpty ? [] : try store.appendEventResults(eventBatch.map(\.1))
       } catch let error as ViewerStoreError
         where error == .staleObservation && structuralEntry != nil
       {
@@ -1992,11 +2134,17 @@ final class ViewerStoreIngress: @unchecked Sendable, CustomReflectable,
         let waiters = flushWaiters
         flushWaiters.removeAll()
         lock.unlock()
+        for (entry, result) in zip(eventBatch, commitResults) {
+          entry.3(result.outcome)
+        }
         for waiter in waiters { waiter.resume(returning: .drained) }
         return
       }
       drainDirty = false
       lock.unlock()
+      for (entry, result) in zip(eventBatch, commitResults) {
+        entry.3(result.outcome)
+      }
     }
   }
 

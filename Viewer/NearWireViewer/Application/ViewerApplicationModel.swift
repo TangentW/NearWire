@@ -16,6 +16,8 @@ final class ViewerApplicationModel: ObservableObject {
   @Published private(set) var status: Status = .stopped
   @Published private(set) var pendingApps: [ViewerPendingAppSummary] = []
   @Published private(set) var sessions: [ViewerSessionSnapshot] = []
+  @Published private(set) var explorerController: ViewerEventExplorerController?
+  @Published private(set) var composerController: ViewerControlComposerController?
   @Published var selectedRoute: ViewerLogicalRoute?
   @Published var showsFullIdentityResetConfirmation = false
   @Published private(set) var storageConfiguration: ViewerStorageConfiguration
@@ -40,8 +42,9 @@ final class ViewerApplicationModel: ObservableObject {
   private var isPaused = false
   private var pendingCoalescer: ViewerPendingCoalescer?
   private var sessionCoalescer: ViewerSessionSnapshotCoalescer?
-  private var sessionManager: ViewerMultiDeviceSessionManager?
-  private var storeStatusRefreshGeneration: UInt64 = 0
+  private var storeStatusRefreshCoordinator: ViewerStoreStatusRefreshCoordinator?
+  private var runtimeComponents: ViewerRuntimeComponents?
+  private var sessionControl: (any ViewerSessionControlling)?
   private lazy var admissionManager = ViewerAdmissionManager(onPending: { _ in })
 
   init(
@@ -64,8 +67,17 @@ final class ViewerApplicationModel: ObservableObject {
       lastCleanupCategory: .none
     )
     admissionManager.setRequiresApproval(requiresApproval)
-    dependencies.observeStoreStatus { [weak self] in
-      Task { @MainActor [weak self] in self?.refreshStoreStatus() }
+    let storeStatusRefreshCoordinator = ViewerStoreStatusRefreshCoordinator(
+      load: dependencies.loadStoreStatus
+    ) { [weak self] value in
+      guard let self else { return }
+      self.storeStatus = value
+      self.runtimeComponents?.liveObservations.storeStateChanged(value.state)
+      self.explorerController?.noteStoreChanged()
+    }
+    self.storeStatusRefreshCoordinator = storeStatusRefreshCoordinator
+    dependencies.observeStoreStatus { [weak storeStatusRefreshCoordinator] in
+      storeStatusRefreshCoordinator?.request()
     }
     refreshStoreStatus()
   }
@@ -121,7 +133,7 @@ final class ViewerApplicationModel: ObservableObject {
 
   func disconnectSelectedDevice() {
     guard let id = selectedSession?.connectionID else { return }
-    sessionManager?.disconnect(connectionID: id)
+    sessionControl?.disconnect(connectionID: id)
   }
 
   func updateSelectedRates(appUplink: String, appDownlink: String) -> Bool {
@@ -129,13 +141,13 @@ final class ViewerApplicationModel: ObservableObject {
       let uplink = Double(appUplink), let downlink = Double(appDownlink),
       let policy = try? ViewerRatePolicy(appUplink: uplink, appDownlink: downlink)
     else { return false }
-    sessionManager?.updatePolicy(connectionID: id, policy: policy)
+    sessionControl?.updatePolicy(connectionID: id, policy: policy)
     return true
   }
 
   func updateSelectedNickname(_ nickname: String) -> Bool {
     guard let route = selectedRoute else { return false }
-    return sessionManager?.setNickname(nickname.isEmpty ? nil : nickname, route: route) ?? false
+    return sessionControl?.setNickname(nickname.isEmpty ? nil : nickname, route: route) ?? false
   }
 
   func updateStorage(capacityGiB: String, historyRetentionDays: String) -> Bool {
@@ -167,18 +179,7 @@ final class ViewerApplicationModel: ObservableObject {
   }
 
   func refreshStoreStatus() {
-    storeStatusRefreshGeneration =
-      storeStatusRefreshGeneration == UInt64.max
-      ? 1 : storeStatusRefreshGeneration + 1
-    let generation = storeStatusRefreshGeneration
-    let load = dependencies.loadStoreStatus
-    Task { [weak self] in
-      let value = await Task.detached(operation: load).value
-      guard !Task.isCancelled, let self,
-        self.storeStatusRefreshGeneration == generation
-      else { return }
-      self.storeStatus = value
-    }
+    storeStatusRefreshCoordinator?.request()
   }
 
   var selectedSession: ViewerSessionSnapshot? {
@@ -217,7 +218,9 @@ final class ViewerApplicationModel: ObservableObject {
 
   func prepareForTermination() async -> ViewerCleanupOutcome {
     startupTask?.cancel()
+    let storeStatusCleanup = storeStatusRefreshCoordinator?.deactivateAndWait()
     let outcome = await beginStopRuntime().value
+    await storeStatusCleanup?.value
     status = .stopped
     return outcome
   }
@@ -230,6 +233,8 @@ final class ViewerApplicationModel: ObservableObject {
     preparingListener = nil
     pendingApps = []
     sessions = []
+    explorerController = nil
+    composerController = nil
     selectedRoute = nil
     isPaused = false
     shutdownTask = nil
@@ -244,18 +249,32 @@ final class ViewerApplicationModel: ObservableObject {
     let sessionCoalescer = ViewerSessionSnapshotCoalescer { [weak self] snapshots in
       guard let self, self.runtimeToken == token else { return }
       self.sessions = snapshots
+      self.explorerController?.updateSessionSnapshots(snapshots)
+      self.composerController?.updateSessionSnapshots(snapshots)
       if let selected = self.selectedRoute, snapshots.contains(where: { $0.route == selected }) {
         return
       }
       self.selectedRoute = snapshots.first?.route
     }
     self.sessionCoalescer = sessionCoalescer
-    let handoffOwner = dependencies.makeHandoffOwner()
-    sessionManager = handoffOwner as? ViewerMultiDeviceSessionManager
-    sessionManager?.setSnapshotHandler { snapshots in sessionCoalescer.submit(snapshots) }
+    let runtimeLogicalID = UUID()
+    let components = dependencies.makeRuntimeComponents(runtimeLogicalID)
+    runtimeComponents = components
+    let explorerController = ViewerEventExplorerController(inputs: components.explorerInputs)
+    self.explorerController = explorerController
+    explorerController.start()
+    composerController = try? ViewerControlComposerController(
+      runtimeLogicalID: runtimeLogicalID,
+      sessionControl: components.sessionControl
+    )
+    refreshStoreStatus()
+    sessionControl = components.sessionControl
+    components.sessionControl.setSnapshotHandler { snapshots in
+      sessionCoalescer.submit(snapshots)
+    }
     admissionManager = makeAdmissionManager(
       pendingCoalescer: pendingCoalescer,
-      handoffOwner: handoffOwner
+      handoffOwner: components.handoffOwner
     )
     admissionManager.setRequiresApproval(requiresApproval)
 
@@ -269,7 +288,7 @@ final class ViewerApplicationModel: ObservableObject {
         return
       } catch {
         guard let self, self.runtimeToken == token else { return }
-        self.status = .failed(.identityUnavailable)
+        self.failRuntime(.identityUnavailable)
         return
       }
 
@@ -278,9 +297,9 @@ final class ViewerApplicationModel: ObservableObject {
       do {
         try self.startListenerCandidate(identity: identity, collisionAttempt: 0)
       } catch let error as ViewerPresentationError {
-        self.status = .failed(error)
+        self.failRuntime(error)
       } catch {
-        self.status = .failed(.listenerUnavailable)
+        self.failRuntime(.listenerUnavailable)
       }
     }
   }
@@ -296,7 +315,17 @@ final class ViewerApplicationModel: ObservableObject {
     pendingCoalescer = nil
     sessionCoalescer?.deactivate()
     sessionCoalescer = nil
-    let receipt = admissionManager.stop()
+    let explorerCleanup = explorerController?.sealAndClear() ?? Task {}
+    explorerController = nil
+    let composerCleanup = composerController?.sealAndClear() ?? Task {}
+    composerController = nil
+    let componentCleanup = runtimeComponents?.cleanupReceipt.begin() ?? Task {}
+    let presentationCleanup = Task {
+      async let explorer: Void = explorerCleanup.value
+      async let composer: Void = composerCleanup.value
+      _ = await (explorer, composer)
+    }
+    let receipt = admissionManager.stop().joining(componentCleanup).joining(presentationCleanup)
     preparingListener?.admissionIngress.deactivate()
     activeListener?.admissionIngress.deactivate()
     preparingListener?.listener.cancel()
@@ -307,7 +336,8 @@ final class ViewerApplicationModel: ObservableObject {
     pendingApps = []
     sessions = []
     selectedRoute = nil
-    sessionManager = nil
+    sessionControl = nil
+    runtimeComponents = nil
     isPaused = false
     let timeout = dependencies.cleanupTimeoutNanoseconds
     let scheduler = dependencies.scheduler
@@ -321,6 +351,11 @@ final class ViewerApplicationModel: ObservableObject {
     }
     shutdownTask = task
     return task
+  }
+
+  private func failRuntime(_ error: ViewerPresentationError) {
+    _ = beginStopRuntime()
+    status = .failed(error)
   }
 
   private func resetIdentity(using operation: @escaping @Sendable () throws -> Void) {
@@ -492,7 +527,7 @@ final class ViewerApplicationModel: ObservableObject {
     guard candidate.collisionAttempt + 1 < Self.maximumCollisionAttempts,
       let identity = preparedIdentity
     else {
-      if activeListener == nil { status = .failed(.listenerUnavailable) }
+      if activeListener == nil { failRuntime(.listenerUnavailable) }
       return
     }
     do {
@@ -501,9 +536,9 @@ final class ViewerApplicationModel: ObservableObject {
         collisionAttempt: candidate.collisionAttempt + 1
       )
     } catch let error as ViewerPresentationError {
-      if activeListener == nil { status = .failed(error) }
+      if activeListener == nil { failRuntime(error) }
     } catch {
-      if activeListener == nil { status = .failed(.listenerUnavailable) }
+      if activeListener == nil { failRuntime(.listenerUnavailable) }
     }
   }
 
@@ -515,7 +550,7 @@ final class ViewerApplicationModel: ObservableObject {
       candidate.admissionIngress.deactivate()
       preparingListener = nil
       candidate.listener.cancel()
-      if activeListener == nil { status = .failed(error) }
+      if activeListener == nil { failRuntime(error) }
       return
     }
     guard activeListener?.id == candidate.id else { return }
@@ -523,7 +558,7 @@ final class ViewerApplicationModel: ObservableObject {
     admissionManager.cancelGeneration(candidate.id)
     activeListener = nil
     candidate.listener.cancel()
-    status = .failed(error)
+    failRuntime(error)
   }
 
   private func listenerGeneration(id: UUID) -> ViewerListenerGeneration? {

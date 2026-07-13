@@ -62,6 +62,11 @@ Session terminal presentation uses only these closed local categories: `transpor
 
 Uplink consumer execution transfers one Event at a time and is globally capped at 16 operations. Cancellation clears any not-yet-started payload immediately. If a synchronous consumer is already executing and does not return, that single current value is consumer-owned; no remaining batch is retained by the ended session.
 
+The Event Explorer composes these sessions, telemetry values, bounded queues, and typed downlink
+admission through the same manager; it does not create a second protocol owner. See
+[Viewer-Event-Explorer.md](Viewer-Event-Explorer.md) for live-versus-recorded presentation,
+inspection, history operations, export, and control-composer semantics.
+
 ## Signing Gate
 
 Unsigned builds cover compilation and behavioral tests but cannot prove the packaged entitlements or cross-update login-Keychain boundary. The stable-signer A/unrelated/B sequence remains explicitly deferred to `release-hardening`, where two configured, unrelated signing identities are required.

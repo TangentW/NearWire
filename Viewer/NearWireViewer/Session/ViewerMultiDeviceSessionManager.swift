@@ -1,9 +1,153 @@
 import Foundation
 @_spi(NearWireInternal) import NearWireCore
+@_spi(NearWireInternal) import NearWireFlowControl
 @_spi(NearWireInternal) import NearWireTransport
 
-final class ViewerMultiDeviceSessionManager: ViewerAdmissionHandoffOwning, @unchecked Sendable,
-  CustomReflectable, CustomStringConvertible, CustomDebugStringConvertible
+struct ViewerControlTargetCapability: Equatable, Hashable, Sendable {
+  fileprivate let tokenUUID: UUID
+  fileprivate let runtimeLogicalID: UUID
+  fileprivate let managerGeneration: UInt64
+  fileprivate let connectionID: UUID
+
+}
+
+struct ViewerControlTarget: Sendable {
+  let connectionID: UUID
+  let capability: ViewerControlTargetCapability
+}
+
+enum ViewerControlDraftPolicy: Equatable, Sendable {
+  case normal
+  case keepLatest
+}
+
+enum ViewerPreparedControlEventError: Error, Equatable, Sendable {
+  case invalidEncodedSize
+  case encodingFailed
+  case invalidPolicy
+}
+
+struct ViewerPreparedControlEvent: Sendable {
+  static let maximumEncodedBytes = 16 * 1_024 * 1_024
+
+  let draft: EventDraft
+  let deterministicEncodedByteCount: Int
+  let policy: ViewerControlDraftPolicy
+  let queuePolicy: EventQueuePolicy
+
+  init(
+    draft: EventDraft,
+    policy: ViewerControlDraftPolicy
+  ) throws {
+    try self.init(draft: draft, policy: policy) { draft in
+      let encoder = JSONEncoder()
+      encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+      return try encoder.encode(draft)
+    }
+  }
+
+  init(
+    draft: EventDraft,
+    policy: ViewerControlDraftPolicy,
+    encode: @escaping @Sendable (EventDraft) throws -> Data
+  ) throws {
+    let data: Data
+    do { data = try encode(draft) } catch { throw ViewerPreparedControlEventError.encodingFailed }
+    guard (1...Self.maximumEncodedBytes).contains(data.count) else {
+      throw ViewerPreparedControlEventError.invalidEncodedSize
+    }
+    self.draft = draft
+    deterministicEncodedByteCount = data.count
+    self.policy = policy
+    switch policy {
+    case .normal:
+      queuePolicy = .normal
+    case .keepLatest:
+      do {
+        queuePolicy = .keepLatest(try KeepLatestKey(draft.type.rawValue))
+      } catch {
+        throw ViewerPreparedControlEventError.invalidPolicy
+      }
+    }
+  }
+
+}
+
+enum ViewerControlTargetOutcome: String, Equatable, Sendable {
+  case queued
+  case invalidTarget
+  case noLongerConnected
+  case notActive
+  case queueRejected
+}
+
+struct ViewerControlTargetResult: Equatable, Sendable {
+  let inputIndex: Int
+  let outcome: ViewerControlTargetOutcome
+
+  var statusText: String {
+    switch outcome {
+    case .queued: return "Queued locally"
+    case .invalidTarget: return "Invalid target"
+    case .noLongerConnected: return "No longer connected"
+    case .notActive: return "Not active"
+    case .queueRejected: return "Queue rejected"
+    }
+  }
+}
+
+enum ViewerControlSendError: Error, Equatable, Sendable {
+  case invalidTargetCount
+}
+
+extension ViewerControlTargetCapability: CustomReflectable, CustomStringConvertible,
+  CustomDebugStringConvertible
+{
+  var description: String { "ViewerControlTargetCapability(redacted)" }
+  var debugDescription: String { description }
+  var customMirror: Mirror { Mirror(self, children: [:], displayStyle: .struct) }
+}
+
+extension ViewerControlTarget: CustomReflectable, CustomStringConvertible,
+  CustomDebugStringConvertible
+{
+  var description: String { "ViewerControlTarget(redacted)" }
+  var debugDescription: String { description }
+  var customMirror: Mirror { Mirror(self, children: [:], displayStyle: .struct) }
+}
+
+extension ViewerPreparedControlEvent: CustomReflectable, CustomStringConvertible,
+  CustomDebugStringConvertible
+{
+  var description: String {
+    "ViewerPreparedControlEvent(bytes: \(deterministicEncodedByteCount), redacted)"
+  }
+  var debugDescription: String { description }
+  var customMirror: Mirror {
+    Mirror(
+      self,
+      children: ["deterministicEncodedByteCount": deterministicEncodedByteCount],
+      displayStyle: .struct
+    )
+  }
+}
+
+extension ViewerControlTargetResult: CustomReflectable, CustomStringConvertible,
+  CustomDebugStringConvertible
+{
+  var description: String { "ViewerControlTargetResult(outcome: \(outcome.rawValue))" }
+  var debugDescription: String { description }
+  var customMirror: Mirror {
+    Mirror(
+      self,
+      children: ["inputIndex": inputIndex, "outcome": outcome.rawValue],
+      displayStyle: .struct
+    )
+  }
+}
+
+final class ViewerMultiDeviceSessionManager: ViewerAdmissionHandoffOwning, ViewerSessionControlling,
+  @unchecked Sendable, CustomReflectable, CustomStringConvertible, CustomDebugStringConvertible
 {
   typealias SnapshotHandler = @Sendable ([ViewerSessionSnapshot]) -> Void
 
@@ -11,8 +155,14 @@ final class ViewerMultiDeviceSessionManager: ViewerAdmissionHandoffOwning, @unch
     let connectionID: UUID
     let route: ViewerLogicalRoute
     let session: ViewerDeviceSession
+    var controlCapability: ViewerControlTargetCapability?
     var snapshot: ViewerSessionSnapshot
     var disconnectGeneration: UInt64
+  }
+
+  private struct TerminalControlTarget {
+    let capability: ViewerControlTargetCapability
+    let terminalAt: UInt64
   }
 
   private struct RecentRow {
@@ -26,38 +176,58 @@ final class ViewerMultiDeviceSessionManager: ViewerAdmissionHandoffOwning, @unch
   static let maximumSessions = 16
   static let maximumRecentRows = 64
   static let recentTTLNanoseconds: UInt64 = 30_000_000_000
+  static let maximumTerminalControlTargets = 64
+  static let terminalControlTargetTTLNanoseconds: UInt64 = 30_000_000_000
 
   private let lock = NSLock()
+  private let controlSendLock = NSLock()
   private let scheduler: ViewerAdmissionScheduler
   private let preferences: ViewerDevicePreferences
   private var onSnapshots: SnapshotHandler
   private let uplinkSink: @Sendable (UUID, WireReceivedEvent) -> Void
+  private let eventWallMilliseconds: @Sendable () -> Int64
+  private let controlTokenUUID: @Sendable () -> UUID
   private let journal: any ViewerSessionJournaling
-  private let runtimeLogicalID: UUID
+  let runtimeLogicalID: UUID
+  let managerGeneration: UInt64
   private var entries: [UUID: Entry] = [:]
   private var liveRoutes: [ViewerLogicalRoute: UUID] = [:]
   private var recentRows: [ViewerLogicalRoute: RecentRow] = [:]
+  private var terminalControlTargets: [UUID: TerminalControlTarget] = [:]
+  private var issuedControlTokenUUIDs: Set<UUID> = []
+  private var terminalControlExpiryGeneration: UInt64 = 0
+  private var terminalControlExpiryWake: Task<Void, Never>?
   private var nextDisconnectGeneration: UInt64 = 0
   private var expiryGeneration: UInt64 = 0
   private var expiryWake: Task<Void, Never>?
   private var shuttingDown = false
   private var shutdownTask: Task<Void, Never>?
   private var shutdownWaiters: [CheckedContinuation<Void, Never>] = []
+  private var controlAdmissionSealed = false
 
   init(
+    runtimeLogicalID: UUID,
+    managerGeneration: UInt64,
     scheduler: ViewerAdmissionScheduler = .live,
     preferences: ViewerDevicePreferences = ViewerDevicePreferences(),
     onSnapshots: @escaping SnapshotHandler = { _ in },
     uplinkSink: @escaping @Sendable (UUID, WireReceivedEvent) -> Void = { _, _ in },
+    eventWallMilliseconds: @escaping @Sendable () -> Int64 = {
+      Int64((Date().timeIntervalSince1970 * 1_000).rounded())
+    },
+    controlTokenUUID: @escaping @Sendable () -> UUID = { UUID() },
     journal: any ViewerSessionJournaling = ViewerNoopSessionJournal()
   ) {
+    precondition(managerGeneration > 0)
+    self.runtimeLogicalID = runtimeLogicalID
+    self.managerGeneration = managerGeneration
     self.scheduler = scheduler
     self.preferences = preferences
     self.onSnapshots = onSnapshots
     self.uplinkSink = uplinkSink
+    self.eventWallMilliseconds = eventWallMilliseconds
+    self.controlTokenUUID = controlTokenUUID
     self.journal = journal
-    let runtimeLogicalID = UUID()
-    self.runtimeLogicalID = runtimeLogicalID
     journal.runtimeStarted(
       logicalID: runtimeLogicalID,
       wallMilliseconds: Int64((Date().timeIntervalSince1970 * 1_000).rounded()),
@@ -67,10 +237,22 @@ final class ViewerMultiDeviceSessionManager: ViewerAdmissionHandoffOwning, @unch
 
   func setSnapshotHandler(_ handler: @escaping SnapshotHandler) {
     lock.lock()
+    guard !controlAdmissionSealed else {
+      lock.unlock()
+      handler([])
+      return
+    }
     onSnapshots = handler
     let snapshots = snapshotsLocked()
     lock.unlock()
     handler(snapshots)
+  }
+
+  func sealControlAdmission() {
+    lock.lock()
+    controlAdmissionSealed = true
+    onSnapshots = { _ in }
+    lock.unlock()
   }
 
   func transfer(_ handle: ViewerAdmissionHandle) -> Bool {
@@ -100,13 +282,21 @@ final class ViewerMultiDeviceSessionManager: ViewerAdmissionHandoffOwning, @unch
         uplinkSink: { [weak self] event in
           self?.uplinkSink(context.connectionID, event)
         },
-        uplinkJournal: { [journal] event, disposition in
-          journal.uplinkCommitted(
-            runtimeLogicalID: runtimeLogicalID,
-            connectionID: context.connectionID,
-            event: event,
-            initialDisposition: disposition
-          )
+        uplinkJournal: { [journal, eventWallMilliseconds] event, disposition in
+          guard
+            let observation = try? ViewerCommittedEventObservation(
+              runtimeLogicalID: runtimeLogicalID,
+              context: context,
+              nickname: nickname,
+              envelope: event.envelope,
+              viewerWallMilliseconds: eventWallMilliseconds(),
+              viewerMonotonicNanoseconds: event.receivedAtNanoseconds,
+              deterministicEventBytes: event.deterministicEncodedByteCount,
+              canonicalContent: event.canonicalContentData,
+              initialDisposition: disposition
+            )
+          else { return }
+          journal.eventCommitted(observation) { _ in }
         },
         uplinkDispositionJournal: { [journal] direction, wireSequence, disposition, monotonic in
           journal.uplinkTerminated(
@@ -118,13 +308,23 @@ final class ViewerMultiDeviceSessionManager: ViewerAdmissionHandoffOwning, @unch
             monotonicNanoseconds: monotonic
           )
         },
-        downlinkJournal: { [journal] events, monotonicNanoseconds in
-          journal.transportAdmitted(
-            runtimeLogicalID: runtimeLogicalID,
-            connectionID: context.connectionID,
-            events: events,
-            monotonicNanoseconds: monotonicNanoseconds
-          )
+        downlinkJournal: { [journal, eventWallMilliseconds] events, monotonicNanoseconds in
+          for event in events {
+            guard
+              let observation = try? ViewerCommittedEventObservation(
+                runtimeLogicalID: runtimeLogicalID,
+                context: context,
+                nickname: nickname,
+                envelope: event.envelope,
+                viewerWallMilliseconds: eventWallMilliseconds(),
+                viewerMonotonicNanoseconds: monotonicNanoseconds,
+                deterministicEventBytes: event.deterministicEncodedByteCount,
+                canonicalContent: event.canonicalContentData,
+                initialDisposition: .transportAdmitted
+              )
+            else { continue }
+            journal.eventCommitted(observation) { _ in }
+          }
         },
         policyJournal: { [journal] policy, monotonicNanoseconds in
           journal.policyChanged(
@@ -148,7 +348,16 @@ final class ViewerMultiDeviceSessionManager: ViewerAdmissionHandoffOwning, @unch
     } catch { return false }
 
     lock.lock()
-    guard !shuttingDown, entries.count < Self.maximumSessions, liveRoutes[route] == nil else {
+    guard !shuttingDown, entries.count < Self.maximumSessions,
+      entries[context.connectionID] == nil,
+      terminalControlTargets[context.connectionID] == nil,
+      liveRoutes[route] == nil
+    else {
+      lock.unlock()
+      return false
+    }
+    guard let controlCapability = issueControlCapabilityLocked(connectionID: context.connectionID)
+    else {
       lock.unlock()
       return false
     }
@@ -156,6 +365,7 @@ final class ViewerMultiDeviceSessionManager: ViewerAdmissionHandoffOwning, @unch
       connectionID: context.connectionID,
       route: route,
       session: session,
+      controlCapability: controlCapability,
       snapshot: provisional,
       disconnectGeneration: 0
     )
@@ -173,6 +383,7 @@ final class ViewerMultiDeviceSessionManager: ViewerAdmissionHandoffOwning, @unch
     guard !shuttingDown, entries[context.connectionID]?.session === session else {
       if entries.removeValue(forKey: context.connectionID) != nil {
         liveRoutes.removeValue(forKey: route)
+        issuedControlTokenUUIDs.remove(controlCapability.tokenUUID)
       }
       let snapshots = snapshotsLocked()
       let handler = onSnapshots
@@ -199,7 +410,17 @@ final class ViewerMultiDeviceSessionManager: ViewerAdmissionHandoffOwning, @unch
       return shutdownTask
     }
     shuttingDown = true
+    controlAdmissionSealed = true
+    let snapshotHandler = onSnapshots
+    onSnapshots = { _ in }
     recentRows.removeAll()
+    terminalControlTargets.removeAll()
+    issuedControlTokenUUIDs.removeAll()
+    terminalControlExpiryWake?.cancel()
+    terminalControlExpiryWake = nil
+    for connectionID in entries.keys {
+      entries[connectionID]?.controlCapability = nil
+    }
     expiryWake?.cancel()
     expiryWake = nil
     let sessions = entries.values.map(\.session)
@@ -215,25 +436,23 @@ final class ViewerMultiDeviceSessionManager: ViewerAdmissionHandoffOwning, @unch
       )
     }
     shutdownTask = task
-    let snapshots = snapshotsLocked()
-    let handler = onSnapshots
     finishShutdownIfPossibleLocked()
     lock.unlock()
-    handler(snapshots)
+    snapshotHandler([])
     for session in sessions { session.disconnect(category: .viewerShutdown) }
     return task
   }
 
   func disconnect(connectionID: UUID) {
     lock.lock()
-    let session = entries[connectionID]?.session
+    let session = controlAdmissionSealed ? nil : entries[connectionID]?.session
     lock.unlock()
     session?.disconnect(category: .userDisconnected)
   }
 
   func updatePolicy(connectionID: UUID, policy: ViewerRatePolicy) {
     lock.lock()
-    let entry = entries[connectionID]
+    let entry = controlAdmissionSealed ? nil : entries[connectionID]
     lock.unlock()
     guard let entry else { return }
     if let bundle = entry.route.applicationIdentifier {
@@ -242,10 +461,54 @@ final class ViewerMultiDeviceSessionManager: ViewerAdmissionHandoffOwning, @unch
     entry.session.updateRequestedPolicy(policy)
   }
 
+  func controlTargets() -> [ViewerControlTarget] {
+    lock.lock()
+    defer { lock.unlock() }
+    guard !controlAdmissionSealed else { return [] }
+    return entries.values.compactMap { entry in
+      guard let capability = entry.controlCapability else { return nil }
+      return ViewerControlTarget(connectionID: entry.connectionID, capability: capability)
+    }.sorted { $0.connectionID.uuidString < $1.connectionID.uuidString }
+  }
+
+  func send(
+    _ prepared: ViewerPreparedControlEvent,
+    to capabilities: [ViewerControlTargetCapability]
+  ) throws -> [ViewerControlTargetResult] {
+    guard (1...Self.maximumSessions).contains(capabilities.count) else {
+      throw ViewerControlSendError.invalidTargetCount
+    }
+
+    controlSendLock.lock()
+    defer { controlSendLock.unlock() }
+    var counts: [UUID: Int] = [:]
+    counts.reserveCapacity(capabilities.count)
+    for capability in capabilities {
+      counts[capability.tokenUUID, default: 0] += 1
+    }
+
+    return capabilities.enumerated().map { index, capability in
+      let outcome: ViewerControlTargetOutcome
+      if counts[capability.tokenUUID] != 1 {
+        outcome = .invalidTarget
+      } else {
+        outcome = classifyAndEnqueue(prepared, capability: capability)
+      }
+      return ViewerControlTargetResult(inputIndex: index, outcome: outcome)
+    }
+  }
+
   @discardableResult
   func setNickname(_ nickname: String?, route: ViewerLogicalRoute) -> Bool {
-    guard preferences.setNickname(nickname, for: route) else { return false }
     lock.lock()
+    guard !controlAdmissionSealed else {
+      lock.unlock()
+      return false
+    }
+    guard preferences.setNickname(nickname, for: route) else {
+      lock.unlock()
+      return false
+    }
     if let id = liveRoutes[route], var entry = entries[id] {
       entry.snapshot = Self.replacingNickname(entry.snapshot, nickname: nickname)
       entries[id] = entry
@@ -273,7 +536,7 @@ final class ViewerMultiDeviceSessionManager: ViewerAdmissionHandoffOwning, @unch
     policy: ViewerDownlinkPolicy = .normal
   ) -> Bool {
     lock.lock()
-    let session = entries[connectionID]?.session
+    let session = controlAdmissionSealed ? nil : entries[connectionID]?.session
     lock.unlock()
     return session?.enqueueDownlink(draft, policy: policy) ?? false
   }
@@ -290,9 +553,24 @@ final class ViewerMultiDeviceSessionManager: ViewerAdmissionHandoffOwning, @unch
     return recentRows.count
   }
 
+  var terminalControlTargetCount: Int {
+    lock.lock()
+    let now = scheduler.now()
+    let didPurge = purgeExpiredTerminalControlTargetsLocked(now: now)
+    if didPurge { scheduleTerminalControlExpiryLocked(now: now) }
+    let count = terminalControlTargets.count
+    lock.unlock()
+    return count
+  }
+
   private func rollbackProvisional(connectionID: UUID, route: ViewerLogicalRoute) {
     lock.lock()
-    if entries.removeValue(forKey: connectionID) != nil { liveRoutes.removeValue(forKey: route) }
+    if let entry = entries.removeValue(forKey: connectionID) {
+      liveRoutes.removeValue(forKey: route)
+      if let capability = entry.controlCapability {
+        issuedControlTokenUUIDs.remove(capability.tokenUUID)
+      }
+    }
     let snapshots = snapshotsLocked()
     let handler = onSnapshots
     finishShutdownIfPossibleLocked()
@@ -329,6 +607,17 @@ final class ViewerMultiDeviceSessionManager: ViewerAdmissionHandoffOwning, @unch
       ? 1 : nextDisconnectGeneration + 1
     entry.disconnectGeneration = nextDisconnectGeneration
     entry.snapshot = Self.terminalSnapshot(entry.snapshot, category: category)
+    if let capability = entry.controlCapability, !shuttingDown {
+      let terminalAt = scheduler.now()
+      entry.controlCapability = nil
+      terminalControlTargets[connectionID] = TerminalControlTarget(
+        capability: capability,
+        terminalAt: terminalAt
+      )
+      purgeExpiredTerminalControlTargetsLocked(now: terminalAt)
+      evictTerminalControlTargetsLocked()
+      scheduleTerminalControlExpiryLocked(now: terminalAt)
+    }
     entries[connectionID] = entry
     let generation = entry.disconnectGeneration
     let session = entry.session
@@ -429,6 +718,121 @@ final class ViewerMultiDeviceSessionManager: ViewerAdmissionHandoffOwning, @unch
       else { return }
       recentRows.removeValue(forKey: victim.route)
     }
+  }
+
+  private func issueControlCapabilityLocked(connectionID: UUID)
+    -> ViewerControlTargetCapability?
+  {
+    for _ in 0..<8 {
+      let tokenUUID = controlTokenUUID()
+      guard issuedControlTokenUUIDs.insert(tokenUUID).inserted else { continue }
+      return ViewerControlTargetCapability(
+        tokenUUID: tokenUUID,
+        runtimeLogicalID: runtimeLogicalID,
+        managerGeneration: managerGeneration,
+        connectionID: connectionID
+      )
+    }
+    return nil
+  }
+
+  private func classifyAndEnqueue(
+    _ prepared: ViewerPreparedControlEvent,
+    capability: ViewerControlTargetCapability
+  ) -> ViewerControlTargetOutcome {
+    guard capability.runtimeLogicalID == runtimeLogicalID,
+      capability.managerGeneration == managerGeneration
+    else { return .invalidTarget }
+
+    lock.lock()
+    let now = scheduler.now()
+    if purgeExpiredTerminalControlTargetsLocked(now: now) {
+      scheduleTerminalControlExpiryLocked(now: now)
+    }
+    if terminalControlTargets[capability.connectionID]?.capability == capability {
+      lock.unlock()
+      return .noLongerConnected
+    }
+    guard !controlAdmissionSealed,
+      let entry = entries[capability.connectionID],
+      entry.controlCapability == capability
+    else {
+      lock.unlock()
+      return .invalidTarget
+    }
+    let session = entry.session
+    lock.unlock()
+    return session.enqueuePreparedControl(prepared)
+  }
+
+  @discardableResult
+  private func purgeExpiredTerminalControlTargetsLocked(now: UInt64) -> Bool {
+    let expired = terminalControlTargets.compactMap { connectionID, terminal -> UUID? in
+      let elapsed = now >= terminal.terminalAt ? now - terminal.terminalAt : UInt64.max
+      return elapsed >= Self.terminalControlTargetTTLNanoseconds ? connectionID : nil
+    }
+    for connectionID in expired {
+      guard let terminal = terminalControlTargets.removeValue(forKey: connectionID) else {
+        continue
+      }
+      issuedControlTokenUUIDs.remove(terminal.capability.tokenUUID)
+    }
+    return !expired.isEmpty
+  }
+
+  private func evictTerminalControlTargetsLocked() {
+    while terminalControlTargets.count > Self.maximumTerminalControlTargets {
+      guard
+        let victim = terminalControlTargets.min(by: { lhs, rhs in
+          if lhs.value.terminalAt != rhs.value.terminalAt {
+            return lhs.value.terminalAt < rhs.value.terminalAt
+          }
+          return lhs.value.capability.tokenUUID.uuidString
+            < rhs.value.capability.tokenUUID.uuidString
+        })
+      else { return }
+      terminalControlTargets.removeValue(forKey: victim.key)
+      issuedControlTokenUUIDs.remove(victim.value.capability.tokenUUID)
+    }
+  }
+
+  private func scheduleTerminalControlExpiryLocked(now: UInt64) {
+    terminalControlExpiryGeneration =
+      terminalControlExpiryGeneration == UInt64.max
+      ? 1 : terminalControlExpiryGeneration + 1
+    let generation = terminalControlExpiryGeneration
+    terminalControlExpiryWake?.cancel()
+    guard !shuttingDown,
+      let terminalAt = terminalControlTargets.values.map(\.terminalAt).min()
+    else {
+      terminalControlExpiryWake = nil
+      return
+    }
+    let (candidateDeadline, overflow) = terminalAt.addingReportingOverflow(
+      Self.terminalControlTargetTTLNanoseconds
+    )
+    let deadline = overflow ? UInt64.max : candidateDeadline
+    guard deadline > now else {
+      terminalControlExpiryWake = nil
+      return
+    }
+    terminalControlExpiryWake = Task { [weak self, scheduler] in
+      do { try await scheduler.sleep(untilNanoseconds: deadline) } catch { return }
+      guard !Task.isCancelled else { return }
+      self?.expireTerminalControlTargets(generation: generation)
+    }
+  }
+
+  private func expireTerminalControlTargets(generation: UInt64) {
+    lock.lock()
+    guard generation == terminalControlExpiryGeneration, !shuttingDown else {
+      lock.unlock()
+      return
+    }
+    let now = scheduler.now()
+    purgeExpiredTerminalControlTargetsLocked(now: now)
+    scheduleTerminalControlExpiryLocked(now: now)
+    lock.unlock()
   }
 
   private func snapshotsLocked() -> [ViewerSessionSnapshot] {

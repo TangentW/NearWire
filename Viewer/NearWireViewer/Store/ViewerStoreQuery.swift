@@ -276,58 +276,23 @@ enum ViewerEventQueryCompiler {
     bindings.append(contentsOf: normalized.map(ViewerQueryBinding.text))
   }
 
-  private static func canonicalJSONPath(_ value: String) throws -> String {
-    let normalized = value.precomposedStringWithCanonicalMapping
-    guard normalized.utf8.count <= 256, normalized.first == "$" else {
+  static func canonicalJSONPath(_ value: String) throws -> String {
+    do {
+      return try ViewerJSONPath(value).rawValue
+    } catch {
       throw ViewerStoreError.invalidValue
     }
-    var index = normalized.index(after: normalized.startIndex)
-    var components = 0
-    while index < normalized.endIndex {
-      components += 1
-      guard components <= 16 else { throw ViewerStoreError.invalidValue }
-      if normalized[index] == "." {
-        index = normalized.index(after: index)
-        let start = index
-        while index < normalized.endIndex {
-          let scalar = normalized[index].unicodeScalars.first!
-          if scalar == "." || scalar == "[" { break }
-          guard
-            scalar.properties.isAlphabetic || scalar.properties.numericType != nil
-              || scalar == "_" || scalar == "-"
-          else { throw ViewerStoreError.invalidValue }
-          index = normalized.index(after: index)
-        }
-        guard start != index else { throw ViewerStoreError.invalidValue }
-      } else if normalized[index] == "[" {
-        index = normalized.index(after: index)
-        let start = index
-        while index < normalized.endIndex,
-          normalized[index].unicodeScalars.count == 1,
-          (48...57).contains(normalized[index].unicodeScalars.first!.value)
-        {
-          index = normalized.index(after: index)
-        }
-        guard start != index, index < normalized.endIndex, normalized[index] == "]" else {
-          throw ViewerStoreError.invalidValue
-        }
-        index = normalized.index(after: index)
-      } else {
-        throw ViewerStoreError.invalidValue
-      }
-    }
-    return normalized
   }
 
   private static func validateSearchText(_ value: String, maximumBytes: Int) throws {
     _ = try normalizedSearchText(value, maximumBytes: maximumBytes)
   }
 
-  private static func canonicalEventType(_ value: String) throws -> String {
+  static func canonicalEventType(_ value: String) throws -> String {
     try validateEventTypeComponents(value, permitsTrailingDot: false)
   }
 
-  private static func canonicalEventTypePrefix(_ value: String) throws -> String {
+  static func canonicalEventTypePrefix(_ value: String) throws -> String {
     try validateEventTypeComponents(value, permitsTrailingDot: true)
   }
 
@@ -357,7 +322,7 @@ enum ViewerEventQueryCompiler {
     return value
   }
 
-  private static func normalizedSearchText(_ value: String, maximumBytes: Int) throws -> String {
+  static func normalizedSearchText(_ value: String, maximumBytes: Int) throws -> String {
     let normalized = value.precomposedStringWithCanonicalMapping
     guard !normalized.isEmpty, normalized.utf8.count <= maximumBytes else {
       throw ViewerStoreError.invalidValue
@@ -431,6 +396,11 @@ struct ViewerEventTraversal: Equatable, Sendable {
   let lease: ViewerStoreLeaseRegistry.Lease
 }
 
+struct ViewerFilteredExportScope: Equatable, Sendable {
+  let query: ViewerEventQuery
+  let snapshot: ViewerQuerySnapshot
+}
+
 struct ViewerStoredEventRow: Equatable, Sendable {
   let rowID: Int64
   let deviceSessionID: Int64
@@ -451,6 +421,14 @@ struct ViewerStoredEventRow: Equatable, Sendable {
 struct ViewerStoredEventDetail: Equatable, Sendable {
   let summary: ViewerStoredEventRow
   let contentJSON: Data
+  let deviceLogicalID: UUID
+  let installationAlias: String
+  let connectionAlias: String
+  let originMonotonicNanoseconds: Int64
+  let ttlMilliseconds: Int64
+  let schemaVersion: Int64
+  let correlationEventUUID: String?
+  let replyToEventUUID: String?
 }
 
 extension ViewerStoredEventDetail: CustomReflectable, CustomStringConvertible,
@@ -533,6 +511,14 @@ extension ViewerEventTraversal: CustomReflectable, CustomStringConvertible,
   var customMirror: Mirror { Mirror(self, children: [:], displayStyle: .struct) }
 }
 
+extension ViewerFilteredExportScope: CustomReflectable, CustomStringConvertible,
+  CustomDebugStringConvertible
+{
+  var description: String { "ViewerFilteredExportScope(redacted)" }
+  var debugDescription: String { description }
+  var customMirror: Mirror { Mirror(self, children: [:], displayStyle: .struct) }
+}
+
 extension ViewerStoredEventRow: CustomReflectable, CustomStringConvertible,
   CustomDebugStringConvertible
 {
@@ -564,10 +550,14 @@ final class ViewerStoreQueryService: @unchecked Sendable {
     self.leases = leases
   }
 
-  func begin(query: ViewerEventQuery) throws -> ViewerEventTraversal {
+  func begin(
+    query: ViewerEventQuery,
+    operationID: UUID? = nil
+  ) throws -> ViewerEventTraversal {
     let lease = try leases.acquireQuery(recordingID: query.recordingID)
     do {
-      let snapshot = try pool.queryReader.run(budget: .query()) { database in
+      let snapshot = try pool.queryReader.run(operationID: operationID, budget: .query()) {
+        database in
         try ViewerSQLiteConnection.execute("BEGIN", on: database)
         defer { try? ViewerSQLiteConnection.execute("COMMIT", on: database) }
         let visible = try ViewerSQLiteStatement(
@@ -597,7 +587,8 @@ final class ViewerStoreQueryService: @unchecked Sendable {
     traversal: ViewerEventTraversal,
     cursor: ViewerEventCursor?,
     direction: Direction,
-    limit: Int = 100
+    limit: Int = 100,
+    operationID: UUID? = nil
   ) throws -> (ViewerEventPage, ViewerEventTraversal) {
     let query = traversal.query
     let snapshot = traversal.snapshot
@@ -624,7 +615,7 @@ final class ViewerStoreQueryService: @unchecked Sendable {
       : " AND (e.viewerMonotonicNs \(comparison) ? OR (e.viewerMonotonicNs=? AND e.rowID \(comparison) ?))"
     let sql =
       "SELECT e.rowID,e.deviceSessionID,e.direction,e.wireSequence,e.eventUUID,e.eventType,length(e.contentJSON),e.createdWallMs,e.viewerWallMs,e.viewerMonotonicNs,e.priority,(SELECT revision FROM RecordingVersions rv WHERE rv.rowID=(SELECT MAX(rv2.rowID) FROM RecordingVersions rv2 WHERE rv2.recordingID=e.recordingID AND rv2.rowID<=?)),(SELECT revision FROM DeviceSessionVersions dv WHERE dv.rowID=(SELECT MAX(dv2.rowID) FROM DeviceSessionVersions dv2 WHERE dv2.deviceSessionID=e.deviceSessionID AND dv2.rowID<=?)),(SELECT disposition FROM EventDispositionVersions dx WHERE dx.rowID=(SELECT MAX(dx2.rowID) FROM EventDispositionVersions dx2 WHERE dx2.eventID=e.rowID AND dx2.rowID<=?)) FROM Events e WHERE e.recordingID=? AND e.rowID<=? AND e.recordingID NOT IN (SELECT recordingID FROM Tombstones) AND \(compiled.predicateSQL)\(cursorSQL) ORDER BY e.viewerMonotonicNs \(order), e.rowID \(order) LIMIT ?"
-    let rows = try pool.queryReader.run(budget: .query()) { database in
+    let rows = try pool.queryReader.run(operationID: operationID, budget: .query()) { database in
       let bindings = baseBindings(query, compiled, snapshot, cursor, limit)
       try ViewerQueryPlanGate.validate(sql: sql, database: database) {
         try bind(bindings, to: $0)
@@ -680,17 +671,18 @@ final class ViewerStoreQueryService: @unchecked Sendable {
   func detail(
     traversal: ViewerEventTraversal,
     rowID: Int64,
+    operationID: UUID? = nil
   ) throws -> (ViewerStoredEventDetail?, ViewerEventTraversal) {
     let recordingID = traversal.query.recordingID
     let snapshot = traversal.snapshot
     guard recordingID > 0, rowID > 0 else { throw ViewerStoreError.invalidValue }
     let refreshed = try leases.touchQuery(traversal.lease)
-    let detail = try pool.queryReader.run(budget: .query()) {
+    let detail = try pool.queryReader.run(operationID: operationID, budget: .query()) {
       database -> ViewerStoredEventDetail? in
       let statement = try ViewerSQLiteStatement(
         database: database,
         sql:
-          "SELECT e.rowID,e.deviceSessionID,e.direction,e.wireSequence,e.eventUUID,e.eventType,e.contentJSON,e.createdWallMs,e.viewerWallMs,e.viewerMonotonicNs,e.priority,(SELECT revision FROM RecordingVersions rv WHERE rv.rowID=(SELECT MAX(rv2.rowID) FROM RecordingVersions rv2 WHERE rv2.recordingID=e.recordingID AND rv2.rowID<=?4)),(SELECT revision FROM DeviceSessionVersions dv WHERE dv.rowID=(SELECT MAX(dv2.rowID) FROM DeviceSessionVersions dv2 WHERE dv2.deviceSessionID=e.deviceSessionID AND dv2.rowID<=?5)),(SELECT disposition FROM EventDispositionVersions dx WHERE dx.rowID=(SELECT MAX(dx2.rowID) FROM EventDispositionVersions dx2 WHERE dx2.eventID=e.rowID AND dx2.rowID<=?6)) FROM Events e WHERE e.recordingID=?1 AND e.rowID=?2 AND e.rowID<=?3 AND e.recordingID NOT IN (SELECT recordingID FROM Tombstones)"
+          "SELECT e.rowID,e.deviceSessionID,e.direction,e.wireSequence,e.eventUUID,e.eventType,e.contentJSON,e.createdWallMs,e.viewerWallMs,e.viewerMonotonicNs,e.priority,(SELECT revision FROM RecordingVersions rv WHERE rv.rowID=(SELECT MAX(rv2.rowID) FROM RecordingVersions rv2 WHERE rv2.recordingID=e.recordingID AND rv2.rowID<=?4)),(SELECT revision FROM DeviceSessionVersions dv WHERE dv.rowID=(SELECT MAX(dv2.rowID) FROM DeviceSessionVersions dv2 WHERE dv2.deviceSessionID=e.deviceSessionID AND dv2.rowID<=?5)),(SELECT disposition FROM EventDispositionVersions dx WHERE dx.rowID=(SELECT MAX(dx2.rowID) FROM EventDispositionVersions dx2 WHERE dx2.eventID=e.rowID AND dx2.rowID<=?6)),ds.logicalID,ia.ordinal,ds.connectionOrdinal,e.originMonotonicNs,e.ttlMs,e.schemaVersion,e.correlationEventUUID,e.replyToEventUUID FROM Events e JOIN DeviceSessions ds ON ds.rowID=e.deviceSessionID JOIN InstallationAliases ia ON ia.rowID=ds.installationAliasID WHERE e.recordingID=?1 AND e.rowID=?2 AND e.rowID<=?3 AND e.recordingID NOT IN (SELECT recordingID FROM Tombstones)"
       )
       try statement.bind(recordingID, at: 1)
       try statement.bind(rowID, at: 2)
@@ -700,6 +692,16 @@ final class ViewerStoreQueryService: @unchecked Sendable {
       try statement.bind(snapshot.dispositionUpperRowID, at: 6)
       guard try statement.step() else { return nil }
       let content = statement.data(at: 6)
+      guard let deviceLogicalID = UUID(uuidString: statement.string(at: 14)) else {
+        throw ViewerStoreError.corruptStore
+      }
+      let installationOrdinal = statement.int64(at: 15)
+      let connectionOrdinal = statement.int64(at: 16)
+      let ttlMilliseconds = statement.int64(at: 18)
+      let schemaVersion = statement.int64(at: 19)
+      guard installationOrdinal > 0, connectionOrdinal > 0, ttlMilliseconds > 0,
+        schemaVersion > 0
+      else { throw ViewerStoreError.corruptStore }
       let summary = ViewerStoredEventRow(
         rowID: statement.int64(at: 0), deviceSessionID: statement.int64(at: 1),
         direction: statement.string(at: 2), wireSequence: statement.int64(at: 3),
@@ -712,7 +714,18 @@ final class ViewerStoreQueryService: @unchecked Sendable {
         deviceRevision: statement.int64(at: 12),
         resolvedDisposition: statement.string(at: 13)
       )
-      return ViewerStoredEventDetail(summary: summary, contentJSON: content)
+      return ViewerStoredEventDetail(
+        summary: summary,
+        contentJSON: content,
+        deviceLogicalID: deviceLogicalID,
+        installationAlias: "device-\(installationOrdinal)",
+        connectionAlias: "connection-\(connectionOrdinal)",
+        originMonotonicNanoseconds: statement.int64(at: 17),
+        ttlMilliseconds: ttlMilliseconds,
+        schemaVersion: schemaVersion,
+        correlationEventUUID: statement.isNull(at: 20) ? nil : statement.string(at: 20),
+        replyToEventUUID: statement.isNull(at: 21) ? nil : statement.string(at: 21)
+      )
     }
     return (
       detail,
@@ -720,7 +733,26 @@ final class ViewerStoreQueryService: @unchecked Sendable {
     )
   }
 
+  func refresh(_ traversal: ViewerEventTraversal) throws -> ViewerEventTraversal {
+    let refreshed = try leases.touchQuery(traversal.lease)
+    return ViewerEventTraversal(
+      query: traversal.query,
+      snapshot: traversal.snapshot,
+      lease: refreshed
+    )
+  }
+
   func cancel() { pool.queryReader.cancelCurrentOperation() }
+
+  func cancel(operationID: UUID) { pool.queryReader.cancel(operationID: operationID) }
+
+  func clearCancellation(operationID: UUID) {
+    pool.queryReader.clearCancellation(operationID: operationID)
+  }
+
+  var cancelledOperationCountForTesting: Int {
+    pool.queryReader.cancelledOperationCountForTesting
+  }
 
   func end(_ traversal: ViewerEventTraversal) { leases.release(traversal.lease) }
 

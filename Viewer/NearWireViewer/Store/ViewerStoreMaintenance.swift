@@ -387,6 +387,33 @@ final class ViewerStoreMaintenance: @unchecked Sendable {
     body: String,
     wallMilliseconds: Int64
   ) throws -> Int64 {
+    try appendAnnotation(
+      recordingID: recordingID,
+      expectedRecordingRevision: nil,
+      body: body,
+      wallMilliseconds: wallMilliseconds
+    )
+  }
+
+  func appendAnnotation(
+    _ target: ViewerRecordingRevision,
+    body: String,
+    wallMilliseconds: Int64
+  ) throws -> Int64 {
+    try appendAnnotation(
+      recordingID: target.recordingID,
+      expectedRecordingRevision: target.revision,
+      body: body,
+      wallMilliseconds: wallMilliseconds
+    )
+  }
+
+  private func appendAnnotation(
+    recordingID: Int64,
+    expectedRecordingRevision: Int64?,
+    body: String,
+    wallMilliseconds: Int64
+  ) throws -> Int64 {
     let body = try ViewerTextRules.noteOrAnnotation(body)
     let plannedReservation = try ViewerStoreQuota.textReservation(body)
     return try capacityCheckedWrite(
@@ -394,6 +421,18 @@ final class ViewerStoreMaintenance: @unchecked Sendable {
       wallMilliseconds: wallMilliseconds,
       changedRecordingIDs: [recordingID]
     ) { database in
+      if let expectedRecordingRevision {
+        guard
+          try latestRevision(recordingID: recordingID, database: database)
+            == expectedRecordingRevision
+        else { throw ViewerStoreError.busy }
+      }
+      let tombstone = try ViewerSQLiteStatement(
+        database: database,
+        sql: "SELECT 1 FROM Tombstones WHERE recordingID=?1 LIMIT 1"
+      )
+      try tombstone.bind(recordingID, at: 1)
+      guard try tombstone.step() == false else { throw ViewerStoreError.busy }
       let revision = try nextRevision(
         table: "AnnotationVersions",
         ownerColumn: "recordingID",
@@ -918,11 +957,10 @@ final class ViewerStoreMaintenance: @unchecked Sendable {
     authorization: ViewerStoreStateRelay.WriteAuthorization?,
     _ body: (OpaquePointer) throws -> T
   ) throws -> T {
-    try pool.writer.run(
-      failureHandler: { [self] error in
-        reportScheduledWriteFailureBeforeWriterRelease(error)
-      }
-    ) { database in
+    let failureHandler: (Error) -> Void = { [self] error in
+      reportScheduledWriteFailureBeforeWriterRelease(error)
+    }
+    return try pool.writer.run(failureHandler: failureHandler) { database in
       if let authorization { try authorizationValidator(authorization) }
       return try body(database)
     }
@@ -1039,11 +1077,10 @@ final class ViewerStoreMaintenance: @unchecked Sendable {
       ?? automaticAuthorizationProvider()
     while true {
       do {
-        let result = try pool.writer.run(
-          failureHandler: { [self] error in
-            reportInteractiveWriteFailure(error, includeCapacity: true)
-          }
-        ) { database in
+        let failureHandler: (Error) -> Void = { [self] error in
+          reportInteractiveWriteFailure(error, includeCapacity: true)
+        }
+        let result = try pool.writer.run(failureHandler: failureHandler) { database in
           do {
             if let authorization { try authorizationValidator(authorization) }
             let current = try ViewerStoreSchema.scalarInt64(
