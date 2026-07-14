@@ -7617,12 +7617,20 @@ final class ViewerFoundationTests: XCTestCase {
     )
   }
 
-  func testRunningApplicationHasOnlyFoundationNetworkEntitlement() throws {
+  func testRunningApplicationHasRequiredFoundationNetworkEntitlements() throws {
     let task = try XCTUnwrap(SecTaskCreateFromSelf(nil))
     XCTAssertEqual(
       SecTaskCopyValueForEntitlement(
         task,
         "com.apple.security.app-sandbox" as CFString,
+        nil
+      ) as? Bool,
+      true
+    )
+    XCTAssertEqual(
+      SecTaskCopyValueForEntitlement(
+        task,
+        "com.apple.security.network.client" as CFString,
         nil
       ) as? Bool,
       true
@@ -7636,7 +7644,6 @@ final class ViewerFoundationTests: XCTestCase {
       true
     )
     for forbidden in [
-      "com.apple.security.network.client",
       "com.apple.developer.networking.multicast",
       "keychain-access-groups",
       "com.apple.security.application-groups",

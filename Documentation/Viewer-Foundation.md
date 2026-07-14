@@ -90,7 +90,7 @@ No recovery path starts a plaintext, identity-free, or alternate listener.
 
 ## Sandbox and Privacy
 
-The application sandbox contains only the incoming network-server entitlement required by this foundation. It does not request network-client, multicast, Keychain-sharing, application-group, or background-service entitlements.
+The application sandbox contains the network-server and network-client entitlements required by the Network.framework listener and its accepted-connection path. It does not request multicast, Keychain-sharing, application-group, or background-service entitlements.
 
 The built Info.plist advertises `_nearwire._tcp` and explains local-network use. `PrivacyInfo.xcprivacy` declares linked Device ID for App functionality with tracking disabled because `vid` is published and the complete installation ID is sent in Viewer Hello. It contains no tracking domains. The app-local approval preference uses `UserDefaults`, so the manifest declares only the required `NSPrivacyAccessedAPICategoryUserDefaults` reason `CA92.1`; it contains no unused Required Reason category.
 
