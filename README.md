@@ -36,6 +36,9 @@ try await monitor.start()
 
 Connection uses peer-to-peer-enabled Bonjour discovery and mandatory TLS 1.3. The pairing code selects the Viewer but is not an authentication credential, and Event delivery is not acknowledged. Automatic recovery is opt-in and bounded; host-controlled suspend/resume never installs a hidden application lifecycle observer.
 
+Canonical deterministic JSON Event content is accepted up to 1 MiB. Events retain and transmit
+their actual encoded size rather than reserving or padding every Event to that maximum.
+
 ## Repository Layout
 
 - `Core`: Shared event, protocol, transport, flow-control, and built-in schema code.

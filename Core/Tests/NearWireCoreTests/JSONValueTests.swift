@@ -4,6 +4,17 @@ import XCTest
 @_spi(NearWireInternal) @testable import NearWireCore
 
 final class JSONValueTests: XCTestCase {
+  func testDefaultContentLimitIsExactlyOneMiB() throws {
+    let exact = contentSized(at: 1_024 * 1_024)
+    let oversized = contentSized(at: 1_024 * 1_024 + 1)
+
+    XCTAssertEqual(try exact.deterministicData().count, 1_024 * 1_024)
+    XCTAssertNoThrow(try exact.validate())
+    assertEventError(.encodedContentTooLarge) {
+      try oversized.validate()
+    }
+  }
+
   func testEveryJSONCaseRoundTripsDeterministically() throws {
     let data = Data(
       """
@@ -177,4 +188,17 @@ final class JSONValueTests: XCTestCase {
       _ = try EventContentCodec().encode(Payload(value: .nan))
     }
   }
+}
+
+private func contentSized(at targetBytes: Int) -> JSONValue {
+  let maximumStringBytes = 65_536
+  let stringCount = (targetBytes - 1 + maximumStringBytes + 2) / (maximumStringBytes + 3)
+  var remainingStringBytes = targetBytes - (3 * stringCount + 1)
+  let strings = (0..<stringCount).map { _ -> JSONValue in
+    let count = min(maximumStringBytes, remainingStringBytes)
+    remainingStringBytes -= count
+    return .string(String(repeating: "x", count: count))
+  }
+  precondition(remainingStringBytes == 0)
+  return .array(strings)
 }

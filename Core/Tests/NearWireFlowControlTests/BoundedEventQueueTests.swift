@@ -90,8 +90,8 @@ final class BoundedEventQueueTests: XCTestCase {
 
   func testDefaultAndInvalidConfiguration() throws {
     XCTAssertEqual(EventQueueLimits.default.maximumEventCount, 1_000)
-    XCTAssertEqual(EventQueueLimits.default.maximumTotalBytes, 4 * 1_024 * 1_024)
-    XCTAssertEqual(EventQueueLimits.default.maximumSingleEventBytes, 256 * 1_024)
+    XCTAssertEqual(EventQueueLimits.default.maximumTotalBytes, 16 * 1_024 * 1_024)
+    XCTAssertEqual(EventQueueLimits.default.maximumSingleEventBytes, 4_259_840)
 
     assertFlowError(.invalidQueueConfiguration) {
       _ = try EventQueueLimits(maximumEventCount: 0)

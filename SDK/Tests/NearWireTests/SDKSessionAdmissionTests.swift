@@ -154,6 +154,10 @@ final class SDKSessionAdmissionTests: XCTestCase {
 
   func testActiveLimitsRejectEveryZeroAndHardMaximumOverflow() throws {
     XCTAssertNoThrow(try SDKActiveEventPumpLimits())
+    XCTAssertEqual(
+      SDKActiveEventPumpLimits.default.maximumOutboundAccountedBytesPerTurn,
+      NearWireBufferConfiguration.default.maximumEventBytes
+    )
     XCTAssertThrowsError(try SDKActiveEventPumpLimits(initialPolicyTimeoutSeconds: 0))
     XCTAssertThrowsError(
       try SDKActiveEventPumpLimits(maximumIncomingEvents: 10_001)

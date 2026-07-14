@@ -24,6 +24,34 @@ final class NearWireEventAPITests: XCTestCase {
     }
   }
 
+  func testDefaultBufferAcceptsOneMiBContentAndRejectsOneByteOverAtomically() async throws {
+    let nearWire = NearWire()
+    let accepted = try await nearWire.send(
+      type: "test.one-mib",
+      content: stringArrayContentSized(at: 1_024 * 1_024)
+    )
+    let afterAccepted = try await nearWire.bufferDiagnostics()
+
+    XCTAssertTrue(accepted.isBuffered)
+    XCTAssertEqual(afterAccepted.eventCount, 1)
+    XCTAssertGreaterThan(afterAccepted.accountedByteCount, 1_024 * 1_024)
+
+    do {
+      _ = try await nearWire.send(
+        type: "test.over-one-mib",
+        content: stringArrayContentSized(at: 1_024 * 1_024 + 1)
+      )
+      XCTFail("Expected content above one MiB to be rejected.")
+    } catch {
+      assertNearWireError(error, code: .invalidContent)
+    }
+
+    let afterRejected = try await nearWire.bufferDiagnostics()
+    XCTAssertEqual(afterRejected.eventCount, afterAccepted.eventCount)
+    XCTAssertEqual(afterRejected.accountedByteCount, afterAccepted.accountedByteCount)
+    XCTAssertEqual(afterRejected.statistics, afterAccepted.statistics)
+  }
+
   func testIncomingContentIsInspectableAndTypedDecodable() async throws {
     let payload = Payload(
       name: "sample",
@@ -312,4 +340,17 @@ final class NearWireEventAPITests: XCTestCase {
     XCTAssertTrue(driver.sentData.isEmpty)
     await channel.cancel()
   }
+}
+
+private func stringArrayContentSized(at targetBytes: Int) -> [String] {
+  let maximumStringBytes = 65_536
+  let stringCount = (targetBytes - 1 + maximumStringBytes + 2) / (maximumStringBytes + 3)
+  var remainingStringBytes = targetBytes - (3 * stringCount + 1)
+  let strings = (0..<stringCount).map { _ -> String in
+    let count = min(maximumStringBytes, remainingStringBytes)
+    remainingStringBytes -= count
+    return String(repeating: "x", count: count)
+  }
+  precondition(remainingStringBytes == 0)
+  return strings
 }

@@ -61,7 +61,7 @@ Validated defaults and hard maxima are:
 | Retained incoming encoded bytes | 8 MiB | 64 MiB |
 | Completed frames per receive callback | 256 | 1,024 |
 | Outbound queue service units per turn | 64 | 256 |
-| Outbound queue-accounted bytes per turn | 2 MiB | 64 MiB |
+| Outbound queue-accounted bytes per turn | 4,259,840 bytes | 64 MiB |
 | Incoming publications or expiries per turn | 32 | 256 |
 | Deferred complete policy transactions | 32 | 128 |
 

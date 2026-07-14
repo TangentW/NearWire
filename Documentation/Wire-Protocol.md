@@ -26,7 +26,7 @@ V1 lanes are:
 | Byte | Lane | Purpose | Default payload limit |
 | --- | --- | --- | ---: |
 | `0x01` | Control | Handshake, policy, health, shutdown, and protocol errors | 64 KiB |
-| `0x02` | Event | Events, event batches, and drop summaries | 1 MiB |
+| `0x02` | Event | Events, event batches, and drop summaries | 2 MiB |
 
 No other lane byte is valid. Both lane limits are configurable but positive, and neither may exceed the 16 MiB hard payload ceiling. A decoder rejects a prefix over the hard ceiling before buffering payload bytes. Once the lane byte is known, it applies that lane's smaller configured limit before accepting the rest of the payload.
 
@@ -128,7 +128,7 @@ An `event` body is a plain JSON object containing the complete logical event:
 
 `UInt64` values use canonical decimal strings because JSON numbers cannot represent every `UInt64` exactly across implementations. Leading zeros, signs, whitespace, fractions, and overflow are invalid. Signed event-content integers and finite floating-point values remain ordinary JSON numbers and preserve their logical NearWire `JSONValue` cases.
 
-V1 preserves sub-millisecond event dates instead of silently truncating them. Decode rejects missing fractions, redundant fraction digits, numeric UTC offsets, and any longer spelling when a shorter fractional part would reconstruct the same `Date`. It applies the active `EventValidationLimits` as well as the negotiated event byte limit. A single event defaults to at most 256 KiB and must also fit the Event frame.
+V1 preserves sub-millisecond event dates instead of silently truncating them. Decode rejects missing fractions, redundant fraction digits, numeric UTC offsets, and any longer spelling when a shorter fractional part would reconstruct the same `Date`. It applies the active `EventValidationLimits` as well as the negotiated event byte limit. Canonical Event content defaults to at most 1 MiB. The advertised Event-record limit additionally includes the exact metadata envelope, and the default 2 MiB Event lane includes the V1 message wrapper. Each layer retains only its actual encoded bytes.
 
 ## TTL Across Devices
 

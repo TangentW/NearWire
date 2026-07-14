@@ -53,20 +53,27 @@ public struct NearWireEventOptions: Equatable, Sendable {
 public struct NearWireBufferConfiguration: Equatable, Sendable {
   public static let `default` = NearWireBufferConfiguration(
     validatedMaximumEventCount: 1_000,
-    maximumBytes: 4 * 1_024 * 1_024,
-    maximumEventBytes: 256 * 1_024,
+    maximumBytes: 16 * 1_024 * 1_024,
+    maximumEventBytes: 4_259_840,
     defaultTTL: .default
   )
 
   public let maximumEventCount: Int
+
+  /// Maximum total encoded in-memory accounting bytes retained by the offline queue.
   public let maximumBytes: Int
+
+  /// Maximum encoded in-memory accounting bytes for one Event.
+  ///
+  /// This includes the internal Event draft representation. Canonical JSON content has a separate
+  /// fixed 1 MiB limit.
   public let maximumEventBytes: Int
   public let defaultTTL: NearWireEventTTL
 
   public init(
     maximumEventCount: Int = 1_000,
-    maximumBytes: Int = 4 * 1_024 * 1_024,
-    maximumEventBytes: Int = 256 * 1_024,
+    maximumBytes: Int = 16 * 1_024 * 1_024,
+    maximumEventBytes: Int,
     defaultTTL: NearWireEventTTL = .default
   ) throws {
     try SDKValidation.validateBuffer(
@@ -79,6 +86,20 @@ public struct NearWireBufferConfiguration: Equatable, Sendable {
       validatedMaximumEventCount: maximumEventCount,
       maximumBytes: maximumBytes,
       maximumEventBytes: maximumEventBytes,
+      defaultTTL: defaultTTL
+    )
+  }
+
+  /// Creates a buffer whose implicit single-Event limit fits within the requested total.
+  public init(
+    maximumEventCount: Int = 1_000,
+    maximumBytes: Int = 16 * 1_024 * 1_024,
+    defaultTTL: NearWireEventTTL = .default
+  ) throws {
+    try self.init(
+      maximumEventCount: maximumEventCount,
+      maximumBytes: maximumBytes,
+      maximumEventBytes: min(Self.default.maximumEventBytes, maximumBytes),
       defaultTTL: defaultTTL
     )
   }

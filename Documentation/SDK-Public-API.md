@@ -21,8 +21,8 @@ import NearWire
 
 let buffer = try NearWireBufferConfiguration(
   maximumEventCount: 1_000,
-  maximumBytes: 4 * 1_024 * 1_024,
-  maximumEventBytes: 256 * 1_024,
+  maximumBytes: 16 * 1_024 * 1_024,
+  maximumEventBytes: 4_259_840,
   defaultTTL: .seconds(60)
 )
 
@@ -102,7 +102,15 @@ Repository-owned optional modules use a separate narrow `NearWireBuiltins` SPI t
 
 App-to-Viewer events can be sent while the instance is idle and later while discovery, connection, or reconnection is in progress. They remain only in memory.
 
-Defaults are 1,000 pending events, 4 MiB total accounted bytes, 256 KiB for one accounted event, and a 60-second TTL. The SDK calculates a deterministic internal draft representation for queue accounting. Encrypted frame size is validated independently by the wire and transport layers.
+Defaults are 1,000 pending events, 16 MiB total accounted bytes, 4,259,840 bytes for one internally
+encoded Event, and a 60-second TTL. Canonical deterministic JSON content is fixed at a maximum of
+1 MiB. The larger single-Event accounting value covers the worst-case internal tagged draft plus
+fixed fields; it is not reserved for smaller Events. Encrypted frame size is validated independently
+by the wire and transport layers.
+
+If `maximumBytes` is explicitly smaller than 4,259,840 bytes and `maximumEventBytes` is omitted,
+the effective single-Event accounting limit is clamped to that explicit total. An explicitly
+supplied single-Event limit above the total remains invalid.
 
 TTL uses an instance-local monotonic clock. A wall-clock change does not expire or extend work. When capacity is exceeded, the queue removes the oldest item from the lowest priority present. A newly submitted low-priority event may therefore be the item dropped immediately when the queue already protects higher-priority work.
 

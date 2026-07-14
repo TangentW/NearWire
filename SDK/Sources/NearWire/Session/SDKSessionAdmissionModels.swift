@@ -307,7 +307,7 @@ struct SDKActiveEventPumpLimits: Equatable, Sendable {
     maximumIncomingEncodedBytes: 8 * 1_024 * 1_024,
     maximumCompletedFramesPerReceive: 256,
     maximumOutboundServiceUnitsPerTurn: 64,
-    maximumOutboundAccountedBytesPerTurn: 2 * 1_024 * 1_024,
+    maximumOutboundAccountedBytesPerTurn: 4_259_840,
     maximumIncomingPublicationsPerTurn: 32,
     maximumDeferredPolicyTransactions: 32
   )
@@ -327,7 +327,7 @@ struct SDKActiveEventPumpLimits: Equatable, Sendable {
     maximumIncomingEncodedBytes: Int = 8 * 1_024 * 1_024,
     maximumCompletedFramesPerReceive: Int = 256,
     maximumOutboundServiceUnitsPerTurn: Int = 64,
-    maximumOutboundAccountedBytesPerTurn: Int = 2 * 1_024 * 1_024,
+    maximumOutboundAccountedBytesPerTurn: Int = 4_259_840,
     maximumIncomingPublicationsPerTurn: Int = 32,
     maximumDeferredPolicyTransactions: Int = 32
   ) throws {

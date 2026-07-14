@@ -54,7 +54,7 @@ Default limits are:
 | Receive chunk | 64 KiB | 1 MiB |
 | Pending sends | 256 | 4,096 |
 | Pending send bytes | 4 MiB | 64 MiB |
-| Single send | 1 MiB + 5 frame bytes | 16 MiB + 5 frame bytes |
+| Single send | 2 MiB + 5 frame bytes | 16 MiB + 5 frame bytes |
 | Connection timeout | 10 seconds | 120 seconds |
 
 ## Safe Diagnostics

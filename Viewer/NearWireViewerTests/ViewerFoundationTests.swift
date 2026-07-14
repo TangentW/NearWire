@@ -8278,6 +8278,80 @@ final class ViewerFoundationTests: XCTestCase {
     XCTAssertEqual(channel.cancelCount, 1)
   }
 
+  func testAdmissionManagerHandsOffProductionSDKEventRecordOffer() throws {
+    let started = expectation(description: "Channel started")
+    let viewerHelloSent = expectation(description: "Viewer Hello sent")
+    let handedOff = expectation(description: "Production App Hello handed off")
+    let channelClosed = expectation(description: "Handed-off channel closed at shutdown")
+    let retainedHandle = LockedHandleBox()
+    let handoffOwner = FakeAdmissionHandoffOwner { handle in
+      retainedHandle.set(handle)
+      handedOff.fulfill()
+    }
+    let channel = FakeAdmissionChannel(
+      onSend: { _ in viewerHelloSent.fulfill() },
+      onStart: { started.fulfill() },
+      onCancel: { channelClosed.fulfill() }
+    )
+    let incoming = FakeIncomingConnection(channel: channel)
+    let manager = ViewerAdmissionManager(
+      onPending: { _ in },
+      handoffOwner: handoffOwner
+    )
+    let generation = UUID()
+    manager.activateGeneration(generation)
+    manager.admit(
+      incoming,
+      generation: generation,
+      viewerInstallationID: try EndpointID(rawValue: "viewer-production-offer")
+    )
+
+    wait(for: [started], timeout: 1)
+    incoming.emit(.stateChanged(.ready))
+    wait(for: [viewerHelloSent], timeout: 1)
+
+    let oneMiBEventLimits = try EventValidationLimits(
+      maximumEncodedContentBytes: 1_024 * 1_024,
+      maximumEncodedModelBytes: 4_259_840
+    )
+    let peerOffer = try WireEventRecord.maximumDeterministicEncodedByteCount(
+      eventLimits: oneMiBEventLimits
+    )
+    XCTAssertGreaterThan(peerOffer, 1_024 * 1_024)
+    let peerFrameLimits = try WireFrameLimits(
+      maximumControlPayloadBytes: WireFrameLimits.default.maximumControlPayloadBytes,
+      maximumEventPayloadBytes: peerOffer
+    )
+    let peerLimits = try WireProtocolLimits(
+      frame: peerFrameLimits,
+      maximumEventBytes: peerOffer,
+      eventValidationLimits: oneMiBEventLimits
+    )
+    let appHello = try WireHello(
+      productVersion: WireProductVersion("1.0"),
+      role: .app,
+      installationID: EndpointID(rawValue: "production-sdk-app"),
+      maximumEventBytes: peerOffer,
+      displayName: "Production SDK App",
+      limits: peerLimits
+    )
+    let frame = try WirePreHandshakeCodec(limits: peerLimits).encode(appHello)
+    incoming.emit(.received(frame))
+
+    wait(for: [handedOff], timeout: 1)
+    let handle = try XCTUnwrap(retainedHandle.value)
+    let context = try handle.connectionCore.pendingSessionContext()
+    XCTAssertEqual(context.appHello.displayName, "Production SDK App")
+    XCTAssertEqual(context.appHello.maximumEventBytes, peerOffer)
+    XCTAssertEqual(
+      context.negotiation.maximumEventBytes,
+      peerOffer
+    )
+    XCTAssertEqual(channel.cancelCount, 0)
+    manager.stop()
+    wait(for: [channelClosed], timeout: 1)
+  }
+
   func testAdmissionCoreRejectsViewerRoleWithoutPublishingAppSummary() throws {
     let sent = expectation(description: "Viewer Hello admitted")
     let terminal = expectation(description: "Wrong role terminates admission")

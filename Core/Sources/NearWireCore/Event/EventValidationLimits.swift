@@ -9,8 +9,8 @@ import Foundation
       maximumObjectEntries: 4_096,
       maximumStringBytes: 65_536,
       maximumObjectKeyBytes: 65_536,
-      maximumEncodedContentBytes: 262_144,
-      maximumEncodedModelBytes: 2_097_152,
+      maximumEncodedContentBytes: 1_048_576,
+      maximumEncodedModelBytes: 4_259_840,
       maximumTTLMilliseconds: 86_400_000
     ))
 
@@ -31,8 +31,8 @@ import Foundation
     maximumObjectEntries: Int = 4_096,
     maximumStringBytes: Int = 65_536,
     maximumObjectKeyBytes: Int = 65_536,
-    maximumEncodedContentBytes: Int = 262_144,
-    maximumEncodedModelBytes: Int = 2_097_152,
+    maximumEncodedContentBytes: Int = 1_048_576,
+    maximumEncodedModelBytes: Int = 4_259_840,
     maximumTTLMilliseconds: UInt64 = 86_400_000
   ) throws {
     let values = (

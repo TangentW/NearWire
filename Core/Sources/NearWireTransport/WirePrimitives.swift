@@ -249,7 +249,7 @@ public enum WireSendPolicy: String, Codable, CaseIterable, Comparable, Sendable 
     hardMaximumPayloadBytes + encodedFrameOverheadBytes
   public static let `default` = WireFrameLimits(
     uncheckedControlPayloadBytes: 64 * 1_024,
-    eventPayloadBytes: 1_024 * 1_024
+    eventPayloadBytes: 2 * 1_024 * 1_024
   )
 
   public let maximumControlPayloadBytes: Int
@@ -257,7 +257,7 @@ public enum WireSendPolicy: String, Codable, CaseIterable, Comparable, Sendable 
 
   public init(
     maximumControlPayloadBytes: Int = 64 * 1_024,
-    maximumEventPayloadBytes: Int = 1_024 * 1_024
+    maximumEventPayloadBytes: Int = 2 * 1_024 * 1_024
   ) throws {
     guard (1...Self.hardMaximumPayloadBytes).contains(maximumControlPayloadBytes),
       (1...Self.hardMaximumPayloadBytes).contains(maximumEventPayloadBytes)
@@ -292,14 +292,24 @@ public enum WireSendPolicy: String, Codable, CaseIterable, Comparable, Sendable 
 }
 
 @_spi(NearWireInternal) public struct WireProtocolLimits: Equatable, Sendable {
-  public static let `default` = WireProtocolLimits(
-    uncheckedFrame: .default,
-    maximumEventBytes: 256 * 1_024,
-    maximumBatchEventCount: 256,
-    maximumCollectionCount: 64,
-    maximumControlTextBytes: 512,
-    eventValidationLimits: .default
-  )
+  public static let `default`: WireProtocolLimits = {
+    let eventLimits = EventValidationLimits.default
+    guard
+      let maximumEventBytes = try? WireEventRecord.maximumDeterministicEncodedByteCount(
+        eventLimits: eventLimits
+      )
+    else {
+      preconditionFailure("The reviewed default Event-record capacity must remain valid.")
+    }
+    return WireProtocolLimits(
+      uncheckedFrame: .default,
+      maximumEventBytes: maximumEventBytes,
+      maximumBatchEventCount: 256,
+      maximumCollectionCount: 64,
+      maximumControlTextBytes: 512,
+      eventValidationLimits: eventLimits
+    )
+  }()
 
   public let frame: WireFrameLimits
   public let maximumEventBytes: Int
@@ -310,7 +320,7 @@ public enum WireSendPolicy: String, Codable, CaseIterable, Comparable, Sendable 
 
   public init(
     frame: WireFrameLimits = .default,
-    maximumEventBytes: Int = 256 * 1_024,
+    maximumEventBytes: Int = WireProtocolLimits.default.maximumEventBytes,
     maximumBatchEventCount: Int = 256,
     maximumCollectionCount: Int = 64,
     maximumControlTextBytes: Int = 512,

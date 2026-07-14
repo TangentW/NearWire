@@ -109,6 +109,33 @@ final class WireEventTests: XCTestCase {
     )
   }
 
+  func testProductionDefaultsCarryExactlyOneMiBContentThroughOneEventFrame() throws {
+    let targetEventLimits = try EventValidationLimits(
+      maximumEncodedContentBytes: 1_024 * 1_024,
+      maximumEncodedModelBytes: 4_259_840
+    )
+    let targetRecordBytes = try WireEventRecord.maximumDeterministicEncodedByteCount(
+      eventLimits: targetEventLimits
+    )
+
+    XCTAssertEqual(targetRecordBytes, 1_049_539)
+    XCTAssertEqual(
+      WireProtocolLimits.default.eventValidationLimits.maximumEncodedContentBytes,
+      1_024 * 1_024
+    )
+    XCTAssertEqual(WireProtocolLimits.default.maximumEventBytes, targetRecordBytes)
+    XCTAssertEqual(
+      WireProtocolLimits.default.frame.maximumEventPayloadBytes,
+      2 * 1_024 * 1_024
+    )
+    XCTAssertNoThrow(
+      try WireSessionCodec.maximumEncodedV1SingleEventFrameBytes(
+        maximumEventBytes: targetRecordBytes,
+        frameLimits: WireProtocolLimits.default.frame
+      )
+    )
+  }
+
   func testMaximumEventRecordBoundCoversSeededGeneratedContentShapes() throws {
     let maximum = try WireEventRecord.maximumDeterministicEncodedByteCount()
     var generator = SeededJSONValueGenerator(seed: 0x4E65_6172_5769_7265)
@@ -607,12 +634,18 @@ private struct SeededJSONValueGenerator {
 }
 
 private func maximumSizedContent() -> JSONValue {
-  .array([
-    .string(String(repeating: "x", count: 65_536)),
-    .string(String(repeating: "y", count: 65_536)),
-    .string(String(repeating: "z", count: 65_536)),
-    .string(String(repeating: "w", count: 65_523)),
-  ])
+  let limits = EventValidationLimits.default
+  let targetBytes = limits.maximumEncodedContentBytes
+  let maximumStringBytes = limits.maximumStringBytes
+  let stringCount = (targetBytes - 1 + maximumStringBytes + 2) / (maximumStringBytes + 3)
+  var remainingStringBytes = targetBytes - (3 * stringCount + 1)
+  let strings = (0..<stringCount).map { _ -> JSONValue in
+    let count = min(maximumStringBytes, remainingStringBytes)
+    remainingStringBytes -= count
+    return .string(String(repeating: "x", count: count))
+  }
+  precondition(remainingStringBytes == 0)
+  return .array(strings)
 }
 
 private func maximumShapeRecord(content: JSONValue) throws -> WireEventRecord {

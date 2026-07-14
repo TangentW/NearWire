@@ -8,8 +8,8 @@ final class NearWireConfigurationTests: XCTestCase {
     XCTAssertEqual(configuration.maximumUplinkEventsPerSecond, 100)
     XCTAssertEqual(configuration.maximumDownlinkEventsPerSecond, 50)
     XCTAssertEqual(configuration.buffer.maximumEventCount, 1_000)
-    XCTAssertEqual(configuration.buffer.maximumBytes, 4 * 1_024 * 1_024)
-    XCTAssertEqual(configuration.buffer.maximumEventBytes, 256 * 1_024)
+    XCTAssertEqual(configuration.buffer.maximumBytes, 16 * 1_024 * 1_024)
+    XCTAssertEqual(configuration.buffer.maximumEventBytes, 4_259_840)
     XCTAssertEqual(configuration.buffer.defaultTTL, .seconds(60))
     XCTAssertEqual(configuration.eventStreamBufferCapacity, 256)
     XCTAssertEqual(configuration.reconnectionPolicy, .disabled)
@@ -86,6 +86,22 @@ final class NearWireConfigurationTests: XCTestCase {
       try NearWireBufferConfiguration(defaultTTL: .minutes(UInt64.max))
     ) { error in
       assertNearWireError(error, code: .invalidEventOptions)
+    }
+  }
+
+  func testExplicitSmallerBufferTotalClampsOmittedSingleEventLimit() throws {
+    let fourMiB = 4 * 1_024 * 1_024
+    let configuration = try NearWireBufferConfiguration(maximumBytes: fourMiB)
+
+    XCTAssertEqual(configuration.maximumBytes, fourMiB)
+    XCTAssertEqual(configuration.maximumEventBytes, fourMiB)
+    XCTAssertThrowsError(
+      try NearWireBufferConfiguration(
+        maximumBytes: fourMiB,
+        maximumEventBytes: 4_259_840
+      )
+    ) { error in
+      assertNearWireError(error, code: .invalidConfiguration)
     }
   }
 

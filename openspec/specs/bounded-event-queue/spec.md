@@ -20,7 +20,11 @@ Flow control SHALL queue immutable Sendable pending values with a stable event I
 
 ### Requirement: Coherent bounded queue limits
 
-An event queue SHALL enforce positive event-count, total accounted-byte, and single-event-byte limits. The default SHALL be 1,000 events, 4 MiB total, and 256 KiB per event. The event-count hard bound SHALL be 10,000. Configuration SHALL reject a single-event limit above total bytes and values above hard safety bounds.
+An event queue SHALL enforce positive event-count, total accounted-byte, and single-event-byte
+limits. The default SHALL be 1,000 events, 16 MiB total, and 4,259,840 bytes per Event, where the
+single-Event value is the derived worst-case internal model bound for 1 MiB canonical content. The
+event-count hard bound SHALL be 10,000. Configuration SHALL reject a single-event limit above total
+bytes and values above hard safety bounds.
 
 #### Scenario: Count limit reached
 

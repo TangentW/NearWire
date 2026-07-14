@@ -1733,13 +1733,21 @@ final class ViewerFlowControlTests: XCTestCase {
     }
 
     let maximumStringBytes = controller.model.activeLimits.maximumStringBytes
-    let finalStringBytes = controller.maximumContentBytes - 13 - (3 * maximumStringBytes)
-    XCTAssertTrue((1...maximumStringBytes).contains(finalStringBytes))
+    let stringCount =
+      (controller.maximumContentBytes - 1 + maximumStringBytes + 2)
+      / (maximumStringBytes + 3)
+    var remainingStringBytes = controller.maximumContentBytes - (3 * stringCount + 1)
+    let maximumContentStrings = (0..<stringCount).map { _ -> String in
+      let count = min(maximumStringBytes, remainingStringBytes)
+      remainingStringBytes -= count
+      return String(repeating: "x", count: count)
+    }
+    XCTAssertEqual(remainingStringBytes, 0)
     let maximumContent =
       "["
-      + (0..<3).map { _ in "\"" + String(repeating: "x", count: maximumStringBytes) + "\"" }
+      + maximumContentStrings.map { "\"" + $0 + "\"" }
       .joined(separator: ",")
-      + ",\"" + String(repeating: "x", count: finalStringBytes) + "\"]"
+      + "]"
     XCTAssertEqual(maximumContent.utf8.count, controller.maximumContentBytes)
     XCTAssertTrue(controller.replaceWhole(.content, with: maximumContent))
     controller.send()

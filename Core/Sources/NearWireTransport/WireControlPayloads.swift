@@ -26,7 +26,7 @@ import Foundation
     role: EndpointRole,
     installationID: EndpointID,
     codecs: Set<WireCodecIdentifier> = [.json],
-    maximumEventBytes: Int = 256 * 1_024,
+    maximumEventBytes: Int = WireProtocolLimits.default.maximumEventBytes,
     sendPolicies: Set<WireSendPolicy> = [.normal, .keepLatest],
     capabilities: Set<WireCapability> = [
       .bidirectionalEvents, .normalQueue, .keepLatest, .batching, .flowPolicy,
@@ -44,11 +44,11 @@ import Foundation
         message: "Hello must advertise a bounded nonempty codec set."
       )
     }
-    guard (1...limits.maximumEventBytes).contains(maximumEventBytes) else {
+    guard (1...WireFrameLimits.hardMaximumPayloadBytes).contains(maximumEventBytes) else {
       throw WireProtocolError(
         code: .invalidConfiguration,
         path: "hello.maximumEventBytes",
-        message: "Hello event limit is outside the active protocol limit."
+        message: "Hello event-size offer is outside the wire hard bound."
       )
     }
     guard !sendPolicies.isEmpty, sendPolicies.count <= WireSendPolicy.allCases.count,

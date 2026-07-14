@@ -67,8 +67,8 @@ extension EventQueuePolicy: CustomReflectable, CustomStringConvertible,
 @_spi(NearWireInternal) public struct EventQueueLimits: Equatable, Sendable {
   public static let `default` = EventQueueLimits(
     uncheckedMaximumEventCount: 1_000,
-    maximumTotalBytes: 4 * 1_024 * 1_024,
-    maximumSingleEventBytes: 256 * 1_024
+    maximumTotalBytes: 16 * 1_024 * 1_024,
+    maximumSingleEventBytes: 4_259_840
   )
 
   public let maximumEventCount: Int
@@ -77,8 +77,8 @@ extension EventQueuePolicy: CustomReflectable, CustomStringConvertible,
 
   public init(
     maximumEventCount: Int = 1_000,
-    maximumTotalBytes: Int = 4 * 1_024 * 1_024,
-    maximumSingleEventBytes: Int = 256 * 1_024
+    maximumTotalBytes: Int = 16 * 1_024 * 1_024,
+    maximumSingleEventBytes: Int = 4_259_840
   ) throws {
     guard (1...10_000).contains(maximumEventCount) else {
       throw FlowControlError(

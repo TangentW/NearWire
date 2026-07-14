@@ -17,10 +17,13 @@ The default queue limits are:
 | Limit | Default |
 | --- | ---: |
 | Pending events | 1,000 |
-| Total accounted bytes | 4 MiB |
-| One event | 256 KiB |
+| Total accounted bytes | 16 MiB |
+| One internally encoded event | 4,259,840 bytes |
 
-The count hard bound is 10,000. Viewer queues can use larger configurations, such as 5,000 events and 16 MiB, without changing queue behavior.
+The count hard bound is 10,000. The single-Event accounting value covers the worst-case internal
+tagged representation of 1 MiB canonical JSON content; it is not a fixed per-Event allocation.
+Viewer queues can use larger configurations, such as 5,000 events and 16 MiB, without changing
+queue behavior.
 
 Normal events always occupy distinct entries. `keepLatest` uses an explicit queue-local key of 1 through 128 UTF-8 bytes without control characters. A matching pending entry is replaced with the new ID, value, priority, byte count, enqueue time, and TTL while retaining its logical insertion ordinal. Coalescing happens before overflow checks.
 

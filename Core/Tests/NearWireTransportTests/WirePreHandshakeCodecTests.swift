@@ -50,6 +50,60 @@ final class WirePreHandshakeCodecTests: XCTestCase {
     )
   }
 
+  func testPeerHelloOfferAboveLocalSessionLimitDecodesAndNegotiatesConservatively() throws {
+    let localLimits = try WireProtocolLimits(maximumEventBytes: 256 * 1_024)
+    let peerOffer = try WireEventRecord.maximumDeterministicEncodedByteCount()
+    XCTAssertGreaterThan(peerOffer, localLimits.maximumEventBytes)
+
+    let peerFrameLimits = try WireFrameLimits(
+      maximumControlPayloadBytes: localLimits.frame.maximumControlPayloadBytes,
+      maximumEventPayloadBytes: peerOffer
+    )
+    let peerLimits = try WireProtocolLimits(
+      frame: peerFrameLimits,
+      maximumEventBytes: peerOffer
+    )
+    let peerHello = try WireHello(
+      productVersion: WireProductVersion("1.0"),
+      role: .app,
+      installationID: EndpointID(rawValue: "production-sdk-app"),
+      maximumEventBytes: peerOffer,
+      limits: peerLimits
+    )
+    let encoded = try WirePreHandshakeCodec(limits: peerLimits).encode(peerHello)
+
+    guard case .hello(let decoded) = try WirePreHandshakeCodec(limits: localLimits).decode(
+      frame: frame(from: encoded)
+    ) else {
+      return XCTFail("Expected the peer Hello offer.")
+    }
+    XCTAssertEqual(decoded.maximumEventBytes, peerOffer)
+
+    let localHello = try WireHello(
+      productVersion: WireProductVersion("1.0"),
+      role: .viewer,
+      installationID: EndpointID(rawValue: "local-viewer"),
+      maximumEventBytes: localLimits.maximumEventBytes,
+      limits: localLimits
+    )
+    let negotiation = try WireNegotiator.negotiate(local: localHello, remote: decoded)
+    XCTAssertEqual(negotiation.maximumEventBytes, localLimits.maximumEventBytes)
+    XCTAssertNoThrow(try WireSessionCodec(negotiation: negotiation, baseLimits: localLimits))
+  }
+
+  func testHelloOfferAboveWireHardBoundIsRejected() throws {
+    XCTAssertThrowsError(
+      try WireHello(
+        productVersion: WireProductVersion("1.0"),
+        role: .app,
+        installationID: EndpointID(rawValue: "oversized-offer-app"),
+        maximumEventBytes: WireFrameLimits.hardMaximumPayloadBytes + 1
+      )
+    ) { error in
+      XCTAssertEqual((error as? WireProtocolError)?.code, .invalidConfiguration)
+    }
+  }
+
   func testEventLanePreflightWinsBeforeJSONAndVersionParsing() {
     let codec = WirePreHandshakeCodec()
     assertTerminal(.phaseViolation) {

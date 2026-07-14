@@ -55,11 +55,15 @@ NearWire does not use `NSKeyedArchiver`, runtime class-name lookup, arbitrary `N
 | Object entries | 4,096 | 1–100,000 |
 | String bytes | 65,536 | 1–1,048,576 |
 | Object-key bytes | 65,536 | 1–1,048,576 |
-| Encoded content | 262,144 bytes | 1–16,777,216 bytes |
-| Internal encoded draft or envelope | 2,097,152 bytes | 1–134,217,728 bytes and at least four times the content limit plus 65,536 bytes |
+| Encoded content | 1,048,576 bytes | 1–16,777,216 bytes |
+| Internal encoded draft or envelope | 4,259,840 bytes | 1–134,217,728 bytes and at least four times the content limit plus 65,536 bytes |
 | TTL | 86,400,000 ms | 1–604,800,000 ms |
 
 Every draft and decoded envelope validates its type, content, and TTL against the active limits. `EventDraft.decode` and `EventEnvelope.decode` cap the internal tagged document's bytes and nesting before materialization, then install one limit set for the aggregate and every nested value; using a bare `JSONDecoder` intentionally selects the defaults and is only suitable for already-trusted in-process data. Later wire decoding must first cap frame length, parse event content through `decodeJSON`, and then construct an envelope with the negotiated active limits.
+
+The 1 MiB content value is a maximum for canonical deterministic JSON, not a fixed allocation.
+Smaller Events retain and transmit only their actual encoded bytes. Internal draft, wire record, and
+frame limits are larger because they include tagged-model or protocol metadata overhead.
 
 The `Codable` representation of `JSONValue` is an internal tagged representation that preserves the distinction between an integral floating-point value and an integer. Plain event-content JSON always enters and leaves through `decodeJSON` and `deterministicData`; it does not use the tagged internal representation.
 
