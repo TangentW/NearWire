@@ -6,7 +6,7 @@ NearWire is delivered as sequential OpenSpec changes. Only one change may be in 
 
 ### 1. `project-bootstrap`
 
-Establish the repository layout, Swift Package and CocoaPods manifests, module markers, smoke tests, English documentation, validation scripts, and review gates.
+Establish the repository layout, Swift Package and CocoaPods manifests, module markers, smoke tests, English documentation, and review gates based on maintained product tests and standard toolchain commands.
 
 ### 2. `core-event-model`
 

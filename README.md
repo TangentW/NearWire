@@ -67,11 +67,15 @@ Swift 5 compatibility refers to the language mode and `SWIFT_VERSION = 5.0`. Nea
 
 Only one OpenSpec implementation change may be in apply or remediation at a time. A change must complete specification, implementation, tests, multi-agent review rounds, and zero-unresolved-finding verification before it is archived and the next change begins.
 
-Run the bootstrap quality gate with:
+Run the maintained Swift package tests with:
 
 ```sh
-./Scripts/verify-bootstrap.sh
+swift test
 ```
+
+Use the shared `NearWireViewer` and `NearWireDemo` Xcode schemes for their platform tests and
+builds. Validate CocoaPods metadata directly with `pod lib lint NearWire.podspec --private` before
+publishing a release.
 
 ## License
 
