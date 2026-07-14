@@ -17,6 +17,7 @@ enum ViewerSessionTerminalCategory: String, Codable, Sendable {
   case protocolViolation
   case activeWorkLimitExceeded
   case localAdmissionFailure
+  case replacedByReconnect
   case userDisconnected
   case viewerShutdown
 }

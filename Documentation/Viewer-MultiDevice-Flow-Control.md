@@ -10,9 +10,11 @@ This layer completes Hello acknowledgement, negotiates directional Event rates, 
 
 The Viewer correlates a logical row by the peer-declared App installation ID plus its optional Bundle ID. These values, App name, version, alias, and local nickname are presentation hints only. They are not authenticated identity and never authorize a connection or retarget queued work.
 
-Only one live connection may own an exact logical route. A second exact route is rejected. The same installation ID with a different or missing Bundle ID is a separate row and does not inherit a Bundle preference, nickname, selection, or downlink queue from another route.
+Only one current connection may own an exact logical route. After a replacement candidate attaches successfully to its admission core, the newest exact-route session becomes current and the predecessor moves to bounded displaced-cleanup ownership. Attachment failure leaves the predecessor unchanged. The same installation ID with a different or missing Bundle ID is a separate row and does not inherit a Bundle preference, nickname, selection, or downlink queue from another route.
 
-One Viewer owns at most 16 sessions across provisional attachment, policy negotiation, active transfer, and disconnecting cleanup. A slot is released only after the exact admission handle finishes cleanup. Downlink work belongs to the exact connection and session epoch and is never migrated to a reconnect.
+One Viewer owns at most 16 current sessions across provisional attachment, policy negotiation, active transfer, and ordinary disconnecting cleanup, plus at most 16 displaced reconnect cleanup owners. A route may have only one outstanding displaced predecessor, so another replacement is rejected until that cleanup finishes. The new connection receives a fresh capability, queues, sequence state, session epoch, terminal state, and delivery authority. Downlink work is never migrated to a reconnect.
+
+The route is an unauthenticated correlation hint, not proof that the replacement is the same App process. A paired and TLS-admitted peer that can declare another App's installation ID and Bundle ID can replace that route. This availability policy therefore does not authorize Event delivery or transfer predecessor capabilities.
 
 After cleanup, safe presentation state may remain in memory for 30 seconds. Recent rows are bounded to 64, evicted deterministically by disconnect time and route key, and serviced by one replaceable expiry wake. They contain no Event payload, queue key, session epoch, endpoint, pairing code, certificate, or wire bytes.
 
@@ -58,7 +60,7 @@ The sidebar lists provisional, negotiating, active, disconnecting, and recent de
 
 Pause New Devices and pairing-code refresh affect admission only; they preserve handed-off sessions. Window close, application termination, and identity reset stop transfer first and await every session through the existing cleanup receipt. A slow or invalid App has its own serial executor, queues, tasks, terminal gate, and cleanup path and cannot block another session.
 
-Session terminal presentation uses only these closed local categories: `transportEnded`, `policyTimeout`, `protocolViolation`, `activeWorkLimitExceeded`, `localAdmissionFailure`, `userDisconnected`, and `viewerShutdown`. Arbitrary peer text, transport errors, identifiers, rates, queue values, Event content, and wire bytes are excluded from diagnostic descriptions and reflection.
+Session terminal presentation uses only these closed local categories: `transportEnded`, `policyTimeout`, `protocolViolation`, `activeWorkLimitExceeded`, `localAdmissionFailure`, `userDisconnected`, `replacedByReconnect`, and `viewerShutdown`. Arbitrary peer text, transport errors, identifiers, rates, queue values, Event content, and wire bytes are excluded from diagnostic descriptions and reflection.
 
 Uplink consumer execution transfers one Event at a time and is globally capped at 16 operations. Cancellation clears any not-yet-started payload immediately. If a synchronous consumer is already executing and does not return, that single current value is consumer-owned; no remaining batch is retained by the ended session.
 

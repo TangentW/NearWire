@@ -7294,6 +7294,141 @@ final class ViewerFoundationTests: XCTestCase {
   }
 
   @MainActor
+  func testAnalysisWorkspaceRedrawsImmediatelyFromCoordinatorModePublication() async throws {
+    let runtimeLogicalID = UUID()
+    let performanceDriver = ViewerPerformanceProjectionDriver(
+      prepare: { _, _, _, completion in
+        completion(.failure(.store(.unavailable)))
+        return ViewerPerformanceProjectionOperationToken()
+      },
+      loadEventPage: { _, completion in
+        completion(.failure(.unavailable))
+        return ViewerPerformanceProjectionOperationToken()
+      },
+      loadGapPage: { completion in
+        completion(.failure(.unavailable))
+        return ViewerPerformanceProjectionOperationToken()
+      },
+      endTraversal: { completion in
+        completion(.success(()))
+        return ViewerPerformanceProjectionOperationToken()
+      },
+      cancel: { _ in },
+      currentUptimeNanoseconds: { 100 }
+    )
+    let performance = ViewerPerformanceDashboardController(
+      driver: performanceDriver,
+      analysisActive: false
+    )
+    let rawResolver = ViewerPerformanceRawEventResolver(
+      store: ViewerPerformanceRawEventStoreDriver(
+        resolve: { _, _, _, completion in
+          completion(.success(nil))
+          return ViewerPerformanceRawEventStoreOperation()
+        },
+        cancel: { _ in }
+      ),
+      live: ViewerLiveEventWindow(runtimeLogicalID: runtimeLogicalID)
+    )
+    let coordinator = ViewerAnalysisModeCoordinator(
+      event: ViewerAnalysisEventDriver(
+        targetSelection: { .guidance(.selectOneDevice) },
+        deactivate: { Task {} },
+        activate: { Task {} },
+        reveal: { _ in }
+      ),
+      performanceController: performance,
+      rawResolver: rawResolver
+    )
+    let hostingView = NSHostingView(
+      rootView: ViewerAnalysisWorkspacePane(analysis: coordinator, explorer: nil)
+    )
+    hostingView.frame = NSRect(x: 0, y: 0, width: 720, height: 500)
+    hostingView.layoutSubtreeIfNeeded()
+    hostingView.displayIfNeeded()
+    let eventsImage = try XCTUnwrap(renderedPNGData(of: hostingView))
+
+    coordinator.showPerformance()
+    await Task.yield()
+    await Task.yield()
+    hostingView.layoutSubtreeIfNeeded()
+    hostingView.displayIfNeeded()
+    let performanceImage = try XCTUnwrap(renderedPNGData(of: hostingView))
+
+    XCTAssertEqual(coordinator.mode, ViewerAnalysisMode.performance)
+    XCTAssertNotEqual(eventsImage, performanceImage)
+    await coordinator.sealAndWait().value
+  }
+
+  @MainActor
+  func testFilterSheetRendersExpandedControlsWithinMinimumBounds() {
+    let runtimeLogicalID = UUID()
+    let controller = ViewerEventExplorerController(
+      inputs: ViewerRuntimeExplorerInputs(
+        runtimeLogicalID: runtimeLogicalID,
+        storeGateway: ViewerStoreExplorerGateway(),
+        liveObservations: ViewerLiveEventWindow(runtimeLogicalID: runtimeLogicalID)
+      )
+    )
+    let hostingView = NSHostingView(
+      rootView: ViewerExplorerFilterSheet(
+        explorer: controller,
+        isPresented: .constant(true)
+      )
+    )
+    controller.updateFilterDraft {
+      $0.fromDate = Date(timeIntervalSince1970: 1)
+      $0.throughDate = Date(timeIntervalSince1970: 2)
+      $0.jsonMode = .equals
+      $0.jsonScalarKind = .string
+    }
+    hostingView.frame = NSRect(x: 0, y: 0, width: 620, height: 660)
+    hostingView.layoutSubtreeIfNeeded()
+    hostingView.displayIfNeeded()
+
+    let editors = descendantViews(of: ViewerOperatorTextView.self, in: hostingView)
+    XCTAssertEqual(
+      Set(editors.compactMap { $0.accessibilityLabel() }),
+      Set([
+        "Event type", "Application identifier", "Application version", "JSON path",
+        "Comparison value",
+      ])
+    )
+    let editorFrames = editors.map { $0.convert($0.bounds, to: hostingView) }
+    XCTAssertTrue(
+      editorFrames.allSatisfy { $0.width >= 120 },
+      "Unexpected filter editor frames: \(editorFrames)"
+    )
+    let editorOrigins = editorFrames.map(\.minY).sorted()
+    XCTAssertTrue(
+      zip(editorOrigins, editorOrigins.dropFirst()).allSatisfy { previous, next in
+        next - previous >= 30
+      },
+      "Filter editors do not have enough vertical separation: \(editorFrames)"
+    )
+    let scrollViews = descendantViews(of: NSScrollView.self, in: hostingView)
+    let outerScroll = scrollViews.max {
+      $0.convert($0.bounds, to: hostingView).height
+        < $1.convert($1.bounds, to: hostingView).height
+    }
+    let outerFrame = outerScroll.map { $0.convert($0.bounds, to: hostingView) }
+    XCTAssertGreaterThanOrEqual(outerFrame?.width ?? 0, 500)
+    XCTAssertGreaterThanOrEqual(outerFrame?.height ?? 0, 400)
+    XCTAssertGreaterThan(hostingView.fittingSize.width, 0)
+    XCTAssertGreaterThan(hostingView.fittingSize.height, 0)
+
+    if let data = renderedPNGData(of: hostingView), let image = NSImage(data: data) {
+      let attachment = XCTAttachment(image: image)
+      attachment.name = "NearWire Filters expanded minimum layout"
+      attachment.lifetime = .keepAlways
+      add(attachment)
+    } else {
+      XCTFail("The minimum-size filter sheet could not be rendered offscreen.")
+    }
+    controller.model.sealAndClear()
+  }
+
+  @MainActor
   func testNativeTextControlsBoundExactEditsAndDisableInspectorClipboardSurfaces() {
     var buffer = ViewerIncrementalTextBuffer(
       maximumUTF8Bytes: 8,
@@ -12400,6 +12535,589 @@ final class ViewerFoundationTests: XCTestCase {
     XCTAssertTrue(Mirror(reflecting: scope).children.isEmpty)
   }
 
+  func testTimelineReconcilesUniqueDurableEventDuringMaterializationLag() throws {
+    let runtimeLogicalID = UUID()
+    let connectionID = UUID()
+    let context = try makeObservationContext(
+      connectionID: connectionID,
+      displayName: "Materialization Lag"
+    )
+    let observation = try ViewerCommittedEventObservation(
+      runtimeLogicalID: runtimeLogicalID,
+      context: context,
+      nickname: nil,
+      envelope: makeObservationEnvelope(
+        content: .object(["value": .integer(1)]),
+        createdAt: Date(timeIntervalSince1970: 1),
+        sessionEpoch: SessionEpoch(),
+        sequence: 7
+      ),
+      viewerWallMilliseconds: 1_000,
+      viewerMonotonicNanoseconds: 1_000,
+      deterministicEventBytes: 128,
+      initialDisposition: .buffered
+    )
+    let liveEvent = ViewerLiveEventSnapshot(
+      observation: observation,
+      laterDisposition: nil,
+      durableState: .acceptedAwaitingVisibility,
+      hasPresentationConflict: false,
+      hasGap: true,
+      hasDrop: false,
+      sessionEnded: false
+    )
+    let transient = ViewerExplorerTransientEventRow(liveEvent)
+    let durable = ViewerStoredEventRow(
+      rowID: 99,
+      deviceSessionID: 10,
+      direction: observation.key.direction.rawValue,
+      wireSequence: Int64(observation.key.wireSequence),
+      eventUUID: observation.envelope.id.rawValue,
+      eventType: observation.envelope.type.rawValue,
+      contentByteCount: Int64(observation.durableProjection.canonicalContent.count),
+      createdWallMilliseconds: observation.durableProjection.createdWallMilliseconds,
+      viewerWallMilliseconds: observation.viewerWallMilliseconds,
+      viewerMonotonicNanoseconds: Int64(observation.viewerMonotonicNanoseconds),
+      priority: observation.envelope.priority.rawValue,
+      recordingRevision: 1,
+      deviceRevision: 1,
+      resolvedDisposition: "buffered"
+    )
+    let source = ViewerExplorerSource.current(runtimeLogicalID: runtimeLogicalID)
+    let scope = try ViewerExplorerScope(source: source, filter: ViewerExplorerFilter())
+    let laggingMaterialization = try ViewerExplorerMaterializationSnapshot(
+      source: source,
+      generation: 1,
+      recordingID: 1,
+      deviceSessionIDsByLogicalID: [:]
+    )
+    var timeline = ViewerExplorerTimelineWindow(capacity: 10)
+    XCTAssertNotNil(timeline.applyLiveRows([transient], autoFollow: true))
+    let mutation = try XCTUnwrap(
+      timeline.applyDurablePage(
+        ViewerEventPage(rows: [durable], nextCursor: nil, previousCursor: nil),
+        placement: .replace,
+        scope: scope,
+        materialization: laggingMaterialization
+      )
+    )
+
+    XCTAssertEqual(timeline.rows.count, 1)
+    XCTAssertEqual(timeline.rows.first?.identity, .durable(rowID: 99))
+    XCTAssertEqual(
+      mutation.durableVisibilities,
+      [
+        ViewerExplorerDurableVisibility(
+          key: observation.key,
+          observationID: observation.observationID,
+          durableRowID: 99
+        )
+      ]
+    )
+  }
+
+  func testTimelineDoesNotBridgeAmbiguousPeerEventUUID() throws {
+    let runtimeLogicalID = UUID()
+    let eventID = EventID()
+
+    func transient(connectionID: UUID, sequence: UInt64, time: UInt64) throws
+      -> ViewerExplorerTransientEventRow
+    {
+      let context = try makeObservationContext(
+        connectionID: connectionID,
+        displayName: "Ambiguous Event"
+      )
+      let observation = try ViewerCommittedEventObservation(
+        runtimeLogicalID: runtimeLogicalID,
+        context: context,
+        nickname: nil,
+        envelope: makeObservationEnvelope(
+          id: eventID,
+          content: .object(["value": .integer(1)]),
+          createdAt: Date(timeIntervalSince1970: 1),
+          sessionEpoch: SessionEpoch(),
+          sequence: sequence
+        ),
+        viewerWallMilliseconds: Int64(time),
+        viewerMonotonicNanoseconds: time,
+        deterministicEventBytes: 128,
+        initialDisposition: .buffered
+      )
+      return ViewerExplorerTransientEventRow(
+        ViewerLiveEventSnapshot(
+          observation: observation,
+          laterDisposition: nil,
+          durableState: .acceptedAwaitingVisibility,
+          hasPresentationConflict: false,
+          hasGap: false,
+          hasDrop: false,
+          sessionEnded: false
+        )
+      )
+    }
+
+    let first = try transient(connectionID: UUID(), sequence: 7, time: 1_000)
+    let second = try transient(connectionID: UUID(), sequence: 8, time: 1_001)
+    let durable = ViewerStoredEventRow(
+      rowID: 99,
+      deviceSessionID: 10,
+      direction: first.key.direction.rawValue,
+      wireSequence: Int64(first.key.wireSequence),
+      eventUUID: eventID.rawValue,
+      eventType: first.eventType,
+      contentByteCount: Int64(first.contentByteCount),
+      createdWallMilliseconds: first.createdWallMilliseconds,
+      viewerWallMilliseconds: first.viewerWallMilliseconds,
+      viewerMonotonicNanoseconds: Int64(first.viewerMonotonicNanoseconds),
+      priority: first.priority,
+      recordingRevision: 1,
+      deviceRevision: 1,
+      resolvedDisposition: "buffered"
+    )
+    let source = ViewerExplorerSource.current(runtimeLogicalID: runtimeLogicalID)
+    var timeline = ViewerExplorerTimelineWindow(capacity: 10)
+    XCTAssertNotNil(timeline.applyLiveRows([first, second], autoFollow: true))
+    let mutation = try XCTUnwrap(
+      timeline.applyDurablePage(
+        ViewerEventPage(rows: [durable], nextCursor: nil, previousCursor: nil),
+        placement: .replace,
+        scope: try ViewerExplorerScope(source: source, filter: ViewerExplorerFilter()),
+        materialization: try ViewerExplorerMaterializationSnapshot(
+          source: source,
+          generation: 1,
+          recordingID: 1,
+          deviceSessionIDsByLogicalID: [:]
+        )
+      )
+    )
+    XCTAssertEqual(timeline.rows.count, 3)
+    XCTAssertTrue(mutation.durableVisibilities.isEmpty)
+  }
+
+  @MainActor
+  func testOrdinaryRefreshPreparationRetainsTimelineUntilSuccessorReplacement() throws {
+    let runtimeLogicalID = UUID()
+    let source = ViewerExplorerSource.current(runtimeLogicalID: runtimeLogicalID)
+    let model = ViewerEventExplorerModel(runtimeLogicalID: runtimeLogicalID)
+    let scope = try ViewerExplorerScope(source: source, filter: ViewerExplorerFilter())
+    let materialization = try ViewerExplorerMaterializationSnapshot(
+      source: source,
+      generation: 1,
+      recordingID: 1,
+      deviceSessionIDsByLogicalID: [:]
+    )
+    let token = try model.replaceScope(scope, materialization: materialization)
+    let row = ViewerStoredEventRow(
+      rowID: 1,
+      deviceSessionID: 1,
+      direction: "appToViewer",
+      wireSequence: 1,
+      eventUUID: "retained-event",
+      eventType: "test.refresh",
+      contentByteCount: 1,
+      createdWallMilliseconds: 1,
+      viewerWallMilliseconds: 1,
+      viewerMonotonicNanoseconds: 1,
+      priority: "normal",
+      recordingRevision: 1,
+      deviceRevision: 1,
+      resolvedDisposition: "buffered"
+    )
+    XCTAssertNotNil(
+      model.applyTimelinePage(
+        ViewerEventPage(rows: [row], nextCursor: nil, previousCursor: nil),
+        placement: .replace,
+        token: token
+      )
+    )
+    let retainedRows = model.timelineRows
+
+    let refreshToken = model.beginTimelineReplacement(retainingPresentation: true)
+    XCTAssertTrue(
+      model.prepareFreshTraversal(
+        token: refreshToken,
+        jumpsToLatest: false,
+        retainingPresentation: true
+      )
+    )
+    XCTAssertEqual(model.timelineRows, retainedRows)
+    XCTAssertTrue(
+      model.clearAbsentRefreshLanes(
+        hasDurableLane: true,
+        hasLiveLane: false,
+        token: refreshToken
+      )
+    )
+    XCTAssertEqual(model.timelineRows, retainedRows)
+
+    let emptyModel = ViewerEventExplorerModel(runtimeLogicalID: runtimeLogicalID)
+    _ = try emptyModel.replaceScope(scope, materialization: materialization)
+    let emptyRefreshToken = emptyModel.beginTimelineReplacement(retainingPresentation: true)
+    XCTAssertTrue(
+      emptyModel.clearAbsentRefreshLanes(
+        hasDurableLane: false,
+        hasLiveLane: false,
+        token: emptyRefreshToken
+      )
+    )
+    XCTAssertTrue(emptyModel.timelineRows.isEmpty)
+  }
+
+  @MainActor
+  func testRefreshFailureRestartsPendingDetailAndClearsRemovedInspectorContent() async throws {
+    let runtimeLogicalID = UUID()
+    let detailCompletions = FoundationDetailCompletionBox()
+    let gateway = ViewerStoreExplorerGateway()
+    let controller = ViewerEventExplorerController(
+      inputs: ViewerRuntimeExplorerInputs(
+        runtimeLogicalID: runtimeLogicalID,
+        storeGateway: gateway,
+        liveObservations: ViewerLiveEventWindow(runtimeLogicalID: runtimeLogicalID)
+      ),
+      contentDriver: ViewerExplorerContentDriver(
+        gateway: gateway,
+        loadDetail: { _, completion in
+          let operationID = UUID()
+          detailCompletions.append(completion)
+          return ViewerStoreExplorerOperationToken(
+            coordinatorGeneration: 0,
+            operationID: operationID
+          )
+        }
+      )
+    )
+    let source = ViewerExplorerSource.current(runtimeLogicalID: runtimeLogicalID)
+    let token = try controller.model.replaceScope(
+      ViewerExplorerScope(source: source, filter: ViewerExplorerFilter()),
+      materialization: ViewerExplorerMaterializationSnapshot(
+        source: source,
+        generation: 1,
+        recordingID: 1,
+        deviceSessionIDsByLogicalID: [:]
+      )
+    )
+    let row = ViewerStoredEventRow(
+      rowID: 1,
+      deviceSessionID: 1,
+      direction: "appToViewer",
+      wireSequence: 1,
+      eventUUID: "refresh-detail-event",
+      eventType: "test.refresh.detail",
+      contentByteCount: 27,
+      createdWallMilliseconds: 1,
+      viewerWallMilliseconds: 1,
+      viewerMonotonicNanoseconds: 1,
+      priority: "normal",
+      recordingRevision: 1,
+      deviceRevision: 1,
+      resolvedDisposition: "buffered"
+    )
+    XCTAssertNotNil(
+      controller.model.applyTimelinePage(
+        ViewerEventPage(rows: [row], nextCursor: nil, previousCursor: nil),
+        placement: .replace,
+        token: token
+      )
+    )
+    controller.coordinatorPresentationChanged()
+    controller.selectEvent(.durable(rowID: row.rowID))
+    XCTAssertEqual(controller.inspectorState, .loading)
+    XCTAssertEqual(detailCompletions.count, 1)
+
+    let refreshToken = controller.model.beginTimelineReplacement(retainingPresentation: true)
+    controller.coordinatorPresentationChanged()
+    XCTAssertTrue(controller.model.selectedEventNeedsReload)
+    XCTAssertEqual(controller.inspectorState, .loading)
+
+    XCTAssertTrue(controller.model.finishRetainedRefreshFailure(token: refreshToken))
+    controller.coordinatorPresentationChanged()
+    XCTAssertFalse(controller.model.selectedEventNeedsReload)
+    XCTAssertEqual(detailCompletions.count, 2)
+
+    let detail = makeRendererDetail(
+      rowID: row.rowID,
+      eventType: row.eventType,
+      content: Data(#"{"secret":"refresh-detail"}"#.utf8)
+    )
+    detailCompletions.complete(at: 0, with: .success(detail))
+    detailCompletions.complete(at: 1, with: .success(detail))
+    for _ in 0..<2_000 where controller.inspectorState != .ready {
+      await Task.yield()
+    }
+    XCTAssertEqual(controller.inspectorState, .ready)
+    XCTAssertEqual(controller.inspectorMetadata?.eventType, row.eventType)
+
+    let successorToken = controller.model.beginTimelineReplacement(retainingPresentation: true)
+    controller.coordinatorPresentationChanged()
+    XCTAssertNotNil(
+      controller.model.applyTimelinePage(
+        ViewerEventPage(rows: [row], nextCursor: nil, previousCursor: nil),
+        placement: .replace,
+        token: successorToken
+      )
+    )
+    controller.coordinatorPresentationChanged()
+    XCTAssertFalse(controller.model.selectedEventNeedsReload)
+    XCTAssertEqual(detailCompletions.count, 2)
+    XCTAssertEqual(controller.inspectorState, .ready)
+    XCTAssertEqual(controller.inspectorMetadata?.eventType, row.eventType)
+
+    let removalToken = controller.model.beginTimelineReplacement(retainingPresentation: true)
+    controller.coordinatorPresentationChanged()
+    XCTAssertTrue(
+      controller.model.clearAbsentRefreshLanes(
+        hasDurableLane: false,
+        hasLiveLane: false,
+        token: removalToken
+      )
+    )
+    controller.model.finishFreshTraversal(token: removalToken)
+    controller.coordinatorPresentationChanged()
+
+    XCTAssertNil(controller.selectedEventID)
+    XCTAssertEqual(controller.inspectorState, .empty)
+    XCTAssertNil(controller.inspector.canonicalBuffer)
+    XCTAssertNil(controller.rendererPreparation)
+    await controller.sealAndClear().value
+  }
+
+  @MainActor
+  func testRetainedRefreshFailuresRestoreSelectionReloadState() async throws {
+    let runtimeLogicalID = UUID()
+    let source = ViewerExplorerSource.historical(
+      recordingID: 1,
+      recordingLogicalID: UUID()
+    )
+    let materialization = try ViewerExplorerMaterializationSnapshot(
+      source: source,
+      generation: 1,
+      recordingID: 1,
+      deviceSessionIDsByLogicalID: [:]
+    )
+    let live = ExplorerLiveObservationSpy(
+      snapshot: ViewerLiveProjectionSnapshot(
+        runtimeLogicalID: runtimeLogicalID,
+        generation: 1,
+        events: [],
+        sessions: [],
+        gaps: ViewerLiveGapSnapshot(
+          ingressOverflowCount: 0,
+          windowOverflowCount: 0,
+          residentConflictCount: 0,
+          diagnosticLossCount: 0,
+          storeUnavailableCount: 0,
+          storeRecoveryCount: 0,
+          storeUnavailable: false
+        ),
+        accountedEventBytes: 0
+      )
+    )
+    let store = ExplorerStoreDriverSpy()
+    let model = ViewerEventExplorerModel(runtimeLogicalID: runtimeLogicalID)
+    let coordinator = ViewerEventExplorerCoordinator(
+      model: model,
+      store: store.driver,
+      live: live
+    )
+    let token = try model.replaceScope(
+      ViewerExplorerScope(source: source, filter: ViewerExplorerFilter()),
+      materialization: materialization
+    )
+    let row = ViewerStoredEventRow(
+      rowID: 1,
+      deviceSessionID: 1,
+      direction: "appToViewer",
+      wireSequence: 1,
+      eventUUID: "retained-refresh-failure",
+      eventType: "test.refresh.failure",
+      contentByteCount: 1,
+      createdWallMilliseconds: 1,
+      viewerWallMilliseconds: 1,
+      viewerMonotonicNanoseconds: 1,
+      priority: "normal",
+      recordingRevision: 1,
+      deviceRevision: 1,
+      resolvedDisposition: "buffered"
+    )
+    XCTAssertNotNil(
+      model.applyTimelinePage(
+        ViewerEventPage(rows: [row], nextCursor: nil, previousCursor: nil),
+        placement: .replace,
+        token: token
+      )
+    )
+    XCTAssertTrue(model.selectEvent(.durable(rowID: row.rowID)))
+
+    _ = coordinator.refresh()
+    XCTAssertTrue(model.selectedEventNeedsReload)
+    store.completeNextRelease(.failure(.unavailable))
+    await waitUntilExplorer { coordinator.state == .failed(.unavailable) }
+    XCTAssertFalse(model.selectedEventNeedsReload)
+    XCTAssertEqual(model.selectedEventIdentity, .durable(rowID: row.rowID))
+    XCTAssertEqual(model.timelineRows.count, 1)
+
+    _ = coordinator.refresh()
+    XCTAssertTrue(model.selectedEventNeedsReload)
+    store.completeNextRelease(.success(()))
+    await waitUntilExplorer { store.queryRequestCount == 1 }
+    store.completeNextQuery(.failure(.busy))
+    await waitUntilExplorer { coordinator.state == .failed(.busy) }
+    XCTAssertFalse(model.selectedEventNeedsReload)
+    XCTAssertEqual(model.selectedEventIdentity, .durable(rowID: row.rowID))
+    XCTAssertEqual(model.timelineRows.count, 1)
+
+    XCTAssertTrue(
+      model.applySelectedDetail(
+        makeRendererDetail(
+          rowID: row.rowID,
+          eventType: row.eventType,
+          content: Data(#"{"retained":true}"#.utf8)
+        ),
+        identity: .durable(rowID: row.rowID),
+        token: model.currentToken
+      )
+    )
+    XCTAssertNotNil(model.selectedEventDetail)
+
+    _ = coordinator.refresh()
+    store.completeNextRelease(.success(()))
+    await waitUntilExplorer { store.queryRequestCount == 2 }
+    store.completeNextQuery(
+      .success(
+        ViewerQuerySnapshot(
+          eventUpperRowID: 1,
+          recordingVersionUpperRowID: 1,
+          deviceVersionUpperRowID: 1,
+          dispositionUpperRowID: 1,
+          gapUpperRowID: 1,
+          dropUpperRowID: 1
+        )
+      )
+    )
+    await waitUntilExplorer { store.pageRequestCount == 1 && store.gapRequestCount == 1 }
+    store.completeNextPage(
+      .success(ViewerEventPage(rows: [], nextCursor: nil, previousCursor: nil))
+    )
+    store.completeNextGaps(.failure(.unavailable))
+    await waitUntilExplorer { coordinator.state == .failed(.unavailable) }
+    XCTAssertNil(model.selectedEventIdentity)
+    XCTAssertNil(model.selectedEventDetail)
+    XCTAssertFalse(model.selectedEventNeedsReload)
+    XCTAssertTrue(model.timelineRows.isEmpty)
+    await coordinator.waitForIdle().value
+  }
+
+  @MainActor
+  func testExplorerCoalescesRepeatedBoundaryRequestsWhileEachLaneIsActive() async throws {
+    let runtimeLogicalID = UUID()
+    let gateway = ViewerStoreExplorerGateway()
+    let controller = ViewerEventExplorerController(
+      inputs: ViewerRuntimeExplorerInputs(
+        runtimeLogicalID: runtimeLogicalID,
+        storeGateway: gateway,
+        liveObservations: ViewerLiveEventWindow(runtimeLogicalID: runtimeLogicalID)
+      )
+    )
+    let source = ViewerExplorerSource.current(runtimeLogicalID: runtimeLogicalID)
+    let token = try controller.model.replaceScope(
+      ViewerExplorerScope(source: source, filter: ViewerExplorerFilter()),
+      materialization: ViewerExplorerMaterializationSnapshot(
+        source: source,
+        generation: 1,
+        recordingID: 1,
+        deviceSessionIDsByLogicalID: [:]
+      )
+    )
+    let snapshot = ViewerQuerySnapshot(
+      eventUpperRowID: 1,
+      recordingVersionUpperRowID: 1,
+      deviceVersionUpperRowID: 1,
+      dispositionUpperRowID: 1,
+      gapUpperRowID: 1,
+      dropUpperRowID: 1
+    )
+    let eventCursor = ViewerEventCursor(
+      recordingID: 1,
+      queryFingerprint: "single-flight-event",
+      snapshot: snapshot,
+      leaseID: UUID(),
+      leaseExpiresAt: .now + .seconds(60),
+      direction: .backward,
+      viewerMonotonicNanoseconds: 1,
+      rowID: 1
+    )
+    let event = ViewerStoredEventRow(
+      rowID: 1,
+      deviceSessionID: 1,
+      direction: "appToViewer",
+      wireSequence: 1,
+      eventUUID: "single-flight-event",
+      eventType: "test.single-flight",
+      contentByteCount: 1,
+      createdWallMilliseconds: 1,
+      viewerWallMilliseconds: 1,
+      viewerMonotonicNanoseconds: 1,
+      priority: "normal",
+      recordingRevision: 1,
+      deviceRevision: 1,
+      resolvedDisposition: "buffered"
+    )
+    XCTAssertNotNil(
+      controller.model.applyTimelinePage(
+        ViewerEventPage(rows: [event], nextCursor: nil, previousCursor: eventCursor),
+        placement: .replace,
+        token: token
+      )
+    )
+    let gapCursor = ViewerGapCursor(
+      recordingID: 1,
+      queryFingerprint: "single-flight-gap",
+      deviceSessionIDs: [],
+      gapUpperRowID: 1,
+      leaseID: UUID(),
+      leaseExpiresAt: .now + .seconds(60),
+      direction: .backward,
+      lastViewerWallMilliseconds: 1,
+      rowID: 1
+    )
+    XCTAssertTrue(
+      controller.model.applyGapPage(
+        ViewerGapPage(
+          rows: [
+            ViewerGapRow(
+              rowID: 1,
+              recordingID: 1,
+              deviceSessionID: nil,
+              sequence: 1,
+              namespace: "single-flight",
+              revision: 1,
+              reason: "test",
+              firstViewerWallMilliseconds: 1,
+              lastViewerWallMilliseconds: 1,
+              directions: "appToViewer",
+              firstWireSequence: 1,
+              lastWireSequence: 1,
+              count: 1
+            )
+          ],
+          nextCursor: nil,
+          previousCursor: gapCursor
+        ),
+        placement: .replace,
+        token: token
+      )
+    )
+
+    controller.loadOlderEvents()
+    controller.loadOlderEvents()
+    controller.loadOlderGaps()
+    controller.loadOlderGaps()
+
+    XCTAssertEqual(controller.eventPageRequestCountForTesting, 1)
+    XCTAssertEqual(controller.gapPageRequestCountForTesting, 1)
+    await controller.sealAndClear().value
+  }
+
   @MainActor
   func testExplorerCoordinatorPausesPresentationAndReconcilesExactDurableIdentity()
     async throws
@@ -15002,6 +15720,44 @@ private func descendantViews<ViewType: NSView>(
     var matches = descendantViews(of: type, in: child)
     if let match = child as? ViewType { matches.insert(match, at: 0) }
     return matches
+  }
+}
+
+@MainActor
+private func renderedPNGData(of view: NSView) -> Data? {
+  guard let representation = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
+    return nil
+  }
+  view.cacheDisplay(in: view.bounds, to: representation)
+  return representation.representation(using: .png, properties: [:])
+}
+
+private final class FoundationDetailCompletionBox: @unchecked Sendable {
+  typealias Completion = ViewerExplorerContentDriver.DetailCompletion
+
+  private let lock = NSLock()
+  private var completions: [Completion] = []
+
+  func append(_ completion: @escaping Completion) {
+    lock.lock()
+    completions.append(completion)
+    lock.unlock()
+  }
+
+  var count: Int {
+    lock.lock()
+    defer { lock.unlock() }
+    return completions.count
+  }
+
+  func complete(
+    at index: Int,
+    with result: Result<ViewerStoredEventDetail?, ViewerStoreExplorerFailure>
+  ) {
+    lock.lock()
+    let completion = completions[index]
+    lock.unlock()
+    completion(result)
   }
 }
 

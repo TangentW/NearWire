@@ -5,15 +5,15 @@ TBD - created by archiving change viewer-multidevice-flow-control. Update Purpos
 ## Requirements
 ### Requirement: Viewer owns a finite set of independent App sessions
 
-Viewer SHALL replace the foundation placeholder with one `ViewerAdmissionHandoffOwning` multi-device manager. The manager SHALL synchronously bound all provisional, negotiating, active, and disconnecting session owners to 16, independently from the foundation's 32 connection-owner bound. A rejected 17th handoff SHALL create no session task or UI row and SHALL be cancelled through the original admission cleanup ownership.
+Viewer SHALL replace the foundation placeholder with one `ViewerAdmissionHandoffOwning` multi-device manager. The manager SHALL synchronously bound current provisional, negotiating, active, and disconnecting route owners to 16, independently from the foundation's 32 connection-owner bound, and SHALL separately bound displaced reconnect cleanup owners to 16. A rejected 17th current-owner handoff SHALL create no session task or UI row and SHALL be cancelled through the original admission cleanup ownership.
 
-Each accepted session SHALL extend the same immutable admission connection core, secure-channel callback, continuous frame decoder, and terminal gate that decoded the App Hello. The core serial queue SHALL remain the sole decoder, wire-phase, policy-transaction, sequence, and terminal executor. Session attachment SHALL occur synchronously and reentrantly before handoff transfer returns success, SHALL preserve another frame coalesced after App Hello, and SHALL occur at most once. It SHALL NOT expose or replace raw Network.framework objects, endpoint descriptions, decoder ownership, or transport callbacks. A provisional reservation SHALL count toward 16 and SHALL roll back if duplicate-route policy, attachment, terminal state, or shutdown prevents commit. No manager lock SHALL be held across a core operation or callback that can re-enter the manager. Per-session work SHALL be isolated so one device's wait, full queue, malformed input, or cleanup cannot serialize another device.
+Each accepted session SHALL extend the same immutable admission connection core, secure-channel callback, continuous frame decoder, and terminal gate that decoded the App Hello. The core serial queue SHALL remain the sole decoder, wire-phase, policy-transaction, sequence, and terminal executor. Session attachment SHALL occur synchronously and reentrantly before ownership replacement commits or handoff transfer returns success, SHALL preserve another frame coalesced after App Hello, and SHALL occur at most once. It SHALL NOT expose or replace raw Network.framework objects, endpoint descriptions, decoder ownership, or transport callbacks. A failed attachment SHALL change no current or displaced route ownership. A committed replacement SHALL move the exact predecessor to bounded displaced cleanup ownership. No manager lock SHALL be held across a core operation or callback that can re-enter the manager. Per-session work SHALL be isolated so one device's wait, full queue, malformed input, or cleanup cannot serialize another device.
 
 #### Scenario: Sixteen Apps are connected
 
-- **WHEN** 16 distinct slots are occupied by any mixture of provisional, negotiating, active, or disconnecting owners
+- **WHEN** 16 current slots are occupied by any mixture of provisional, negotiating, active, or disconnecting owners
 - **THEN** each has independent session and queue ownership
-- **AND** a valid 17th handoff is rejected without disturbing the first 16
+- **AND** a valid 17th distinct-route handoff is rejected without disturbing the first 16
 
 #### Scenario: One device blocks
 
@@ -35,23 +35,29 @@ Each accepted session SHALL extend the same immutable admission connection core,
 
 #### Scenario: Attachment cannot commit
 
-- **WHEN** terminal state or shutdown wins after provisional reservation but before attachment commit
-- **THEN** Viewer rolls back the session entry and returns handoff failure
-- **AND** admission retains exact cancellation and cleanup ownership
+- **WHEN** terminal state, shutdown, or an injected attachment failure wins before ownership commit
+- **THEN** Viewer returns handoff failure without changing the current route owner or creating displaced cleanup ownership
+- **AND** admission retains exact cancellation and cleanup ownership for the failed candidate
 
 ### Requirement: Logical device correlation is bounded and never authenticates a peer
 
-Viewer SHALL derive a logical correlation key from the peer-declared App installation ID plus optional Bundle ID in the validated App Hello. That key, display name, version, generated alias, and nickname SHALL be unauthenticated correlation/presentation hints only. They SHALL NOT prove App identity, authorize replacement, or retarget Event delivery. Viewer SHALL present at most one owned connection per correlation key.
+Viewer SHALL derive a logical correlation key from the peer-declared App installation ID plus optional Bundle ID in the validated App Hello. That key, display name, version, generated alias, and nickname SHALL be unauthenticated correlation/presentation hints only. They SHALL NOT prove App identity, authorize Event delivery, or transfer connection-owned state. Viewer SHALL present at most one current connection per correlation key.
 
-While a key is provisional, negotiating, active, or disconnecting, a second live claim SHALL be rejected under both automatic and approval admission without disturbing the healthy connection. Reconnection SHALL start only after the old handle is terminal and its 16-slot ownership is released. Downlink work SHALL belong to the exact internal connection ID and epoch, SHALL be cleared or terminally dropped when it closes, and SHALL never transfer to a later connection declaring the same key. A later send SHALL be a new local submission to the newly selected live session.
+When a second admitted connection claims an exact currently owned key, Viewer SHALL make the newest session the current route owner and cancel the displaced session outside manager locks. Replacement SHALL issue a new opaque control capability and SHALL NOT transfer pending downlink work, queue keys, sequence state, session epoch, terminal state, or a delivery claim. The displaced owner SHALL remain separately owned until exact cleanup completes. Viewer SHALL retain at most 16 current owners and 16 displaced cleanup owners, SHALL allow at most one outstanding displacement per correlation key, and SHALL reject additional replacement or capacity handoffs without disturbing the current owner. Shutdown SHALL join both ownership sets.
 
-A disconnected key MAY remain as a safe memory-only recent row for at most 30 seconds and SHALL retain no Event content, queue key, session epoch, pairing code, endpoint, certificate, or wire bytes. Recent rows SHALL be globally bounded to 64, deterministically evict the oldest disconnect time with correlation-key tie-breaking, and never evict an owned/disconnecting connection. Exactly one manager-owned replaceable wake SHALL target the earliest expiry and service at most 64 due rows per turn. A successful handoff commit before the deadline SHALL replace the exact row, while failed attachment SHALL preserve it until its original deadline; at a sampled time equal to or later than the deadline, expiry SHALL win. Late callbacks SHALL match immutable connection and disconnect generations. A live slot SHALL remain occupied through disconnecting state and release only after exact handle cleanup. Shutdown SHALL leave zero live slots, recent rows, and expiry-wake ownership after cleanup.
+A disconnected key MAY remain as a safe memory-only recent row for at most 30 seconds and SHALL retain no Event content, queue key, session epoch, pairing code, endpoint, certificate, or wire bytes. Recent rows SHALL be globally bounded to 64, deterministically evict the oldest disconnect time with correlation-key tie-breaking, and never evict a current/displaced connection. Exactly one manager-owned replaceable wake SHALL target the earliest expiry and service at most 64 due rows per turn. A successful handoff commit before the deadline SHALL replace the exact row, while failed attachment SHALL preserve it until its original deadline; at a sampled time equal to or later than the deadline, expiry SHALL win. Late callbacks SHALL match immutable connection and disconnect generations. Shutdown SHALL leave zero current owners, displaced owners, recent rows, and expiry-wake ownership after cleanup.
 
-#### Scenario: Exact tuple duplicates a healthy key
+#### Scenario: Exact tuple reconnects while the predecessor is owned
 
-- **WHEN** a second peer declares the same installation ID and the same optional Bundle ID while the original connection is owned
-- **THEN** Viewer rejects the new handoff under automatic or approval admission
-- **AND** the original session, nickname presentation, and queued downlink ownership remain unchanged
+- **WHEN** a second paired and TLS-admitted peer declares the same installation ID and optional Bundle ID while the original connection is owned
+- **THEN** Viewer presents the new session as the current route and cancels the displaced session
+- **AND** the new session inherits no queue, capability, sequence, epoch, terminal, or delivery state from the predecessor
+
+#### Scenario: Replacement cleanup is still pending
+
+- **WHEN** another exact-route connection arrives before the displaced predecessor finishes cleanup
+- **THEN** Viewer rejects that additional handoff without disturbing the current route owner
+- **AND** current plus displaced ownership remains within its fixed bounds
 
 #### Scenario: Bundle variant creates a distinct key
 
@@ -62,14 +68,14 @@ A disconnected key MAY remain as a safe memory-only recent row for at most 30 se
 #### Scenario: Recent-route churn exceeds its bound
 
 - **WHEN** more than 64 distinct keys disconnect within 30 seconds
-- **THEN** Viewer retains at most 64 recent rows using deterministic oldest-first eviction
+- **THEN** Viewer retains at most 64 recent rows using deterministic oldest-first eviction without evicting current or displaced ownership
 - **AND** one manager expiry owner services all remaining rows
 
 #### Scenario: Reconnect reaches the expiry boundary
 
 - **WHEN** a handoff for a recent key is processed before its deadline
-- **THEN** it removes the exact old row and starts a fresh unauthenticated connection
-- **AND** at or after the deadline expiry wins before any later handoff
+- **THEN** a successful ownership commit removes the exact old row and starts a fresh unauthenticated connection
+- **AND** failed attachment preserves the row, while at or after the deadline expiry wins before any later handoff
 
 ### Requirement: Viewer completes and maintains directional flow policy
 

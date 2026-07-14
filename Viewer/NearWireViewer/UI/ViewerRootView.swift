@@ -226,10 +226,15 @@ struct ViewerRootView: View {
 
   private var analysisWorkspace: some View {
     VSplitView {
-      VStack(spacing: 0) {
-        analysisModeHeader
-        Divider()
-        analysisContent
+      Group {
+        if let analysis = model.analysisCoordinator {
+          ViewerAnalysisWorkspacePane(
+            analysis: analysis,
+            explorer: model.explorerController
+          )
+        } else {
+          ViewerAnalysisWorkspacePlaceholder()
+        }
       }
       controlComposer
         .frame(
@@ -238,95 +243,6 @@ struct ViewerRootView: View {
           maxHeight: ViewerWorkspaceLayout.composerMaximumHeight
         )
         .accessibilityIdentifier("nearwire.workspace.control-composer")
-    }
-  }
-
-  private var analysisModeHeader: some View {
-    HStack {
-      Text("Analysis").font(.headline)
-      Picker("Analysis Mode", selection: analysisModeBinding) {
-        Text("Events").tag(ViewerAnalysisMode.events)
-        Text("Performance").tag(ViewerAnalysisMode.performance)
-      }
-      .labelsHidden()
-      .pickerStyle(.segmented)
-      .frame(width: 240)
-      .disabled(model.analysisCoordinator == nil)
-      Spacer()
-    }
-    .padding(.horizontal, 14)
-    .padding(.vertical, 10)
-  }
-
-  @ViewBuilder
-  private var analysisContent: some View {
-    if let analysis = model.analysisCoordinator, analysis.mode == .performance {
-      ViewerPerformanceDashboardView(coordinator: analysis)
-        .accessibilityIdentifier("nearwire.workspace.performance-dashboard")
-    } else {
-      HSplitView {
-        eventTimeline
-          .frame(
-            minWidth: ViewerWorkspaceLayout.timelineMinimumWidth,
-            idealWidth: ViewerWorkspaceLayout.timelineIdealWidth
-          )
-          .accessibilityIdentifier("nearwire.workspace.event-timeline")
-        eventInspector
-          .frame(
-            minWidth: ViewerWorkspaceLayout.inspectorMinimumWidth,
-            idealWidth: ViewerWorkspaceLayout.inspectorIdealWidth
-          )
-          .accessibilityIdentifier("nearwire.workspace.event-inspector")
-      }
-    }
-  }
-
-  private var analysisModeBinding: Binding<ViewerAnalysisMode> {
-    Binding(
-      get: { model.analysisCoordinator?.mode ?? .events },
-      set: { mode in
-        guard let analysis = model.analysisCoordinator else { return }
-        switch mode {
-        case .events: analysis.showEvents()
-        case .performance: analysis.showPerformance()
-        }
-      }
-    )
-  }
-
-  private var eventTimeline: some View {
-    Group {
-      if let explorer = model.explorerController {
-        ViewerExplorerTimelineView(explorer: explorer)
-      } else {
-        VStack(spacing: 0) {
-          workspacePaneHeader(title: "Event Timeline", systemImage: "list.bullet.rectangle")
-          Divider()
-          ViewerEmptyState(
-            title: "Runtime Not Ready",
-            systemImage: "clock.arrow.circlepath",
-            description: "The Event explorer appears when the Viewer runtime starts."
-          )
-        }
-      }
-    }
-  }
-
-  private var eventInspector: some View {
-    Group {
-      if let explorer = model.explorerController {
-        ViewerExplorerInspectorView(explorer: explorer)
-      } else {
-        VStack(spacing: 0) {
-          workspacePaneHeader(title: "Event Inspector", systemImage: "sidebar.right")
-          Divider()
-          ViewerEmptyState(
-            title: "Select an Event",
-            systemImage: "doc.text.magnifyingglass",
-            description: "Event metadata and bounded content views appear here."
-          )
-        }
-      }
     }
   }
 
@@ -354,15 +270,6 @@ struct ViewerRootView: View {
         .padding(14)
       }
     }
-  }
-
-  private func workspacePaneHeader(title: String, systemImage: String) -> some View {
-    HStack {
-      Label(title, systemImage: systemImage).font(.headline)
-      Spacer()
-    }
-    .padding(.horizontal, 14)
-    .padding(.vertical, 12)
   }
 
   @ViewBuilder
@@ -633,6 +540,136 @@ private struct ViewerDeviceDetail: View {
         String(format: "%.3f s oldest", Double($0) / 1_000_000_000)
       } ?? "no pending wait"
     return "\(count) events, \(bytes) bytes, \(wait)"
+  }
+}
+
+struct ViewerAnalysisWorkspacePane: View {
+  @ObservedObject var analysis: ViewerAnalysisModeCoordinator
+  let explorer: ViewerEventExplorerController?
+
+  var body: some View {
+    VStack(spacing: 0) {
+      HStack {
+        Text("Analysis").font(.headline)
+        Picker("Analysis Mode", selection: modeBinding) {
+          Text("Events").tag(ViewerAnalysisMode.events)
+          Text("Performance").tag(ViewerAnalysisMode.performance)
+        }
+        .labelsHidden()
+        .pickerStyle(.segmented)
+        .frame(width: 240)
+        Spacer()
+      }
+      .padding(.horizontal, 14)
+      .padding(.vertical, 10)
+      Divider()
+      analysisContent
+    }
+  }
+
+  @ViewBuilder
+  private var analysisContent: some View {
+    if analysis.mode == .performance {
+      ViewerPerformanceDashboardView(coordinator: analysis)
+        .accessibilityIdentifier("nearwire.workspace.performance-dashboard")
+    } else {
+      HSplitView {
+        eventTimeline
+          .frame(
+            minWidth: ViewerWorkspaceLayout.timelineMinimumWidth,
+            idealWidth: ViewerWorkspaceLayout.timelineIdealWidth
+          )
+          .accessibilityIdentifier("nearwire.workspace.event-timeline")
+        eventInspector
+          .frame(
+            minWidth: ViewerWorkspaceLayout.inspectorMinimumWidth,
+            idealWidth: ViewerWorkspaceLayout.inspectorIdealWidth
+          )
+          .accessibilityIdentifier("nearwire.workspace.event-inspector")
+      }
+    }
+  }
+
+  private var modeBinding: Binding<ViewerAnalysisMode> {
+    Binding(
+      get: { analysis.mode },
+      set: { mode in
+        switch mode {
+        case .events: analysis.showEvents()
+        case .performance: analysis.showPerformance()
+        }
+      }
+    )
+  }
+
+  @ViewBuilder
+  private var eventTimeline: some View {
+    if let explorer {
+      ViewerExplorerTimelineView(explorer: explorer)
+    } else {
+      VStack(spacing: 0) {
+        paneHeader(title: "Event Timeline", systemImage: "list.bullet.rectangle")
+        Divider()
+        ViewerEmptyState(
+          title: "Runtime Not Ready",
+          systemImage: "clock.arrow.circlepath",
+          description: "The Event explorer appears when the Viewer runtime starts."
+        )
+      }
+    }
+  }
+
+  @ViewBuilder
+  private var eventInspector: some View {
+    if let explorer {
+      ViewerExplorerInspectorView(explorer: explorer)
+    } else {
+      VStack(spacing: 0) {
+        paneHeader(title: "Event Inspector", systemImage: "sidebar.right")
+        Divider()
+        ViewerEmptyState(
+          title: "Select an Event",
+          systemImage: "doc.text.magnifyingglass",
+          description: "Event metadata and bounded content views appear here."
+        )
+      }
+    }
+  }
+
+  private func paneHeader(title: String, systemImage: String) -> some View {
+    HStack {
+      Label(title, systemImage: systemImage).font(.headline)
+      Spacer()
+    }
+    .padding(.horizontal, 14)
+    .padding(.vertical, 12)
+  }
+}
+
+private struct ViewerAnalysisWorkspacePlaceholder: View {
+  var body: some View {
+    VStack(spacing: 0) {
+      HStack {
+        Text("Analysis").font(.headline)
+        Picker("Analysis Mode", selection: .constant(ViewerAnalysisMode.events)) {
+          Text("Events").tag(ViewerAnalysisMode.events)
+          Text("Performance").tag(ViewerAnalysisMode.performance)
+        }
+        .labelsHidden()
+        .pickerStyle(.segmented)
+        .frame(width: 240)
+        .disabled(true)
+        Spacer()
+      }
+      .padding(.horizontal, 14)
+      .padding(.vertical, 10)
+      Divider()
+      ViewerEmptyState(
+        title: "Runtime Not Ready",
+        systemImage: "clock.arrow.circlepath",
+        description: "Analysis appears when the Viewer runtime starts."
+      )
+    }
   }
 }
 

@@ -37,11 +37,19 @@ struct ViewerStoreExplorerOperationToken: Hashable, Sendable {
   fileprivate init(
     coordinatorGeneration: UInt64,
     operationID: UUID,
-    deliveryValidity: ViewerStoreExplorerGenerationValidity? = nil
+    deliveryValidity: ViewerStoreExplorerGenerationValidity?
   ) {
     self.coordinatorGeneration = coordinatorGeneration
     self.operationID = operationID
     self.deliveryValidity = deliveryValidity
+  }
+
+  init(coordinatorGeneration: UInt64, operationID: UUID) {
+    self.init(
+      coordinatorGeneration: coordinatorGeneration,
+      operationID: operationID,
+      deliveryValidity: nil
+    )
   }
 
   var isDeliveryValid: Bool {

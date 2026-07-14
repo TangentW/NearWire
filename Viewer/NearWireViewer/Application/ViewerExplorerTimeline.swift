@@ -236,6 +236,25 @@ struct ViewerExplorerTimelineWindow: Sendable {
     )
   }
 
+  mutating func clearDurableRows() -> ViewerExplorerTimelineMutation? {
+    let transientRows = rows.compactMap { row -> ViewerExplorerTransientEventRow? in
+      if case .transient(let summary) = row { return summary }
+      return nil
+    }
+    navigation = ViewerExplorerListNavigation()
+    return rebuild(
+      durableRows: [],
+      transientRows: transientRows,
+      scope: nil,
+      materialization: nil,
+      retaining: .trailing
+    )
+  }
+
+  mutating func clearLiveRows() -> ViewerExplorerTimelineMutation? {
+    applyLiveRows([], autoFollow: true)
+  }
+
   mutating func clear() {
     rows.removeAll(keepingCapacity: false)
     navigation = ViewerExplorerListNavigation()
@@ -287,13 +306,41 @@ struct ViewerExplorerTimelineWindow: Sendable {
             return false
           })?.journalKey
       } else {
-        journalKey = ViewerExplorerTimelineReconciler.durableJournalKey(
-          for: row,
-          scope: scope,
-          materialization: materialization
-        )
+        journalKey =
+          ViewerExplorerTimelineReconciler.durableJournalKey(
+            for: row,
+            scope: scope,
+            materialization: materialization
+          )
+          ?? priorRows.first(where: {
+            if case .durable(let summary, _) = $0 { return summary.rowID == row.rowID }
+            return false
+          })?.journalKey
       }
       durableTimelineRows.append(.durable(summary: row, journalKey: journalKey))
+    }
+    let durableEventUUIDCounts = Dictionary(
+      grouping: durableRows,
+      by: \.eventUUID
+    ).mapValues(\.count)
+    let transientEventUUIDCounts = Dictionary(
+      grouping: transientRows,
+      by: \.eventUUID
+    ).mapValues(\.count)
+    let uniqueTransientByEventUUID = Dictionary(
+      uniqueKeysWithValues: transientRows.compactMap {
+        transient -> (String, ViewerExplorerTransientEventRow)? in
+        guard transientEventUUIDCounts[transient.eventUUID] == 1 else { return nil }
+        return (transient.eventUUID, transient)
+      }
+    )
+    for index in durableTimelineRows.indices {
+      guard case .durable(let durable, nil) = durableTimelineRows[index],
+        durableEventUUIDCounts[durable.eventUUID] == 1,
+        let transient = uniqueTransientByEventUUID[durable.eventUUID],
+        Self.canBridge(durable: durable, transient: transient)
+      else { continue }
+      durableTimelineRows[index] = .durable(summary: durable, journalKey: transient.key)
     }
     let durableKeyPairs = durableTimelineRows.compactMap {
       row -> (ViewerEventJournalKey, Int64)? in
@@ -375,6 +422,24 @@ struct ViewerExplorerTimelineWindow: Sendable {
       else { return false }
     }
     return true
+  }
+
+  private static func canBridge(
+    durable: ViewerStoredEventRow,
+    transient: ViewerExplorerTransientEventRow
+  ) -> Bool {
+    guard let durableByteCount = Int(exactly: durable.contentByteCount),
+      let durableMonotonic = UInt64(exactly: durable.viewerMonotonicNanoseconds),
+      let durableSequence = UInt64(exactly: durable.wireSequence)
+    else { return false }
+    return durable.direction == transient.key.direction.rawValue
+      && durableSequence == transient.key.wireSequence
+      && durable.eventType == transient.eventType
+      && durableByteCount == transient.contentByteCount
+      && durable.createdWallMilliseconds == transient.createdWallMilliseconds
+      && durable.viewerWallMilliseconds == transient.viewerWallMilliseconds
+      && durableMonotonic == transient.viewerMonotonicNanoseconds
+      && durable.priority == transient.priority
   }
 
   private static func isStrictlyOrdered(_ rows: [ViewerExplorerTimelineRow]) -> Bool {

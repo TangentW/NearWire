@@ -391,7 +391,10 @@ struct ViewerExplorerContentDriver: Sendable {
   init(
     gateway: ViewerStoreExplorerGateway,
     loadDeviceCatalog: DeviceCatalogLoader? = nil,
-    loadDeviceIdentities: DeviceIdentitiesLoader? = nil
+    loadDeviceIdentities: DeviceIdentitiesLoader? = nil,
+    loadDetail: (
+      @Sendable (Int64, @escaping DetailCompletion) -> ViewerStoreExplorerOperationToken
+    )? = nil
   ) {
     loadRecordingCatalog = { cursor, direction, limit, completion in
       gateway.loadRecordingCatalog(
@@ -442,9 +445,10 @@ struct ViewerExplorerContentDriver: Sendable {
         completion: completion
       )
     }
-    loadDetail = { rowID, completion in
-      gateway.loadDetail(rowID: rowID, completion: completion)
-    }
+    self.loadDetail =
+      loadDetail ?? { rowID, completion in
+        gateway.loadDetail(rowID: rowID, completion: completion)
+      }
     loadCausality = { rowID, completion in
       gateway.loadCausality(rootRowID: rowID, completion: completion)
     }
@@ -579,12 +583,15 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
   private var activeStoreRematerializationID: UUID?
   private var storeRematerializationResolution: StoreRematerializationResolution = .resolved
   private(set) var changeSnapshotRequestCountForTesting = 0
+  private(set) var eventPageRequestCountForTesting = 0
+  private(set) var gapPageRequestCountForTesting = 0
   private var started = false
   private var sealed = false
   private var cleanupTask: Task<Void, Never>?
   private var analysisSelectionHandler: AnalysisSelectionHandler = {}
   private var analysisRefreshHandler: AnalysisRefreshHandler = {}
   private var analysisRematerializationHandler: AnalysisRematerializationHandler = { _ in }
+  private var reconciledPresentationToken: ViewerExplorerPresentationToken?
   private lazy var rendererDeliveryPump = ViewerLatestMainActorDeliveryPump<
     RendererDeliveryValue
   > { [weak self] delivery in
@@ -758,7 +765,9 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
   func start() {
     guard !started, !sealed else { return }
     started = true
-    coordinator.setPresentationHandler { [weak self] in self?.publish() }
+    coordinator.setPresentationHandler { [weak self] in
+      self?.coordinatorPresentationChanged()
+    }
     model.setRefreshHandler { [weak self] _, _ in
       guard let self, !self.sealed else { return }
       _ = self.coordinator.refresh()
@@ -1418,11 +1427,40 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
     }
     _ = model.selectEvent(identity)
     inspectorState = .loading
-    switch identity {
-    case .durable(let rowID):
-      loadDurableDetail(rowID: rowID, identity: identity)
-    case .transient(let key):
-      loadTransientDetail(key: key, identity: identity)
+    loadSelectedEvent(identity)
+    publish()
+  }
+
+  func coordinatorPresentationChanged() {
+    guard !sealed else { return }
+    let token = model.currentToken
+    let tokenChanged = reconciledPresentationToken.map { $0 != token } ?? false
+    reconciledPresentationToken = token
+
+    guard let selectedIdentity = model.selectedEventIdentity else {
+      if inspectorState != .empty || inspector.selectedIdentity != nil {
+        clearInspector()
+      }
+      publish()
+      return
+    }
+
+    if let inspectorIdentity = inspector.selectedIdentity,
+      inspectorIdentity != selectedIdentity
+    {
+      clearInspector()
+      inspectorState = .loading
+    }
+    if tokenChanged, activeOperations[.detail] != nil {
+      cancel(.detail)
+      if inspector.selectedIdentity == nil { inspectorState = .loading }
+    }
+    if !model.selectedEventNeedsReload,
+      activeOperations[.detail] == nil,
+      inspector.selectedIdentity == nil,
+      inspectorState == .loading
+    {
+      loadSelectedEvent(selectedIdentity)
     }
     publish()
   }
@@ -2038,7 +2076,7 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
   }
 
   private func loadEventPage(edge: ViewerExplorerWindowEdge) {
-    guard !sealed, !model.isPaused else { return }
+    guard !sealed, !model.isPaused, activeOperations[.events] == nil else { return }
     let cursor: ViewerEventCursor?
     let direction: ViewerStoreQueryService.Direction
     let placement: ViewerExplorerPagePlacement
@@ -2056,6 +2094,7 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
     timelinePageFailure = nil
     let presentationToken = model.currentToken
     let operation = begin(.events)
+    eventPageRequestCountForTesting += 1
     let storeToken = content.loadEventPage(cursor, direction, 100) { [weak self] result in
       guard operation.deliveryGate.claimDelivery() else { return }
       Task { @MainActor in
@@ -2105,7 +2144,7 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
   }
 
   private func loadGapPage(edge: ViewerExplorerWindowEdge) {
-    guard !sealed, !model.isPaused else { return }
+    guard !sealed, !model.isPaused, activeOperations[.gaps] == nil else { return }
     let cursor: ViewerGapCursor?
     let direction: ViewerStoreQueryService.Direction
     let placement: ViewerExplorerPagePlacement
@@ -2123,6 +2162,7 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
     gapPageFailure = nil
     let presentationToken = model.currentToken
     let operation = begin(.gaps)
+    gapPageRequestCountForTesting += 1
     let storeToken = content.loadGapPage(
       durableDeviceSessionIDs(),
       cursor,
@@ -2188,6 +2228,15 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
       }
     }
     attach(storeToken, to: .detail, operationID: operation.id)
+  }
+
+  private func loadSelectedEvent(_ identity: ViewerExplorerEventIdentity) {
+    switch identity {
+    case .durable(let rowID):
+      loadDurableDetail(rowID: rowID, identity: identity)
+    case .transient(let key):
+      loadTransientDetail(key: key, identity: identity)
+    }
   }
 
   private func handleDurableDetail(

@@ -667,30 +667,74 @@ final class ViewerEventExplorerModel: CustomReflectable, CustomStringConvertible
   }
 
   @discardableResult
-  func beginTimelineReplacement() -> ViewerExplorerPresentationToken {
+  func beginTimelineReplacement(
+    retainingPresentation: Bool = false
+  ) -> ViewerExplorerPresentationToken {
     guard !sealed else { return currentToken }
     incrementPresentationGeneration()
-    selectedEventDetail = nil
     selectedEventNeedsReload = selectedEventIdentity != nil
-    liveEvaluationState = nil
+    if !retainingPresentation {
+      selectedEventDetail = nil
+      liveEvaluationState = nil
+    }
     return currentToken
   }
 
   @discardableResult
   func prepareFreshTraversal(
     token: ViewerExplorerPresentationToken,
-    jumpsToLatest: Bool
+    jumpsToLatest: Bool,
+    retainingPresentation: Bool = false
   ) -> Bool {
     guard accepts(token) else { return false }
-    eventWindow.clear()
-    gapWindow.clear()
-    selectedEventDetail = nil
-    selectedEventNeedsReload = selectedEventIdentity != nil
-    liveGapLane = nil
-    liveEvaluationState = nil
+    if !retainingPresentation {
+      eventWindow.clear()
+      gapWindow.clear()
+      selectedEventDetail = nil
+      selectedEventNeedsReload = selectedEventIdentity != nil
+      liveGapLane = nil
+      liveEvaluationState = nil
+    }
     if jumpsToLatest {
       autoFollow = true
       scrollAnchor = nil
+    }
+    return true
+  }
+
+  @discardableResult
+  func clearAbsentRefreshLanes(
+    hasDurableLane: Bool,
+    hasLiveLane: Bool,
+    token: ViewerExplorerPresentationToken
+  ) -> Bool {
+    guard accepts(token) else { return false }
+    if !hasDurableLane {
+      let mutation = eventWindow.clearDurableRows()
+      gapWindow.clear()
+      if let mutation { reconcileEventSelection(after: mutation) }
+    }
+    if !hasLiveLane {
+      let mutation = eventWindow.clearLiveRows()
+      liveGapLane = nil
+      liveEvaluationState = nil
+      if let mutation { reconcileEventSelection(after: mutation) }
+    }
+    return true
+  }
+
+  @discardableResult
+  func finishRetainedRefreshFailure(token: ViewerExplorerPresentationToken) -> Bool {
+    guard accepts(token) else { return false }
+    if let selectedEventIdentity, !eventWindow.contains(selectedEventIdentity) {
+      self.selectedEventIdentity = nil
+      selectedEventDetail = nil
+    }
+    selectedEventNeedsReload = false
+    if autoFollow {
+      scrollAnchor = eventWindow.lastIdentity()
+    } else if let scrollAnchor, !eventWindow.contains(scrollAnchor) {
+      self.scrollAnchor = nil
     }
     return true
   }

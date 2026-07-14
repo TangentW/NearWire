@@ -294,7 +294,7 @@ struct ViewerExplorerTimelineView: View {
     }
     .sheet(isPresented: $showsFilters) {
       ViewerExplorerFilterSheet(explorer: explorer, isPresented: $showsFilters)
-        .frame(minWidth: 560, minHeight: 620)
+        .frame(minWidth: 620, minHeight: 660)
     }
   }
 
@@ -1254,7 +1254,7 @@ struct ViewerExplorerInspectorView: View {
   }
 }
 
-private struct ViewerExplorerFilterSheet: View {
+struct ViewerExplorerFilterSheet: View {
   @ObservedObject var explorer: ViewerEventExplorerController
   @Binding var isPresented: Bool
 
@@ -1264,93 +1264,123 @@ private struct ViewerExplorerFilterSheet: View {
         Text("Event Filters").font(.title2).fontWeight(.semibold)
         Spacer()
         Button("Clear") { explorer.clearFilter() }
+          .accessibilityIdentifier("nearwire.filters.clear")
       }
-      Form {
-        Section("Event") {
-          HStack {
-            boundedFilterInput("Event type", field: .eventType, value: \.eventTypeText)
-            Picker(
-              "Type match",
-              selection: valueBinding(\.eventTypeMode) { $0.eventTypeMode = $1 }
-            ) {
-              Text("Exact").tag(ViewerExplorerEventTypeMode.exact)
-              Text("Prefix").tag(ViewerExplorerEventTypeMode.prefix)
+      ScrollView {
+        VStack(alignment: .leading, spacing: 14) {
+          filterSection("Event", identifier: "event") {
+            HStack(alignment: .bottom, spacing: 12) {
+              boundedFilterInput("Event type", field: .eventType, value: \.eventTypeText)
+                .frame(maxWidth: .infinity)
+              Picker(
+                "Type match",
+                selection: valueBinding(\.eventTypeMode) { $0.eventTypeMode = $1 }
+              ) {
+                Text("Exact").tag(ViewerExplorerEventTypeMode.exact)
+                Text("Prefix").tag(ViewerExplorerEventTypeMode.prefix)
+              }
+              .frame(width: 150)
+              .accessibilityIdentifier("nearwire.filters.type-match")
             }
-            .frame(width: 130)
+            boundedFilterInput(
+              "Application identifier",
+              field: .applicationIdentifier,
+              value: \.applicationIdentifierText
+            )
+            boundedFilterInput(
+              "Application version",
+              field: .applicationVersion,
+              value: \.applicationVersionText
+            )
           }
-          boundedFilterInput(
-            "Application identifier",
-            field: .applicationIdentifier,
-            value: \.applicationIdentifierText
-          )
-          boundedFilterInput(
-            "Application version",
-            field: .applicationVersion,
-            value: \.applicationVersionText
-          )
-        }
-        Section("Direction and priority") {
-          HStack {
-            setToggle("App → Viewer", value: "appToViewer", keyPath: \.directions)
-            setToggle("Viewer → App", value: "viewerToApp", keyPath: \.directions)
-          }
-          HStack {
-            setToggle("Low", value: "low", keyPath: \.priorities)
-            setToggle("Normal", value: "normal", keyPath: \.priorities)
-            setToggle("High", value: "high", keyPath: \.priorities)
-          }
-        }
-        Section("Viewer receive time") {
-          optionalDate("From", keyPath: \.fromDate)
-          optionalDate("Through", keyPath: \.throughDate)
-        }
-        Section("JSON") {
-          Picker("JSON condition", selection: valueBinding(\.jsonMode) { $0.jsonMode = $1 }) {
-            ForEach(ViewerExplorerJSONFilterMode.allCases, id: \.self) {
-              Text(jsonModeTitle($0)).tag($0)
-            }
-          }
-          if explorer.filterDraft.jsonMode != .none {
-            boundedFilterInput("JSON path", field: .jsonPath, value: \.jsonPathText)
-          }
-          if explorer.filterDraft.jsonMode == .equals {
-            Picker(
-              "Value type",
-              selection: valueBinding(\.jsonScalarKind) { $0.jsonScalarKind = $1 }
-            ) {
-              ForEach(ViewerExplorerJSONScalarKind.allCases, id: \.self) {
-                Text($0.rawValue.capitalized).tag($0)
+
+          filterSection("Direction and priority", identifier: "direction-priority") {
+            VStack(alignment: .leading, spacing: 10) {
+              HStack(spacing: 24) {
+                setToggle("App → Viewer", value: "appToViewer", keyPath: \.directions)
+                setToggle("Viewer → App", value: "viewerToApp", keyPath: \.directions)
+              }
+              HStack(spacing: 24) {
+                setToggle("Low", value: "low", keyPath: \.priorities)
+                setToggle("Normal", value: "normal", keyPath: \.priorities)
+                setToggle("High", value: "high", keyPath: \.priorities)
               }
             }
           }
-          if explorer.filterDraft.jsonMode == .equals
-            && explorer.filterDraft.jsonScalarKind != .null
-            || explorer.filterDraft.jsonMode == .stringContains
-          {
-            boundedFilterInput(
-              "Comparison value",
-              field: .jsonComparison,
-              value: \.jsonComparisonText
-            )
+
+          filterSection("Viewer receive time", identifier: "viewer-time") {
+            VStack(alignment: .leading, spacing: 10) {
+              optionalDate("From", keyPath: \.fromDate)
+              optionalDate("Through", keyPath: \.throughDate)
+            }
+          }
+
+          filterSection("JSON", identifier: "json") {
+            VStack(alignment: .leading, spacing: 10) {
+              Picker(
+                "JSON condition",
+                selection: valueBinding(\.jsonMode) { $0.jsonMode = $1 }
+              ) {
+                ForEach(ViewerExplorerJSONFilterMode.allCases, id: \.self) {
+                  Text(jsonModeTitle($0)).tag($0)
+                }
+              }
+              .frame(maxWidth: 360, alignment: .leading)
+              .accessibilityIdentifier("nearwire.filters.json-mode")
+              if explorer.filterDraft.jsonMode != .none {
+                boundedFilterInput("JSON path", field: .jsonPath, value: \.jsonPathText)
+              }
+              if explorer.filterDraft.jsonMode == .equals {
+                Picker(
+                  "Value type",
+                  selection: valueBinding(\.jsonScalarKind) { $0.jsonScalarKind = $1 }
+                ) {
+                  ForEach(ViewerExplorerJSONScalarKind.allCases, id: \.self) {
+                    Text($0.rawValue.capitalized).tag($0)
+                  }
+                }
+                .frame(maxWidth: 360, alignment: .leading)
+              }
+              if explorer.filterDraft.jsonMode == .equals
+                && explorer.filterDraft.jsonScalarKind != .null
+                || explorer.filterDraft.jsonMode == .stringContains
+              {
+                boundedFilterInput(
+                  "Comparison value",
+                  field: .jsonComparison,
+                  value: \.jsonComparisonText
+                )
+              }
+            }
+          }
+
+          filterSection("Diagnostics", identifier: "diagnostics") {
+            VStack(alignment: .leading, spacing: 8) {
+              Toggle(
+                "Has gap",
+                isOn: valueBinding(\.requiresGap) { $0.requiresGap = $1 }
+              )
+              .accessibilityIdentifier("nearwire.filters.diagnostic.gap")
+              Toggle(
+                "Has drop",
+                isOn: valueBinding(\.requiresDrop) { $0.requiresDrop = $1 }
+              )
+              .accessibilityIdentifier("nearwire.filters.diagnostic.drop")
+              Toggle(
+                "Has terminal disposition",
+                isOn: valueBinding(\.requiresTerminalDisposition) {
+                  $0.requiresTerminalDisposition = $1
+                }
+              )
+              .accessibilityIdentifier("nearwire.filters.diagnostic.terminal")
+            }
           }
         }
-        Section("Diagnostics") {
-          Toggle(
-            "Has gap",
-            isOn: valueBinding(\.requiresGap) { $0.requiresGap = $1 }
-          )
-          Toggle(
-            "Has drop",
-            isOn: valueBinding(\.requiresDrop) { $0.requiresDrop = $1 }
-          )
-          Toggle(
-            "Has terminal disposition",
-            isOn: valueBinding(\.requiresTerminalDisposition) {
-              $0.requiresTerminalDisposition = $1
-            }
-          )
-        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 2)
       }
+      .frame(maxHeight: .infinity)
+      .accessibilityIdentifier("nearwire.filters.scroll")
       if let message = explorer.filterValidationMessage {
         Label(message, systemImage: "exclamationmark.triangle")
           .font(.caption)
@@ -1359,16 +1389,19 @@ private struct ViewerExplorerFilterSheet: View {
       HStack {
         Spacer()
         Button("Close") { isPresented = false }
+          .accessibilityIdentifier("nearwire.filters.close")
         Button("Apply") {
           explorer.applyFilter()
           if explorer.filterValidationMessage == nil { isPresented = false }
         }
         .buttonStyle(.borderedProminent)
         .keyboardShortcut(.return, modifiers: [.command])
+        .accessibilityIdentifier("nearwire.filters.apply")
       }
     }
     .padding(22)
     .focusSection()
+    .accessibilityIdentifier("nearwire.filters.sheet")
   }
 
   private func boundedFilterInput(
@@ -1389,6 +1422,23 @@ private struct ViewerExplorerFilterSheet: View {
       )
       .frame(height: 28)
     }
+    .frame(maxWidth: .infinity, alignment: .leading)
+  }
+
+  private func filterSection<Content: View>(
+    _ title: String,
+    identifier: String,
+    @ViewBuilder content: () -> Content
+  ) -> some View {
+    GroupBox {
+      content()
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.top, 2)
+    } label: {
+      Text(title).font(.headline)
+    }
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .accessibilityIdentifier("nearwire.filters.section.\(identifier)")
   }
 
   private func valueBinding<Value>(
@@ -1421,6 +1471,7 @@ private struct ViewerExplorerFilterSheet: View {
         }
       )
     )
+    .accessibilityIdentifier("nearwire.filters.option.\(value)")
   }
 
   private func optionalDate(
@@ -1439,6 +1490,7 @@ private struct ViewerExplorerFilterSheet: View {
           }
         )
       )
+      .accessibilityIdentifier("nearwire.filters.time.\(title.lowercased())")
       if explorer.filterDraft[keyPath: keyPath] != nil {
         DatePicker(
           title,

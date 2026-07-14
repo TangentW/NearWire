@@ -214,7 +214,7 @@ final class ViewerFlowControlTests: XCTestCase {
     XCTAssertFalse(preferences.setNickname("bad\nname", for: first))
   }
 
-  func testManagerEnforcesSixteenOwnedSessionsAndRejectsLiveDuplicate() throws {
+  func testManagerEnforcesSixteenCurrentSessionsAndReplacesExactRoute() throws {
     let snapshots = FlowSnapshotBox()
     let manager = ViewerMultiDeviceSessionManager(
       runtimeLogicalID: UUID(),
@@ -244,8 +244,11 @@ final class ViewerFlowControlTests: XCTestCase {
     admission.admit(duplicate, generation: generation, viewerInstallationID: viewerID)
     duplicate.emit(.stateChanged(.ready))
     duplicate.emit(.received(try appHelloFrame(id: "app-0")))
-    waitUntil { duplicate.channel.cancelCount == 1 }
+    waitUntil {
+      incoming[0].channel.cancelCount == 1 && duplicate.channel.sentPayloads.count >= 3
+    }
     XCTAssertEqual(manager.ownedSessionCount, 16)
+    XCTAssertEqual(duplicate.channel.cancelCount, 0)
 
     let receipt = admission.stop()
     let outcome = expectation(description: "Cleanup")
@@ -310,7 +313,7 @@ final class ViewerFlowControlTests: XCTestCase {
     _ = admission.stop()
   }
 
-  func testSameInstallationRouteVariantsRemainSeparateAndExactDuplicateIsRejected() throws {
+  func testSameInstallationRouteVariantsRemainSeparateAndExactDuplicateReplacesOldSession() throws {
     let manager = ViewerMultiDeviceSessionManager(
       runtimeLogicalID: UUID(),
       managerGeneration: 1,
@@ -338,14 +341,172 @@ final class ViewerFlowControlTests: XCTestCase {
     let first = try connect(bundle: "com.example.first")
     waitUntil { first.channel.sentPayloads.count >= 3 }
     let duplicate = try connect(bundle: "com.example.first")
-    waitUntil { duplicate.channel.cancelCount == 1 }
+    waitUntil { first.channel.cancelCount == 1 && duplicate.channel.sentPayloads.count >= 3 }
     let second = try connect(bundle: "com.example.second")
     let missing = try connect(bundle: nil)
     waitUntil { manager.ownedSessionCount == 3 }
 
     XCTAssertEqual(manager.ownedSessionCount, 3)
+    XCTAssertEqual(duplicate.channel.cancelCount, 0)
     XCTAssertEqual(second.channel.cancelCount, 0)
     XCTAssertEqual(missing.channel.cancelCount, 0)
+    _ = admission.stop()
+  }
+
+  func testExactRouteReplacementRevokesOldCapabilityWithoutTransferringOwnership() throws {
+    let snapshots = FlowSnapshotBox()
+    let manager = ViewerMultiDeviceSessionManager(
+      runtimeLogicalID: UUID(),
+      managerGeneration: 1,
+      preferences: try isolatedPreferences(),
+      onSnapshots: { snapshots.set($0) }
+    )
+    let admission = ViewerAdmissionManager(onPending: { _ in }, handoffOwner: manager)
+    let generation = UUID()
+    let viewerID = try EndpointID(rawValue: "viewer-route-replacement")
+    admission.activateGeneration(generation)
+
+    func connect() throws -> FlowIncomingConnection {
+      let connection = FlowIncomingConnection()
+      admission.admit(connection, generation: generation, viewerInstallationID: viewerID)
+      connection.emit(.stateChanged(.ready))
+      connection.emit(.received(try appHelloFrame(id: "replacement-app")))
+      return connection
+    }
+
+    let firstConnection = try connect()
+    waitUntil { manager.ownedSessionCount == 1 }
+    let firstCapability = try XCTUnwrap(manager.controlTargets().first?.capability)
+    let firstConnectionID = try XCTUnwrap(
+      snapshots.value.first(where: { $0.state != .recent })?.connectionID
+    )
+
+    let replacementConnection = try connect()
+    waitUntil {
+      firstConnection.channel.cancelCount == 1
+        && replacementConnection.channel.sentPayloads.count >= 3
+        && manager.ownedSessionCount == 1
+    }
+    let replacementCapability = try XCTUnwrap(manager.controlTargets().first?.capability)
+    let replacementConnectionID = try XCTUnwrap(
+      snapshots.value.first(where: { $0.state != .recent })?.connectionID
+    )
+    XCTAssertNotEqual(firstCapability, replacementCapability)
+    XCTAssertNotEqual(firstConnectionID, replacementConnectionID)
+    XCTAssertFalse(
+      manager.send(
+        try EventDraft(type: EventType.user("replacement.old"), content: .null),
+        to: firstConnectionID
+      )
+    )
+    XCTAssertEqual(
+      try manager.send(
+        ViewerPreparedControlEvent(
+          draft: EventDraft(type: EventType.user("replacement.capability"), content: .null),
+          policy: .normal
+        ),
+        to: [firstCapability, replacementCapability]
+      ).map(\.outcome),
+      [.noLongerConnected, .notActive]
+    )
+
+    let shutdown = manager.beginShutdown()
+    let stopped = expectation(description: "Replacement cleanup")
+    Task {
+      await shutdown.value
+      stopped.fulfill()
+    }
+    wait(for: [stopped], timeout: 3)
+    XCTAssertEqual(manager.ownedSessionCount, 0)
+    XCTAssertEqual(manager.displacedSessionCount, 0)
+    _ = admission.stop()
+  }
+
+  func testExactRouteAttachmentFailurePreservesCurrentOwnerAndCapability() throws {
+    let attachments = FlowCounterBox()
+    let snapshots = FlowSnapshotBox()
+    let manager = ViewerMultiDeviceSessionManager(
+      runtimeLogicalID: UUID(),
+      managerGeneration: 1,
+      preferences: try isolatedPreferences(),
+      onSnapshots: { snapshots.set($0) },
+      sessionAttacher: { core, receiver in
+        attachments.increment()
+        guard attachments.value != 2 else { throw FlowChannelError.backpressure }
+        try core.attachSession(receiver)
+      }
+    )
+    let admission = ViewerAdmissionManager(onPending: { _ in }, handoffOwner: manager)
+    let generation = UUID()
+    let viewerID = try EndpointID(rawValue: "viewer-route-attachment-rollback")
+    admission.activateGeneration(generation)
+
+    func connect() throws -> FlowIncomingConnection {
+      let connection = FlowIncomingConnection()
+      admission.admit(connection, generation: generation, viewerInstallationID: viewerID)
+      connection.emit(.stateChanged(.ready))
+      connection.emit(.received(try appHelloFrame(id: "attachment-rollback-app")))
+      return connection
+    }
+
+    let first = try connect()
+    waitUntil { manager.ownedSessionCount == 1 }
+    let firstCapability = try XCTUnwrap(manager.controlTargets().first?.capability)
+    let firstConnectionID = try XCTUnwrap(
+      snapshots.value.first(where: { $0.state != .recent })?.connectionID
+    )
+
+    let failedReplacement = try connect()
+    waitUntil { failedReplacement.channel.cancelCount == 1 }
+
+    XCTAssertEqual(attachments.value, 2)
+    XCTAssertEqual(manager.ownedSessionCount, 1)
+    XCTAssertEqual(manager.displacedSessionCount, 0)
+    XCTAssertEqual(first.channel.cancelCount, 0)
+    XCTAssertEqual(manager.controlTargets().first?.connectionID, firstConnectionID)
+    XCTAssertEqual(manager.controlTargets().first?.capability, firstCapability)
+    _ = admission.stop()
+  }
+
+  func testExactRouteRejectsAnotherReplacementWhileDisplacedCleanupIsPending() throws {
+    let cancellationGate = FlowCancellationGate()
+    cancellationGate.hold()
+    let manager = ViewerMultiDeviceSessionManager(
+      runtimeLogicalID: UUID(),
+      managerGeneration: 1,
+      preferences: try isolatedPreferences()
+    )
+    let admission = ViewerAdmissionManager(onPending: { _ in }, handoffOwner: manager)
+    let generation = UUID()
+    let viewerID = try EndpointID(rawValue: "viewer-replacement-bound")
+    admission.activateGeneration(generation)
+
+    func connect(_ connection: FlowIncomingConnection) throws {
+      admission.admit(connection, generation: generation, viewerInstallationID: viewerID)
+      connection.emit(.stateChanged(.ready))
+      connection.emit(.received(try appHelloFrame(id: "bounded-replacement")))
+    }
+
+    let first = FlowIncomingConnection(cancellationGate: cancellationGate)
+    try connect(first)
+    waitUntil { manager.ownedSessionCount == 1 }
+
+    let replacement = FlowIncomingConnection()
+    try connect(replacement)
+    waitUntil {
+      first.channel.cancelCount == 1 && manager.displacedSessionCount == 1
+        && replacement.channel.sentPayloads.count >= 3
+    }
+
+    let additional = FlowIncomingConnection()
+    try connect(additional)
+    waitUntil { additional.channel.cancelCount == 1 }
+    XCTAssertEqual(manager.ownedSessionCount, 1)
+    XCTAssertEqual(manager.displacedSessionCount, 1)
+    XCTAssertEqual(replacement.channel.cancelCount, 0)
+
+    cancellationGate.release()
+    waitUntil { manager.displacedSessionCount == 0 }
     _ = admission.stop()
   }
 
@@ -2600,6 +2761,11 @@ private final class FlowAdmissionChannel: ViewerAdmissionChannel, @unchecked Sen
   private var authoritativeReservedRejections = 0
   private var reservations: [FlowReservedSend] = []
   private var pauseClaimHook: (@Sendable () -> Void)?
+  private let cancellationGate: FlowCancellationGate?
+
+  init(cancellationGate: FlowCancellationGate? = nil) {
+    self.cancellationGate = cancellationGate
+  }
 
   func admitSend(_ data: Data) throws {
     lock.lock()
@@ -2664,6 +2830,7 @@ private final class FlowAdmissionChannel: ViewerAdmissionChannel, @unchecked Sen
 
   func cancel() async {
     recordCancellation()
+    await cancellationGate?.waitIfHeld()
   }
 
   private func recordCancellation() {
@@ -2806,9 +2973,13 @@ private final class FlowSequentialUUIDSource: @unchecked Sendable {
 }
 
 private final class FlowIncomingConnection: ViewerIncomingConnection, @unchecked Sendable {
-  let channel = FlowAdmissionChannel()
+  let channel: FlowAdmissionChannel
   private let lock = NSLock()
   private var handler: SecureByteChannel.EventHandler?
+
+  init(cancellationGate: FlowCancellationGate? = nil) {
+    channel = FlowAdmissionChannel(cancellationGate: cancellationGate)
+  }
 
   func makeAdmissionChannel(
     queue: DispatchQueue,
@@ -2827,6 +2998,40 @@ private final class FlowIncomingConnection: ViewerIncomingConnection, @unchecked
     let handler = handler
     lock.unlock()
     handler?(event)
+  }
+}
+
+private final class FlowCancellationGate: @unchecked Sendable {
+  private let lock = NSLock()
+  private var isHeld = false
+  private var waiters: [CheckedContinuation<Void, Never>] = []
+
+  func hold() {
+    lock.lock()
+    isHeld = true
+    lock.unlock()
+  }
+
+  func waitIfHeld() async {
+    await withCheckedContinuation { continuation in
+      lock.lock()
+      guard isHeld else {
+        lock.unlock()
+        continuation.resume()
+        return
+      }
+      waiters.append(continuation)
+      lock.unlock()
+    }
+  }
+
+  func release() {
+    lock.lock()
+    isHeld = false
+    let waiters = self.waiters
+    self.waiters.removeAll()
+    lock.unlock()
+    for waiter in waiters { waiter.resume() }
   }
 }
 

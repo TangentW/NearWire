@@ -357,7 +357,7 @@ final class ViewerEventExplorerCoordinator: CustomReflectable, CustomStringConve
   @discardableResult
   func refresh() -> ViewerExplorerPresentationToken {
     guard !model.isPaused, isAnalysisActive else { return model.currentToken }
-    let token = model.beginTimelineReplacement()
+    let token = model.beginTimelineReplacement(retainingPresentation: true)
     requestFreshTraversal(reason: .refresh, token: token, jumpsToLatest: false)
     presentationHandler()
     return token
@@ -442,14 +442,32 @@ final class ViewerEventExplorerCoordinator: CustomReflectable, CustomStringConve
     guard let storeToken = delivery.validToken else { return }
     guard isAnalysisActive, token == model.currentToken, !model.isPaused else { return }
     guard case .success = result else {
-      if case .failure(let failure) = result { state = .failed(failure) }
-      presentationHandler()
+      if case .failure(let failure) = result {
+        failFreshTraversal(failure, token: token, reason: reason)
+      }
       return
     }
-    guard model.prepareFreshTraversal(token: token, jumpsToLatest: jumpsToLatest) else { return }
+    let retainsPresentation = reason == .refresh
+    guard
+      model.prepareFreshTraversal(
+        token: token,
+        jumpsToLatest: jumpsToLatest,
+        retainingPresentation: retainsPresentation
+      )
+    else { return }
     state = .loading(reason)
     presentationHandler()
     let compiledInputs = model.compiledInputs
+    if retainsPresentation,
+      !model.clearAbsentRefreshLanes(
+        hasDurableLane: compiledInputs?.durableQuery != nil,
+        hasLiveLane: compiledInputs?.liveRequest != nil,
+        token: token
+      )
+    {
+      failFreshTraversal(.invalidRequest, token: token)
+      return
+    }
     progress = LoadProgress(
       token: token,
       reason: reason,
@@ -478,9 +496,7 @@ final class ViewerEventExplorerCoordinator: CustomReflectable, CustomStringConve
         ($0.observation.key, $0.observation.observationID)
       }
       guard Set(liveObservationPairs.map(\.0)).count == liveObservationPairs.count else {
-        state = .failed(.invalidRequest)
-        progress = nil
-        presentationHandler()
+        failFreshTraversal(.invalidRequest, token: token)
         return
       }
       current.liveObservationIDsByKey = Dictionary(uniqueKeysWithValues: liveObservationPairs)
@@ -519,16 +535,12 @@ final class ViewerEventExplorerCoordinator: CustomReflectable, CustomStringConve
             token: token
           )
         else {
-          state = .failed(.invalidRequest)
-          progress = nil
-          presentationHandler()
+          failFreshTraversal(.invalidRequest, token: token)
           return
         }
         publishDurableVisibilities(mutation.durableVisibilities, token: token)
       } catch {
-        state = .failed(.invalidRequest)
-        progress = nil
-        presentationHandler()
+        failFreshTraversal(.invalidRequest, token: token)
         return
       }
     case .refineRequired:
@@ -566,9 +578,9 @@ final class ViewerEventExplorerCoordinator: CustomReflectable, CustomStringConve
     guard let storeToken = delivery.validToken else { return }
     guard isAnalysisActive, token == model.currentToken, !model.isPaused else { return }
     guard case .success = result else {
-      if case .failure(let failure) = result { state = .failed(failure) }
-      progress = nil
-      presentationHandler()
+      if case .failure(let failure) = result {
+        failFreshTraversal(failure, token: token)
+      }
       return
     }
     let pageWorkID = workTracker.begin()
@@ -603,9 +615,7 @@ final class ViewerEventExplorerCoordinator: CustomReflectable, CustomStringConve
     switch result {
     case .success(let page):
       guard let mutation = model.applyTimelinePage(page, placement: .replace, token: token) else {
-        state = .failed(.invalidRequest)
-        progress = nil
-        presentationHandler()
+        failFreshTraversal(.invalidRequest, token: token)
         return
       }
       publishDurableVisibilities(mutation.durableVisibilities, token: token)
@@ -613,9 +623,7 @@ final class ViewerEventExplorerCoordinator: CustomReflectable, CustomStringConve
       markFinished(\.durableFinished, token: token)
       presentationHandler()
     case .failure(let failure):
-      state = .failed(failure)
-      progress = nil
-      presentationHandler()
+      failFreshTraversal(failure, token: token)
     }
   }
 
@@ -629,17 +637,13 @@ final class ViewerEventExplorerCoordinator: CustomReflectable, CustomStringConve
     switch result {
     case .success(let page):
       guard model.applyGapPage(page, placement: .replace, token: token) else {
-        state = .failed(.invalidRequest)
-        progress = nil
-        presentationHandler()
+        failFreshTraversal(.invalidRequest, token: token)
         return
       }
       markFinished(\.gapFinished, token: token)
       presentationHandler()
     case .failure(let failure):
-      state = .failed(failure)
-      progress = nil
-      presentationHandler()
+      failFreshTraversal(failure, token: token)
     }
   }
 
@@ -705,6 +709,20 @@ final class ViewerEventExplorerCoordinator: CustomReflectable, CustomStringConve
     progress = nil
     model.finishFreshTraversal(token: token)
     state = .ready(current.reason)
+    presentationHandler()
+  }
+
+  private func failFreshTraversal(
+    _ failure: ViewerStoreExplorerFailure,
+    token: ViewerExplorerPresentationToken,
+    reason: ViewerExplorerTraversalReason? = nil
+  ) {
+    let failedReason = reason ?? progress?.reason
+    if failedReason == .refresh {
+      _ = model.finishRetainedRefreshFailure(token: token)
+    }
+    progress = nil
+    state = .failed(failure)
     presentationHandler()
   }
 
