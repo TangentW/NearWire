@@ -10,6 +10,7 @@ Date: 2026-07-15 (Asia/Shanghai)
    - Exit status: 0
    - Result: 33 specs passed, 0 failed.
 
-The archive command reported the completion task as pending because the task includes the archive,
-commit, and push operations themselves. The archived checkbox will be completed only after those
-operations have evidence. Optional PostHog telemetry DNS failures did not affect local validation.
+The archive command reported the completion task as pending because the task included the archive,
+commit, and push operations themselves. Scoped commit `0e0ad48` was subsequently created and
+pushed to `origin/main`, so the archived task is now complete. Optional PostHog telemetry DNS
+failures did not affect local validation.

@@ -25,5 +25,5 @@
 
 - [x] 4.1 Obtain one independent focused review covering architecture/API, correctness/testing, and
   security/performance/documentation; fix every actionable finding and rerun affected validation.
-- [ ] 4.2 Strictly validate and archive the change, verify canonical specs and archived evidence, then
+- [x] 4.2 Strictly validate and archive the change, verify canonical specs and archived evidence, then
   commit and push only the scoped fix while excluding local Xcode/signing changes.

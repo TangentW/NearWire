@@ -15,7 +15,7 @@ Date: 2026-07-15 (Asia/Shanghai)
 4. Archive-added blank lines at EOF were removed without changing requirement content, and
    `git diff --check` exited 0.
 
-The archive command reported the final completion task as pending because that task includes the
-archive, commit, and push operations themselves. Its archived checkbox will be completed only after
-local commit evidence exists and immediately before the final push. Optional PostHog telemetry does
+The archive command reported the final completion task as pending because that task included the
+archive, commit, and push operations themselves. Scoped commit `0e0ad48` was subsequently created
+and pushed to `origin/main`, so the archived task is now complete. Optional PostHog telemetry does
 not affect local strict validation.
