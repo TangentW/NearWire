@@ -49,4 +49,4 @@
 
 - [x] 7.1 Obtain independent architecture/API, correctness/testing, and security/performance/documentation implementation reviews and save every report.
 - [x] 7.2 Fix every actionable finding, rerun affected and complete validation, and repeat all three review dimensions until a fresh round reports zero unresolved findings.
-- [ ] 7.3 Complete a requirement-to-evidence audit, archive `viewer-performance-dashboard`, verify canonical specs and archived evidence, and commit the completed change before starting `demo-distribution-e2e`.
+- [x] 7.3 Complete a requirement-to-evidence audit, archive `viewer-performance-dashboard`, verify canonical specs and archived evidence, and commit the completed change before starting `demo-distribution-e2e`.
