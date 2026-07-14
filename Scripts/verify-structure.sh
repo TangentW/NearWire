@@ -19,7 +19,6 @@ required_files=(
   "CHANGELOG.md"
   "LICENSE"
   "AGENTS.md"
-  "NearWire-Platform-Architecture.md"
 )
 
 required_directories=(

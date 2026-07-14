@@ -2,7 +2,7 @@
 
 NearWire is a local, bidirectional event platform for iOS applications and a native macOS Viewer. It uses Bonjour discovery, peer-to-peer-enabled Network.framework connections, and mandatory TLS without a central service.
 
-The repository is under active development. The architecture is defined in [NearWire-Platform-Architecture.md](NearWire-Platform-Architecture.md), and every implementation change is specified through OpenSpec before code is applied.
+The repository is under active development. Implementation changes are specified through OpenSpec before code is applied.
 
 The supported SDK event and explicit connection facade is documented in [Documentation/SDK-Public-API.md](Documentation/SDK-Public-API.md). The optional injected SwiftUI panel is documented in [Documentation/SDK-UI.md](Documentation/SDK-UI.md), and the optional performance monitor in [Documentation/SDK-Performance.md](Documentation/SDK-Performance.md). Pairing and Bonjour behavior is documented in [Documentation/SDK-Discovery.md](Documentation/SDK-Discovery.md), process ownership in [Documentation/SDK-Connection-Lease.md](Documentation/SDK-Connection-Lease.md), the secure hello and approval sequence in [Documentation/SDK-Session-Admission.md](Documentation/SDK-Session-Admission.md), and bidirectional transfer in [Documentation/SDK-Active-Event-Pump.md](Documentation/SDK-Active-Event-Pump.md).
 
@@ -72,3 +72,7 @@ Run the bootstrap quality gate with:
 ```sh
 ./Scripts/verify-bootstrap.sh
 ```
+
+## License
+
+NearWire is available under the MIT License. See [LICENSE](LICENSE) for details.

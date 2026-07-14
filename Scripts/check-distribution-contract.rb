@@ -143,14 +143,14 @@ module NearWireDistributionContract
   def validate_podspec(spec)
     assert(spec["name"] == "NearWire", "Pod name must be NearWire.")
     assert(spec["module_name"] == "NearWire", "Pod module name must be NearWire.")
-    assert(spec["homepage"] == "https://example.invalid/nearwire", "Pod homepage must use the reserved bootstrap URL.")
-    assert(spec["authors"] == { "NearWire Team" => "nearwire@example.invalid" }, "Pod author identity changed.")
-    assert(spec["license"] == { "type" => "Proprietary", "file" => "LICENSE" }, "Pod license metadata changed.")
+    assert(spec["homepage"] == "https://github.com/TangentW/NearWire", "Pod homepage must use the NearWire GitHub repository URL.")
+    assert(spec["authors"] == "TangentW", "Pod author identity changed.")
+    assert(spec["license"] == { "type" => "MIT", "file" => "LICENSE" }, "Pod license metadata changed.")
     expected_source = {
-      "git" => "https://example.invalid/nearwire.git",
+      "git" => "https://github.com/TangentW/NearWire.git",
       "tag" => spec.fetch("version"),
     }
-    assert(spec["source"] == expected_source, "Pod source must use the reserved Git URL and product-version tag only.")
+    assert(spec["source"] == expected_source, "Pod source must use the NearWire Git URL and product-version tag only.")
     assert(spec["platforms"] == { "ios" => "16.0" }, "Pod platform must be iOS 16.")
     assert(spec["swift_version"] == "5.0", "Pod Swift version must be 5.0.")
     assert(Array(spec["swift_versions"]) == ["5.0"], "Pod Swift versions must contain only 5.0.")
@@ -224,10 +224,10 @@ module NearWireDistributionContract
       "name" => "NearWire",
       "version" => "0.1.0",
       "module_name" => "NearWire",
-      "homepage" => "https://example.invalid/nearwire",
-      "authors" => { "NearWire Team" => "nearwire@example.invalid" },
-      "license" => { "type" => "Proprietary", "file" => "LICENSE" },
-      "source" => { "git" => "https://example.invalid/nearwire.git", "tag" => "0.1.0" },
+      "homepage" => "https://github.com/TangentW/NearWire",
+      "authors" => "TangentW",
+      "license" => { "type" => "MIT", "file" => "LICENSE" },
+      "source" => { "git" => "https://github.com/TangentW/NearWire.git", "tag" => "0.1.0" },
       "platforms" => { "ios" => "16.0" },
       "swift_version" => "5.0",
       "swift_versions" => "5.0",

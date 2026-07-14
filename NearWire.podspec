@@ -10,14 +10,14 @@ Pod::Spec.new do |spec|
     a native macOS Viewer. The SDK supports peer-to-peer-enabled discovery, bounded delivery,
     optional connection UI, and optional built-in performance collection.
   DESC
-  spec.homepage = "https://example.invalid/nearwire"
+  spec.homepage = "https://github.com/TangentW/NearWire"
   spec.license = {
-    :type => "Proprietary",
+    :type => "MIT",
     :file => "LICENSE"
   }
-  spec.authors = { "NearWire Team" => "nearwire@example.invalid" }
+  spec.authors = "TangentW"
   spec.source = {
-    :git => "https://example.invalid/nearwire.git",
+    :git => "https://github.com/TangentW/NearWire.git",
     :tag => spec.version.to_s
   }
 
