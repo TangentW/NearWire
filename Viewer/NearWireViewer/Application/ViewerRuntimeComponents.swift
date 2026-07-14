@@ -22,10 +22,18 @@ protocol ViewerSessionControlling: AnyObject, Sendable {
 protocol ViewerLiveObservationProviding: AnyObject, Sendable {
   var runtimeLogicalID: UUID { get }
   func snapshot() -> ViewerLiveProjectionSnapshot
+  func freezePerformance(connectionID: UUID) throws -> ViewerPerformanceLiveSlice
+  func performanceEventLocator(for key: ViewerEventJournalKey) -> ViewerPerformanceEventLocator?
   func setRefreshHandler(_ handler: @escaping @Sendable (UInt64) -> Void)
   func storeStateChanged(_ state: ViewerStoreStatus.State)
   func setPresentationPaused(_ paused: Bool)
   func durableRowBecameVisible(key: ViewerEventJournalKey, observationID: UUID)
+}
+
+extension ViewerLiveObservationProviding {
+  func performanceEventLocator(for key: ViewerEventJournalKey) -> ViewerPerformanceEventLocator? {
+    nil
+  }
 }
 
 final class ViewerCompositeSessionJournal: ViewerSessionJournaling, @unchecked Sendable {
@@ -326,6 +334,10 @@ final class ViewerLatestMainActorDeliveryPump<Value: Sendable>: @unchecked Senda
     return workTracker.waitTask()
   }
 
+  func waitForIdle() -> Task<Void, Never> {
+    workTracker.waitTask()
+  }
+
   var pendingWorkCount: Int { workTracker.activeCount }
   var maximumRetainedValueCount: Int { 2 }
 
@@ -512,7 +524,10 @@ struct ViewerRuntimeComponents: @unchecked Sendable {
     durableJournal: any ViewerSessionJournaling = ViewerNoopSessionJournal(),
     storeGateway: ViewerStoreExplorerGateway = ViewerStoreExplorerGateway()
   ) -> ViewerRuntimeComponents {
-    let liveWindow = ViewerLiveEventWindow(runtimeLogicalID: runtimeLogicalID)
+    let liveWindow = ViewerLiveEventWindow(
+      runtimeLogicalID: runtimeLogicalID,
+      liveGeneration: managerGeneration
+    )
     let compositeJournal = ViewerCompositeSessionJournal(
       runtimeLogicalID: runtimeLogicalID,
       durableJournal: durableJournal,

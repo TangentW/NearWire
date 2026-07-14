@@ -6,6 +6,27 @@ import XCTest
 @testable import NearWirePerformance
 
 final class PerformanceSamplerProjectionTests: XCTestCase {
+  func testProjectionConsumesCoreMetricInventory() {
+    XCTAssertEqual(
+      PerformanceMetricGroup.allCases.flatMap(\.keys),
+      PerformanceMetricKey.allCases
+    )
+    XCTAssertEqual(Set(PerformanceMetricKey.allCases.map(\.rawValue)).count, 16)
+    XCTAssertEqual(
+      PerformanceMetricKey.allCases.map(\.group),
+      PerformanceMetricGroup.allCases.flatMap { group in group.keys.map { _ in group } }
+    )
+    XCTAssertEqual(
+      PerformanceMetricKey.allCases.map(\.kind),
+      [
+        .numeric, .numeric, .numeric, .numeric,
+        .numeric, .categorical, .categorical, .categorical,
+        .unavailableOnly, .unavailableOnly, .unavailableOnly,
+        .numeric, .numeric, .numeric, .numeric, .numeric,
+      ]
+    )
+  }
+
   func testCPUSamplerHandlesInitialFailureRecoveryAndMultiCoreValues() {
     let values = LockedValues<Double?>([nil, nil, 1, 3, 3])
     var sampler = PerformanceCPUSampler { values.next() }

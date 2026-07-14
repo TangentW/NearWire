@@ -10,6 +10,90 @@ import Foundation
 }
 
 @_spi(NearWireInternal)
+public enum PerformanceMetricGroup: String, CaseIterable, Equatable, Hashable, Sendable {
+  case process
+  case display
+  case device
+  case transport
+
+  public var keys: [PerformanceMetricKey] {
+    switch self {
+    case .process:
+      return [.processCPUPercent, .processMemoryFootprintBytes]
+    case .display:
+      return [.displayEstimatedFramesPerSecond, .displayMaximumFramesPerSecond]
+    case .device:
+      return [
+        .deviceBatteryLevel, .deviceBatteryState, .deviceThermalState,
+        .deviceLowPowerModeEnabled, .deviceGPUUtilization, .devicePowerWatts,
+        .deviceTemperatureCelsius,
+      ]
+    case .transport:
+      return [
+        .transportUplinkQueueDepth, .transportDroppedEventCount,
+        .transportUplinkBytesPerSecond, .transportDownlinkBytesPerSecond,
+        .transportDownlinkQueueDepth,
+      ]
+    }
+  }
+}
+
+@_spi(NearWireInternal)
+public enum PerformanceMetricKind: String, Equatable, Hashable, Sendable {
+  case numeric
+  case categorical
+  case unavailableOnly
+}
+
+@_spi(NearWireInternal)
+public enum PerformanceMetricKey: String, CaseIterable, Equatable, Hashable, Sendable {
+  case processCPUPercent = "process.cpuPercent"
+  case processMemoryFootprintBytes = "process.memoryFootprintBytes"
+  case displayEstimatedFramesPerSecond = "display.estimatedFramesPerSecond"
+  case displayMaximumFramesPerSecond = "display.maximumFramesPerSecond"
+  case deviceBatteryLevel = "device.batteryLevel"
+  case deviceBatteryState = "device.batteryState"
+  case deviceThermalState = "device.thermalState"
+  case deviceLowPowerModeEnabled = "device.lowPowerModeEnabled"
+  case deviceGPUUtilization = "device.gpuUtilization"
+  case devicePowerWatts = "device.powerWatts"
+  case deviceTemperatureCelsius = "device.temperatureCelsius"
+  case transportUplinkQueueDepth = "transport.uplinkQueueDepth"
+  case transportDroppedEventCount = "transport.droppedEventCount"
+  case transportUplinkBytesPerSecond = "transport.uplinkBytesPerSecond"
+  case transportDownlinkBytesPerSecond = "transport.downlinkBytesPerSecond"
+  case transportDownlinkQueueDepth = "transport.downlinkQueueDepth"
+
+  public var group: PerformanceMetricGroup {
+    switch self {
+    case .processCPUPercent, .processMemoryFootprintBytes:
+      return .process
+    case .displayEstimatedFramesPerSecond, .displayMaximumFramesPerSecond:
+      return .display
+    case .deviceBatteryLevel, .deviceBatteryState, .deviceThermalState,
+      .deviceLowPowerModeEnabled, .deviceGPUUtilization, .devicePowerWatts,
+      .deviceTemperatureCelsius:
+      return .device
+    case .transportUplinkQueueDepth, .transportDroppedEventCount,
+      .transportUplinkBytesPerSecond, .transportDownlinkBytesPerSecond,
+      .transportDownlinkQueueDepth:
+      return .transport
+    }
+  }
+
+  public var kind: PerformanceMetricKind {
+    switch self {
+    case .deviceBatteryState, .deviceThermalState, .deviceLowPowerModeEnabled:
+      return .categorical
+    case .deviceGPUUtilization, .devicePowerWatts, .deviceTemperatureCelsius:
+      return .unavailableOnly
+    default:
+      return .numeric
+    }
+  }
+}
+
+@_spi(NearWireInternal)
 public struct ProcessPerformanceMetrics: Codable, Equatable, Hashable, Sendable {
   public let cpuPercent: Double?
   public let memoryFootprintBytes: UInt64?

@@ -217,6 +217,7 @@ struct ViewerStoreStatus: Equatable, Sendable {
   }
 
   let state: State
+  let storeGeneration: UInt64
   let migration: ViewerStoreMigrationStatus?
   let capacityBytes: Int64
   let logicalQuotaBytes: Int64
@@ -228,6 +229,7 @@ struct ViewerStoreStatus: Equatable, Sendable {
 
   init(
     state: State,
+    storeGeneration: UInt64 = 0,
     migration: ViewerStoreMigrationStatus? = nil,
     capacityBytes: Int64,
     logicalQuotaBytes: Int64,
@@ -238,6 +240,7 @@ struct ViewerStoreStatus: Equatable, Sendable {
     lastCleanupCategory: ViewerStoreCleanupCategory
   ) {
     self.state = state
+    self.storeGeneration = storeGeneration
     self.migration = migration
     self.capacityBytes = capacityBytes
     self.logicalQuotaBytes = logicalQuotaBytes
@@ -246,6 +249,21 @@ struct ViewerStoreStatus: Equatable, Sendable {
     self.pinnedQuotaBytes = pinnedQuotaBytes
     self.estimatedRetainedDurationMilliseconds = estimatedRetainedDurationMilliseconds
     self.lastCleanupCategory = lastCleanupCategory
+  }
+
+  func replacingStoreGeneration(_ storeGeneration: UInt64) -> Self {
+    Self(
+      state: state,
+      storeGeneration: storeGeneration,
+      migration: migration,
+      capacityBytes: capacityBytes,
+      logicalQuotaBytes: logicalQuotaBytes,
+      allocatedFootprintBytes: allocatedFootprintBytes,
+      oldestHistoryMilliseconds: oldestHistoryMilliseconds,
+      pinnedQuotaBytes: pinnedQuotaBytes,
+      estimatedRetainedDurationMilliseconds: estimatedRetainedDurationMilliseconds,
+      lastCleanupCategory: lastCleanupCategory
+    )
   }
 }
 

@@ -9,6 +9,1209 @@ import XCTest
 @testable import NearWireViewer
 
 final class ViewerStoreTests: XCTestCase {
+  func testPerformanceRawEventLocatorRequiresExactSourceKeyAndReleasedTraversal() throws {
+    let coordinator = try ViewerStoreCoordinator(paths: makePaths())
+    defer { coordinator.closeStorage() }
+    let services = coordinator.services
+    let recordingLogicalID = UUID()
+    let deviceLogicalID = UUID()
+    let recording = try services.eventStore.beginRecording(
+      logicalID: recordingLogicalID,
+      wallMilliseconds: 1,
+      monotonicNanoseconds: 1,
+      reason: "performance-raw-event-locator-test"
+    )
+    let device = try services.eventStore.beginDeviceSession(
+      recording: recording,
+      installationID: "performance-raw-event-locator-test",
+      logicalID: deviceLogicalID,
+      wallMilliseconds: 1,
+      monotonicNanoseconds: 1,
+      partialHistory: false,
+      displayName: "Performance Raw Event Locator Test"
+    )
+    let rowID = try services.eventStore.appendEvent(
+      makeObservation(
+        recording: recording,
+        device: device,
+        sequence: 7,
+        value: "performance",
+        eventType: try PerformanceSnapshotSchema.eventType()
+      )
+    )
+    _ = try services.eventStore.appendEvent(
+      makeObservation(
+        recording: recording,
+        device: device,
+        sequence: 8,
+        value: "ordinary"
+      )
+    )
+    let key = ViewerEventJournalKey(
+      runtimeLogicalID: recordingLogicalID,
+      connectionID: deviceLogicalID,
+      direction: .appToViewer,
+      wireSequence: 7
+    )
+
+    XCTAssertEqual(
+      try services.performance.resolveEventLocator(
+        recordingID: recording.rowID,
+        deviceSessionID: device.rowID,
+        key: key
+      ),
+      .durable(rowID: rowID, deviceSessionID: device.rowID)
+    )
+    XCTAssertNil(
+      try services.performance.resolveEventLocator(
+        recordingID: recording.rowID,
+        deviceSessionID: device.rowID,
+        key: ViewerEventJournalKey(
+          runtimeLogicalID: recordingLogicalID,
+          connectionID: deviceLogicalID,
+          direction: .viewerToApp,
+          wireSequence: 7
+        )
+      )
+    )
+    XCTAssertNil(
+      try services.performance.resolveEventLocator(
+        recordingID: recording.rowID,
+        deviceSessionID: device.rowID,
+        key: ViewerEventJournalKey(
+          runtimeLogicalID: UUID(),
+          connectionID: deviceLogicalID,
+          direction: .appToViewer,
+          wireSequence: 7
+        )
+      )
+    )
+    XCTAssertNil(
+      try services.performance.resolveEventLocator(
+        recordingID: recording.rowID,
+        deviceSessionID: device.rowID,
+        key: ViewerEventJournalKey(
+          runtimeLogicalID: recordingLogicalID,
+          connectionID: deviceLogicalID,
+          direction: .appToViewer,
+          wireSequence: 8
+        )
+      )
+    )
+
+    let gateway = ViewerStoreExplorerGateway()
+    gateway.install(coordinator)
+    let _: ViewerPerformanceStoreScope = try explorerValue(
+      "Begin traversal before raw Event resolution"
+    ) { completion in
+      gateway.beginPerformanceTraversal(
+        recordingID: recording.rowID,
+        deviceSessionID: device.rowID,
+        lowerMonotonicNanoseconds: 0,
+        upperMonotonicNanoseconds: 100_000,
+        completion: completion
+      )
+    }
+    let busy: Result<ViewerPerformanceEventLocator?, ViewerStoreExplorerFailure> =
+      try explorerResult("Reject raw Event resolution during traversal") { completion in
+        gateway.resolvePerformanceEventLocator(
+          recordingID: recording.rowID,
+          deviceSessionID: device.rowID,
+          key: key,
+          completion: completion
+        )
+      }
+    XCTAssertEqual(busy, .failure(.busy))
+    let _: Void = try explorerValue("Release traversal before raw Event resolution") {
+      gateway.endTraversal(completion: $0)
+    }
+    let resolvedAfterRelease: ViewerPerformanceEventLocator? = try explorerValue(
+      "Resolve raw Event after traversal release"
+    ) { completion in
+      gateway.resolvePerformanceEventLocator(
+        recordingID: recording.rowID,
+        deviceSessionID: device.rowID,
+        key: key,
+        completion: completion
+      )
+    }
+    XCTAssertEqual(
+      resolvedAfterRelease,
+      .durable(rowID: rowID, deviceSessionID: device.rowID)
+    )
+
+    gateway.sealAndWait(originatingFrom: coordinator)
+    try services.eventStore.appendStructural(
+      .closeDevice(device, wallMilliseconds: 2, monotonicNanoseconds: 2)
+    )
+    try services.eventStore.appendStructural(
+      .closeRecording(recording, wallMilliseconds: 3, monotonicNanoseconds: 3)
+    )
+    let confirmation = try services.maintenance.prepareDelete(
+      ViewerRecordingRevision(recordingID: recording.rowID, revision: 2)
+    )
+    try services.maintenance.requestDelete(confirmation, wallMilliseconds: 4)
+    XCTAssertNil(
+      try services.performance.resolveEventLocator(
+        recordingID: recording.rowID,
+        deviceSessionID: device.rowID,
+        key: key
+      )
+    )
+  }
+
+  func testPerformanceCandidateScanAdvancesAcrossResidualNonmatches() throws {
+    let fixture = try makePerformanceFixture(
+      eventCount: 4_098,
+      eventTypeSQL:
+        "CASE WHEN value=4097 THEN '\(PerformanceSnapshotSchema.eventTypeRawValue)' ELSE 'fixture.ordinary' END",
+      contentSQL: "CAST('{}' AS BLOB)"
+    )
+    defer { fixture.pool.close() }
+    let service = ViewerPerformanceStoreService(
+      pool: fixture.pool,
+      clock: ViewerPerformanceTurnClock(read: { 0 })
+    )
+
+    let first = try service.eventPage(scope: fixture.scope)
+    XCTAssertTrue(first.events.isEmpty)
+    XCTAssertEqual(
+      first.examinedCandidateCount,
+      ViewerPerformanceLimits.maximumExaminedEvents
+    )
+    XCTAssertFalse(first.isComplete)
+    XCTAssertEqual(first.continuation?.lastExaminedMonotonicNanoseconds, 4_096)
+
+    let second = try service.eventPage(
+      scope: fixture.scope,
+      continuation: try XCTUnwrap(first.continuation)
+    )
+    XCTAssertEqual(second.examinedCandidateCount, 2)
+    XCTAssertEqual(second.events.count, 1)
+    XCTAssertEqual(second.events.first?.viewerMonotonicNanoseconds, 4_098)
+    XCTAssertTrue(second.isComplete)
+    XCTAssertNil(second.continuation)
+  }
+
+  func testPerformanceResidualNonmatchBoundariesReturnDeterministicEmptyContinuations() throws {
+    for count in [4_095, 4_096, 4_097] {
+      let fixture = try makePerformanceFixture(
+        eventCount: count,
+        eventTypeSQL: "'fixture.ordinary'",
+        contentSQL: "CAST('{}' AS BLOB)"
+      )
+      defer { fixture.pool.close() }
+      let service = ViewerPerformanceStoreService(
+        pool: fixture.pool,
+        clock: ViewerPerformanceTurnClock(read: { 0 })
+      )
+
+      let first = try service.eventPage(scope: fixture.scope)
+      XCTAssertTrue(first.events.isEmpty, "count \(count)")
+      XCTAssertEqual(
+        first.examinedCandidateCount,
+        min(count, ViewerPerformanceLimits.maximumExaminedEvents),
+        "count \(count)"
+      )
+      if count < ViewerPerformanceLimits.maximumExaminedEvents {
+        XCTAssertTrue(first.isComplete, "count \(count)")
+        XCTAssertNil(first.continuation, "count \(count)")
+      } else {
+        XCTAssertFalse(first.isComplete, "count \(count)")
+        let second = try service.eventPage(
+          scope: fixture.scope,
+          continuation: try XCTUnwrap(first.continuation)
+        )
+        XCTAssertTrue(second.events.isEmpty, "count \(count)")
+        XCTAssertEqual(
+          second.examinedCandidateCount,
+          count - ViewerPerformanceLimits.maximumExaminedEvents,
+          "count \(count)"
+        )
+        XCTAssertTrue(second.isComplete, "count \(count)")
+        XCTAssertNil(second.continuation, "count \(count)")
+      }
+    }
+  }
+
+  func testPerformanceCandidateScanCapsEmittedCarriersWithoutSkipping() throws {
+    for count in [511, 512, 513] {
+      let fixture = try makePerformanceFixture(
+        eventCount: count,
+        eventTypeSQL: "'\(PerformanceSnapshotSchema.eventTypeRawValue)'",
+        contentSQL: "CAST('{}' AS BLOB)"
+      )
+      defer { fixture.pool.close() }
+      let service = ViewerPerformanceStoreService(
+        pool: fixture.pool,
+        clock: ViewerPerformanceTurnClock(read: { 0 })
+      )
+
+      let first = try service.eventPage(scope: fixture.scope)
+      XCTAssertEqual(
+        first.events.count,
+        min(count, ViewerPerformanceLimits.maximumEmittedEvents),
+        "count \(count)"
+      )
+      XCTAssertEqual(first.examinedCandidateCount, first.events.count, "count \(count)")
+      if count < ViewerPerformanceLimits.maximumEmittedEvents {
+        XCTAssertTrue(first.isComplete, "count \(count)")
+        XCTAssertNil(first.continuation, "count \(count)")
+      } else {
+        XCTAssertFalse(first.isComplete, "count \(count)")
+        let second = try service.eventPage(
+          scope: fixture.scope,
+          continuation: try XCTUnwrap(first.continuation)
+        )
+        XCTAssertEqual(
+          second.events.count,
+          count - ViewerPerformanceLimits.maximumEmittedEvents,
+          "count \(count)"
+        )
+        XCTAssertEqual(second.examinedCandidateCount, second.events.count, "count \(count)")
+        if count == 513 {
+          XCTAssertEqual(second.events.first?.key.wireSequence, 512)
+        } else {
+          XCTAssertNil(second.events.first)
+        }
+        XCTAssertTrue(second.isComplete, "count \(count)")
+        XCTAssertNil(second.continuation, "count \(count)")
+      }
+    }
+  }
+
+  func testPerformanceContinuationOrdersEqualMonotonicTiesByRowID() throws {
+    let fixture = try makePerformanceFixture(
+      eventCount: 513,
+      eventTypeSQL: "'\(PerformanceSnapshotSchema.eventTypeRawValue)'",
+      contentSQL: "CAST('{}' AS BLOB)"
+    )
+    defer { fixture.pool.close() }
+    try fixture.pool.writer.run { database in
+      try ViewerSQLiteConnection.execute(
+        "UPDATE Events SET viewerMonotonicNs=1",
+        on: database
+      )
+    }
+    let service = ViewerPerformanceStoreService(
+      pool: fixture.pool,
+      clock: ViewerPerformanceTurnClock(read: { 0 })
+    )
+
+    let first = try service.eventPage(scope: fixture.scope)
+    XCTAssertEqual(first.events.map(\.key.wireSequence), Array(0..<512).map { UInt64($0) })
+    XCTAssertEqual(first.continuation?.lastExaminedMonotonicNanoseconds, 1)
+    let second = try service.eventPage(
+      scope: fixture.scope,
+      continuation: try XCTUnwrap(first.continuation)
+    )
+    XCTAssertEqual(second.events.map(\.key.wireSequence), [512])
+    XCTAssertTrue(second.isComplete)
+  }
+
+  func testPerformanceCandidateScanRetriesAggregateByteBoundaryAndMarksOversized() throws {
+    let fixture = try makePerformanceFixture(
+      eventCount: 66,
+      eventTypeSQL: "'\(PerformanceSnapshotSchema.eventTypeRawValue)'",
+      contentSQL:
+        "CASE WHEN value=65 THEN zeroblob(65537) ELSE zeroblob(65536) END"
+    )
+    defer { fixture.pool.close() }
+    let service = ViewerPerformanceStoreService(
+      pool: fixture.pool,
+      clock: ViewerPerformanceTurnClock(read: { 0 })
+    )
+
+    let first = try service.eventPage(scope: fixture.scope)
+    XCTAssertEqual(first.events.count, 64)
+    XCTAssertEqual(first.examinedCandidateCount, 64)
+    XCTAssertEqual(
+      first.copiedContentBytes,
+      ViewerPerformanceLimits.maximumCopiedContentBytes
+    )
+    XCTAssertFalse(first.isComplete)
+
+    let second = try service.eventPage(
+      scope: fixture.scope,
+      continuation: try XCTUnwrap(first.continuation)
+    )
+    XCTAssertEqual(second.events.count, 2)
+    XCTAssertEqual(second.examinedCandidateCount, 2)
+    XCTAssertEqual(second.events[0].content.copiedByteCount, 65_536)
+    XCTAssertEqual(second.events[1].content, .oversized(byteCount: 65_537))
+    XCTAssertTrue(second.isComplete)
+  }
+
+  func testPerformanceCandidateScanUsesInjectedEqualityAndTerminalNoProgress() throws {
+    let fixture = try makePerformanceFixture(
+      eventCount: 1,
+      eventTypeSQL: "'\(PerformanceSnapshotSchema.eventTypeRawValue)'",
+      contentSQL: "CAST('{}' AS BLOB)"
+    )
+    defer { fixture.pool.close() }
+
+    let equalityClock = ViewerPerformanceTestClock([0, 0, 50_000_000])
+    let equalityService = ViewerPerformanceStoreService(
+      pool: fixture.pool,
+      clock: ViewerPerformanceTurnClock(read: { equalityClock.now() })
+    )
+    let equalityPage = try equalityService.eventPage(scope: fixture.scope)
+    XCTAssertEqual(equalityPage.events.count, 1)
+    XCTAssertEqual(equalityPage.examinedCandidateCount, 1)
+    XCTAssertFalse(equalityPage.isComplete)
+
+    let belowClock = ViewerPerformanceTestClock([0, 0, 49_999_999, 49_999_999])
+    let belowService = ViewerPerformanceStoreService(
+      pool: fixture.pool,
+      clock: ViewerPerformanceTurnClock(read: { belowClock.now() })
+    )
+    let belowPage = try belowService.eventPage(scope: fixture.scope)
+    XCTAssertEqual(belowPage.events.count, 1)
+    XCTAssertTrue(belowPage.isComplete)
+
+    let noProgressClock = ViewerPerformanceTestClock([0, 50_000_000])
+    let noProgressService = ViewerPerformanceStoreService(
+      pool: fixture.pool,
+      clock: ViewerPerformanceTurnClock(read: { noProgressClock.now() })
+    )
+    XCTAssertThrowsError(try noProgressService.eventPage(scope: fixture.scope)) {
+      XCTAssertEqual($0 as? ViewerPerformanceStoreFailure, .workLimitExceeded)
+    }
+
+    let exceededClock = ViewerPerformanceTestClock([0, 50_000_001])
+    let exceededService = ViewerPerformanceStoreService(
+      pool: fixture.pool,
+      clock: ViewerPerformanceTurnClock(read: { exceededClock.now() })
+    )
+    XCTAssertThrowsError(try exceededService.eventPage(scope: fixture.scope)) {
+      XCTAssertEqual($0 as? ViewerPerformanceStoreFailure, .workLimitExceeded)
+    }
+
+    let sqliteBudget = ViewerSQLiteBudget.performance()
+    XCTAssertEqual(sqliteBudget.maximumVirtualMachineSteps, 5_000_000)
+    XCTAssertNil(sqliteBudget.deadline)
+  }
+
+  func testPerformanceGatewayFreezesEventUpperAndMapsClosedGapMetadata() throws {
+    let coordinator = try ViewerStoreCoordinator(paths: makePaths())
+    let store = coordinator.services.eventStore
+    let recording = try store.beginRecording(
+      wallMilliseconds: 1,
+      monotonicNanoseconds: 1,
+      reason: "performance-gateway-test"
+    )
+    let device = try store.beginDeviceSession(
+      recording: recording,
+      installationID: "performance-gateway-test",
+      wallMilliseconds: 1,
+      monotonicNanoseconds: 1,
+      partialHistory: false,
+      displayName: "Performance Gateway Test"
+    )
+    let performanceType = try PerformanceSnapshotSchema.eventType()
+    _ = try store.appendEvent(
+      makeObservation(
+        recording: recording,
+        device: device,
+        sequence: 1,
+        value: "first",
+        eventType: performanceType
+      )
+    )
+    let gapInputs: [(String, String, Int64)] = [
+      ("missingInitialEvent.expired", "appToViewer", 1),
+      ("storageUnavailable", "both", 2),
+      ("uplinkDispositionOverflow", "viewerToApp", 3),
+      ("deviceCloseFailed", "unknown", 4),
+      ("coalescedOverflow", "viewerToApp", 5),
+      ("unrecognizedReason", "both", 6),
+    ]
+    for (index, input) in gapInputs.enumerated() {
+      try store.appendStructural(
+        .gap(
+          recording: recording,
+          device: device,
+          sequence: UInt64(index + 1),
+          reason: input.0,
+          count: input.2,
+          firstWallMilliseconds: Int64(index + 10),
+          lastWallMilliseconds: Int64(index + 10),
+          directions: input.1,
+          firstWireSequence: nil,
+          lastWireSequence: nil
+        )
+      )
+    }
+
+    let gateway = ViewerStoreExplorerGateway()
+    gateway.install(coordinator)
+    let scope: ViewerPerformanceStoreScope = try explorerValue(
+      "Begin performance traversal"
+    ) { completion in
+      gateway.beginPerformanceTraversal(
+        recordingID: recording.rowID,
+        deviceSessionID: device.rowID,
+        lowerMonotonicNanoseconds: 0,
+        upperMonotonicNanoseconds: 10_000,
+        completion: completion
+      )
+    }
+    XCTAssertGreaterThan(scope.storeGeneration, 0)
+
+    _ = try store.appendEvent(
+      makeObservation(
+        recording: recording,
+        device: device,
+        sequence: 2,
+        value: "after-freeze",
+        eventType: performanceType
+      )
+    )
+    try store.appendStructural(
+      .gap(
+        recording: recording,
+        device: device,
+        sequence: 7,
+        reason: "storeAfterFreeze",
+        count: 7,
+        firstWallMilliseconds: 20,
+        lastWallMilliseconds: 20,
+        directions: "appToViewer",
+        firstWireSequence: nil,
+        lastWireSequence: nil
+      )
+    )
+
+    let eventPage: ViewerPerformanceEventPage = try explorerValue(
+      "Load frozen performance Events"
+    ) { completion in
+      gateway.loadPerformanceEventPage(continuation: nil, completion: completion)
+    }
+    XCTAssertTrue(eventPage.isComplete)
+    XCTAssertEqual(eventPage.events.map(\.key.wireSequence), [1])
+
+    let gapPage: ViewerPerformanceGapPage = try explorerValue(
+      "Load frozen performance gaps"
+    ) { completion in
+      gateway.loadPerformanceGapPage(completion: completion)
+    }
+    XCTAssertEqual(
+      gapPage.gaps.map(\.kind),
+      [
+        .eventLoss, .storageContinuity, .controlContinuity, .lifecycleContinuity,
+        .unknown, .unknown,
+      ]
+    )
+    XCTAssertEqual(
+      gapPage.gaps.map(\.applicability),
+      [.performance, .performance, .irrelevant, .uncertain, .irrelevant, .performance]
+    )
+    XCTAssertEqual(gapPage.applicableOrUncertainCount, 13)
+    XCTAssertFalse(gapPage.hasMoreRows)
+    XCTAssertFalse(gapPage.hasMoreApplicableGaps)
+    XCTAssertFalse(String(reflecting: gapPage).contains("unrecognizedReason"))
+    XCTAssertFalse(String(reflecting: gapPage).contains("appToViewer"))
+
+    let _: Void = try explorerValue("End performance traversal") { completion in
+      gateway.endTraversal(completion: completion)
+    }
+    gateway.sealAndWait(originatingFrom: coordinator)
+    coordinator.closeStorage()
+  }
+
+  func testPerformanceCurrentFreezeUsesLiveAnchorBeforeStoreUppers() throws {
+    let runtimeLogicalID = UUID()
+    let connectionID = UUID()
+    let coordinator = try ViewerStoreCoordinator(paths: makePaths())
+    defer { coordinator.closeStorage() }
+    let store = coordinator.services.eventStore
+    let recording = try store.beginRecording(
+      logicalID: runtimeLogicalID,
+      wallMilliseconds: 1,
+      monotonicNanoseconds: 1,
+      reason: "performance-live-first-test"
+    )
+    let device = try store.beginDeviceSession(
+      recording: recording,
+      installationID: "performance-live-first-test",
+      logicalID: connectionID,
+      wallMilliseconds: 1,
+      monotonicNanoseconds: 1,
+      partialHistory: false,
+      displayName: "Performance Live First Test"
+    )
+    let performanceType = try PerformanceSnapshotSchema.eventType()
+    _ = try store.appendEvent(
+      makeObservation(
+        recording: recording,
+        device: device,
+        sequence: 1,
+        value: "before-freeze",
+        viewerMonotonicNanoseconds: 4_000,
+        eventType: performanceType
+      )
+    )
+    let liveSlice = try ViewerPerformanceLiveSlice(
+      runtimeLogicalID: runtimeLogicalID,
+      connectionID: connectionID,
+      liveGeneration: 7,
+      revision: 11,
+      anchorMonotonicNanoseconds: 5_000,
+      events: [],
+      gaps: [],
+      applicableOrUncertainCount: 0,
+      hasMoreApplicableGaps: false
+    )
+    let live = ViewerPerformanceFreezeLiveSpy(slice: liveSlice)
+    let gateway = ViewerStoreExplorerGateway()
+    gateway.install(coordinator)
+    let freezer = ViewerPerformanceFreezeCoordinator(
+      live: live,
+      storeGateway: gateway
+    )
+    let result = LockedPerformanceFreezeResult()
+    let finished = expectation(description: "Freeze live before Store uppers")
+    let token = freezer.freezeCurrent(
+      connectionID: connectionID,
+      recordingID: recording.rowID,
+      deviceSessionID: device.rowID,
+      lowerMonotonicNanoseconds: 0
+    ) {
+      result.set($0)
+      finished.fulfill()
+    }
+    XCTAssertNotNil(token)
+    wait(for: [finished], timeout: 2)
+    let receipt = try XCTUnwrap(result.value).get()
+    XCTAssertEqual(live.frozenConnectionIDs, [connectionID])
+    XCTAssertEqual(receipt.liveSlice, liveSlice)
+    XCTAssertEqual(receipt.storeScope?.upperMonotonicNanoseconds, 5_000)
+    XCTAssertEqual(
+      receipt.source,
+      .current(runtimeLogicalID: runtimeLogicalID, connectionID: connectionID)
+    )
+
+    _ = try store.appendEvent(
+      makeObservation(
+        recording: recording,
+        device: device,
+        sequence: 2,
+        value: "after-freeze",
+        viewerMonotonicNanoseconds: 4_500,
+        eventType: performanceType
+      )
+    )
+    let page: ViewerPerformanceEventPage = try explorerValue(
+      "Load live-first frozen performance Events"
+    ) { completion in
+      gateway.loadPerformanceEventPage(continuation: nil, completion: completion)
+    }
+    XCTAssertEqual(page.events.map(\.key.wireSequence), [1])
+    XCTAssertTrue(page.isComplete)
+  }
+
+  func testPerformanceFreezeReconcilesBeforeDuringAndAfterStoreUpperCommitsExactlyOnce()
+    throws
+  {
+    let runtimeLogicalID = UUID()
+    let connectionID = UUID()
+    let coordinator = try ViewerStoreCoordinator(paths: makePaths())
+    defer { coordinator.closeStorage() }
+    let store = coordinator.services.eventStore
+    let recording = try store.beginRecording(
+      logicalID: runtimeLogicalID,
+      wallMilliseconds: 1,
+      monotonicNanoseconds: 1,
+      reason: "performance-freeze-commit-permutations"
+    )
+    let device = try store.beginDeviceSession(
+      recording: recording,
+      installationID: "performance-freeze-commit-permutations",
+      logicalID: connectionID,
+      wallMilliseconds: 1,
+      monotonicNanoseconds: 1,
+      partialHistory: false,
+      displayName: "Performance Freeze Commit Permutations"
+    )
+    let performanceType = try PerformanceSnapshotSchema.eventType()
+    let content = JSONValue.object([
+      "schemaVersion": .integer(1),
+      "sampledAt": .string("2026-07-14T01:02:03Z"),
+      "sampleIntervalMilliseconds": .integer(1_000),
+      "process": .object(["cpuPercent": .integer(42)]),
+    ])
+    let beforeFreeze = try makeObservation(
+      recording: recording,
+      device: device,
+      sequence: 1,
+      value: "before-freeze",
+      viewerMonotonicNanoseconds: 4_000,
+      viewerWallMilliseconds: 4_000,
+      eventType: performanceType,
+      content: content
+    )
+    let duringBarrier = try makeObservation(
+      recording: recording,
+      device: device,
+      sequence: 2,
+      value: "during-live-store-barrier",
+      viewerMonotonicNanoseconds: 4_500,
+      viewerWallMilliseconds: 4_500,
+      eventType: performanceType,
+      content: content
+    )
+    let afterAnchor = try makeObservation(
+      recording: recording,
+      device: device,
+      sequence: 3,
+      value: "after-anchor",
+      viewerMonotonicNanoseconds: 5_500,
+      viewerWallMilliseconds: 5_500,
+      eventType: performanceType,
+      content: content
+    )
+    let afterStoreUpper = try makeObservation(
+      recording: recording,
+      device: device,
+      sequence: 4,
+      value: "after-store-upper",
+      viewerMonotonicNanoseconds: 4_800,
+      viewerWallMilliseconds: 4_800,
+      eventType: performanceType,
+      content: content
+    )
+    _ = try store.appendEvent(beforeFreeze)
+
+    func liveCarrier(
+      _ observation: ViewerPreparedEventObservation,
+      observationID: UUID
+    ) throws -> ViewerPerformanceEventCarrier {
+      try ViewerPerformanceEventCarrier(
+        locator: .transient(observationID: observationID),
+        key: ViewerEventJournalKey(
+          runtimeLogicalID: runtimeLogicalID,
+          connectionID: connectionID,
+          direction: .appToViewer,
+          wireSequence: observation.envelope.sequence.rawValue
+        ),
+        viewerWallMilliseconds: observation.viewerWallMilliseconds,
+        viewerMonotonicNanoseconds: Int64(observation.viewerMonotonicNanoseconds),
+        content: .canonical(observation.canonicalContent)
+      )
+    }
+
+    let liveSlice = try ViewerPerformanceLiveSlice(
+      runtimeLogicalID: runtimeLogicalID,
+      connectionID: connectionID,
+      liveGeneration: 7,
+      revision: 11,
+      anchorMonotonicNanoseconds: 5_000,
+      events: [
+        try liveCarrier(beforeFreeze, observationID: UUID()),
+        try liveCarrier(duringBarrier, observationID: UUID()),
+      ],
+      gaps: [],
+      applicableOrUncertainCount: 0,
+      hasMoreApplicableGaps: false
+    )
+    let live = ViewerPerformanceFreezeLiveSpy(slice: liveSlice) {
+      _ = try store.appendEvent(duringBarrier)
+      _ = try store.appendEvent(afterAnchor)
+    }
+    let gateway = ViewerStoreExplorerGateway()
+    gateway.install(coordinator)
+    let freezer = ViewerPerformanceFreezeCoordinator(live: live, storeGateway: gateway)
+    let result = LockedPerformanceFreezeResult()
+    let finished = expectation(description: "Freeze across the live/Store commit barrier")
+    XCTAssertNotNil(
+      freezer.freezeCurrent(
+        connectionID: connectionID,
+        recordingID: recording.rowID,
+        deviceSessionID: device.rowID,
+        lowerMonotonicNanoseconds: 0
+      ) {
+        result.set($0)
+        finished.fulfill()
+      }
+    )
+    wait(for: [finished], timeout: 2)
+    let receipt = try XCTUnwrap(result.value).get()
+    XCTAssertEqual(receipt.storeScope?.upperMonotonicNanoseconds, 5_000)
+
+    _ = try store.appendEvent(afterStoreUpper)
+    let page: ViewerPerformanceEventPage = try explorerValue(
+      "Load commit-permutation performance Events"
+    ) { completion in
+      gateway.loadPerformanceEventPage(continuation: nil, completion: completion)
+    }
+    XCTAssertEqual(page.events.map(\.key.wireSequence), [1, 2])
+    XCTAssertTrue(
+      page.events.allSatisfy {
+        if case .durable = $0.locator { return true }
+        return false
+      }
+    )
+    XCTAssertTrue(page.isComplete)
+    let gapPage: ViewerPerformanceGapPage = try explorerValue(
+      "Load commit-permutation performance gaps"
+    ) { completion in
+      gateway.loadPerformanceGapPage(completion: completion)
+    }
+
+    var session = try ViewerPerformanceProjectionSession(
+      receipt: receipt,
+      rangeKind: .currentSession,
+      bounds: ViewerPerformanceRangeBounds(
+        lowerMonotonicNanoseconds: 0,
+        upperMonotonicNanoseconds: 5_000
+      ),
+      deviceStartMonotonicNanoseconds: 0,
+      sourceGeneration: 1
+    )
+    try session.accept(eventPage: page)
+    XCTAssertEqual(session.retainedRawEventCount, 4)
+    while case .processed = try session.runDecodeTurn() {}
+    try session.accept(gapPage: gapPage)
+    let publication = try session.finalize(
+      sourceGeneration: 1,
+      deadlineRevision: 1,
+      currentUptimeNanoseconds: 5_000
+    )
+    XCTAssertEqual(publication.decodedEventCount, 2)
+    XCTAssertEqual(publication.cards.latestEventKey?.wireSequence, 2)
+    XCTAssertEqual(
+      publication.result.availability.first(where: { $0.key == .processCPUPercent })?.counts
+        .measured,
+      2
+    )
+
+    let _: Void = try explorerValue("End commit-permutation traversal") { completion in
+      gateway.endTraversal(completion: completion)
+    }
+    gateway.sealAndWait(originatingFrom: coordinator)
+  }
+
+  func testPerformanceGapClassificationSeparatesGenericAndApplicableOverflow() throws {
+    let pool = try ViewerSQLitePool(migrating: makePaths())
+    defer { pool.close() }
+    let store = ViewerEventStore(pool: pool, configuration: { .default })
+    let recording = try store.beginRecording(
+      wallMilliseconds: 1,
+      monotonicNanoseconds: 1,
+      reason: "performance-gap-classification-test"
+    )
+    let device = try store.beginDeviceSession(
+      recording: recording,
+      installationID: "performance-gap-classification-test",
+      wallMilliseconds: 1,
+      monotonicNanoseconds: 1,
+      partialHistory: false,
+      displayName: "Performance Gap Classification Test"
+    )
+    for sequence in 1...129 {
+      try store.appendStructural(
+        .gap(
+          recording: recording,
+          device: device,
+          sequence: UInt64(sequence),
+          reason: "coalescedOverflow",
+          count: 1,
+          firstWallMilliseconds: Int64(sequence),
+          lastWallMilliseconds: Int64(sequence),
+          directions: "viewerToApp",
+          firstWireSequence: nil,
+          lastWireSequence: nil
+        )
+      )
+    }
+    let leases = ViewerStoreLeaseRegistry()
+    let service = ViewerPerformanceStoreService(pool: pool, leases: leases)
+    let firstTraversal = try service.begin(
+      storeGeneration: 1,
+      recordingID: recording.rowID,
+      deviceSessionID: device.rowID,
+      lowerMonotonicNanoseconds: 0,
+      upperMonotonicNanoseconds: 100
+    )
+    XCTAssertEqual(leases.queryLeaseCountForTesting, 1)
+    let (irrelevantTail, refreshedFirstTraversal) = try service.gapPage(
+      traversal: firstTraversal
+    )
+    XCTAssertEqual(irrelevantTail.gaps.count, 32)
+    XCTAssertTrue(irrelevantTail.hasMoreRows)
+    XCTAssertEqual(irrelevantTail.applicableOrUncertainCount, 0)
+    XCTAssertFalse(irrelevantTail.hasMoreApplicableGaps)
+    XCTAssertEqual(leases.queryLeaseCountForTesting, 1)
+    var completeFirstTraversal = refreshedFirstTraversal
+    var classifiedPageCount = 1
+    var classifiedRowCount = irrelevantTail.gaps.count
+    var hasMoreRows = irrelevantTail.hasMoreRows
+    while hasMoreRows {
+      let (page, refreshed) = try service.gapPage(traversal: completeFirstTraversal)
+      completeFirstTraversal = refreshed
+      classifiedPageCount += 1
+      classifiedRowCount += page.gaps.count
+      hasMoreRows = page.hasMoreRows
+      XCTAssertEqual(page.applicableOrUncertainCount, 0)
+      XCTAssertFalse(page.hasMoreApplicableGaps)
+    }
+    XCTAssertEqual(classifiedPageCount, 5)
+    XCTAssertEqual(classifiedRowCount, 129)
+    XCTAssertEqual(service.classificationInvocationCountForTesting, 1)
+    service.end(completeFirstTraversal)
+    XCTAssertEqual(leases.queryLeaseCountForTesting, 0)
+
+    try store.appendStructural(
+      .gap(
+        recording: recording,
+        device: device,
+        sequence: 129,
+        reason: "coalescedOverflow",
+        count: 2,
+        firstWallMilliseconds: 129,
+        lastWallMilliseconds: 129,
+        directions: "appToViewer",
+        firstWireSequence: nil,
+        lastWireSequence: nil
+      )
+    )
+    let applicableTraversal = try service.begin(
+      storeGeneration: 1,
+      recordingID: recording.rowID,
+      deviceSessionID: device.rowID,
+      lowerMonotonicNanoseconds: 0,
+      upperMonotonicNanoseconds: 100
+    )
+    let (applicableTail, refreshedApplicableTraversal) = try service.gapPage(
+      traversal: applicableTraversal
+    )
+    XCTAssertTrue(applicableTail.hasMoreRows)
+    XCTAssertEqual(applicableTail.applicableOrUncertainCount, 2)
+    XCTAssertTrue(applicableTail.hasMoreApplicableGaps)
+    XCTAssertEqual(service.classificationInvocationCountForTesting, 2)
+    service.end(refreshedApplicableTraversal)
+
+    let exhaustedClock = ViewerPerformanceTestClock([0, 250_000_000])
+    let conservativeService = ViewerPerformanceStoreService(
+      pool: pool,
+      leases: leases,
+      clock: ViewerPerformanceTurnClock(read: { exhaustedClock.now() })
+    )
+    let exhaustedTraversal = try conservativeService.begin(
+      storeGeneration: 1,
+      recordingID: recording.rowID,
+      deviceSessionID: device.rowID,
+      lowerMonotonicNanoseconds: 0,
+      upperMonotonicNanoseconds: 100
+    )
+    let (conservativePage, refreshedExhaustedTraversal) = try conservativeService.gapPage(
+      traversal: exhaustedTraversal
+    )
+    XCTAssertTrue(conservativePage.hasMoreApplicableGaps)
+    conservativeService.end(refreshedExhaustedTraversal)
+    XCTAssertEqual(leases.queryLeaseCountForTesting, 0)
+
+    let classificationBudget = ViewerSQLiteBudget.performanceClassification()
+    XCTAssertEqual(classificationBudget.maximumVirtualMachineSteps, 2_000_000)
+    XCTAssertNil(classificationBudget.deadline)
+  }
+
+  func testPerformanceGatewayCancellationAfterPageCandidateReleasesTraversal() throws {
+    let coordinator = try ViewerStoreCoordinator(paths: makePaths())
+    let store = coordinator.services.eventStore
+    let recording = try store.beginRecording(
+      wallMilliseconds: 1,
+      monotonicNanoseconds: 1,
+      reason: "performance-cancellation-test"
+    )
+    let device = try store.beginDeviceSession(
+      recording: recording,
+      installationID: "performance-cancellation-test",
+      wallMilliseconds: 1,
+      monotonicNanoseconds: 1,
+      partialHistory: false,
+      displayName: "Performance Cancellation Test"
+    )
+    _ = try store.appendEvent(
+      makeObservation(
+        recording: recording,
+        device: device,
+        sequence: 1,
+        value: "cancelled-candidate",
+        eventType: try PerformanceSnapshotSchema.eventType()
+      )
+    )
+    let completionGate = ArmableViewerExecutionGate()
+    let gateway = ViewerStoreExplorerGateway(
+      operationCompletionGate: { completionGate.run() }
+    )
+    gateway.install(coordinator)
+    let _: ViewerPerformanceStoreScope = try explorerValue(
+      "Begin cancellable performance traversal"
+    ) { completion in
+      gateway.beginPerformanceTraversal(
+        recordingID: recording.rowID,
+        deviceSessionID: device.rowID,
+        lowerMonotonicNanoseconds: 0,
+        upperMonotonicNanoseconds: 100,
+        completion: completion
+      )
+    }
+    XCTAssertEqual(coordinator.services.performance.activeLeaseCountForTesting, 1)
+
+    completionGate.arm()
+    let result = LockedViewerExplorerResult<ViewerPerformanceEventPage>()
+    let finished = expectation(description: "Cancelled performance page completed")
+    let token = gateway.loadPerformanceEventPage(continuation: nil) {
+      result.set($0)
+      finished.fulfill()
+    }
+    XCTAssertEqual(completionGate.waitUntilBlocked(), .success)
+    gateway.cancel(token)
+    completionGate.release()
+    wait(for: [finished], timeout: 2)
+
+    guard case .failure(let failure) = try XCTUnwrap(result.value) else {
+      return XCTFail("Cancelled candidate must not be delivered.")
+    }
+    XCTAssertEqual(failure, .cancelled)
+    XCTAssertEqual(coordinator.services.performance.activeLeaseCountForTesting, 0)
+    XCTAssertEqual(coordinator.services.query.cancelledOperationCountForTesting, 0)
+    gateway.sealAndWait(originatingFrom: coordinator)
+    coordinator.closeStorage()
+  }
+
+  func testPerformanceCarriersAndPagesEnforceExactAccountingAndRedaction() throws {
+    let runtimeLogicalID = UUID()
+    let connectionID = UUID()
+    let scope = try ViewerPerformanceStoreScope(
+      storeGeneration: 1,
+      recordingID: 1,
+      deviceSessionID: 2,
+      lowerMonotonicNanoseconds: 0,
+      upperMonotonicNanoseconds: 10_000,
+      eventUpperRowID: 1_000,
+      gapUpperRowID: 2_000
+    )
+    let makeCarrier:
+      (Int, ViewerPerformanceEventContent) throws ->
+        ViewerPerformanceEventCarrier = { index, content in
+          try ViewerPerformanceEventCarrier(
+            locator: .durable(rowID: Int64(index + 1), deviceSessionID: 2),
+            key: ViewerEventJournalKey(
+              runtimeLogicalID: runtimeLogicalID,
+              connectionID: connectionID,
+              direction: .appToViewer,
+              wireSequence: UInt64(index)
+            ),
+            viewerWallMilliseconds: Int64(index),
+            viewerMonotonicNanoseconds: Int64(index),
+            content: content
+          )
+        }
+
+    let exact = try makeCarrier(
+      0,
+      .canonical(Data(repeating: 7, count: ViewerPerformanceLimits.maximumRowContentBytes))
+    )
+    XCTAssertEqual(
+      exact.accountedBytes,
+      ViewerPerformanceLimits.eventCarrierBytes
+        + ViewerPerformanceLimits.maximumRowContentBytes
+    )
+    XCTAssertThrowsError(
+      try makeCarrier(
+        1,
+        .canonical(
+          Data(repeating: 7, count: ViewerPerformanceLimits.maximumRowContentBytes + 1)
+        )
+      )
+    )
+    XCTAssertThrowsError(
+      try makeCarrier(
+        1,
+        .oversized(byteCount: Int64(ViewerPerformanceLimits.maximumRowContentBytes))
+      )
+    )
+
+    var events: [ViewerPerformanceEventCarrier] = []
+    events.reserveCapacity(ViewerPerformanceLimits.maximumEmittedEvents)
+    for index in 0..<ViewerPerformanceLimits.maximumEmittedEvents {
+      let content: ViewerPerformanceEventContent =
+        index < 64
+        ? .canonical(
+          Data(repeating: UInt8(index), count: ViewerPerformanceLimits.maximumRowContentBytes)
+        )
+        : .oversized(byteCount: Int64(ViewerPerformanceLimits.maximumRowContentBytes + 1))
+      events.append(try makeCarrier(index, content))
+    }
+    let page = try ViewerPerformanceEventPage(
+      scope: scope,
+      events: events,
+      examinedCandidateCount: ViewerPerformanceLimits.maximumExaminedEvents,
+      continuation: nil,
+      isComplete: true
+    )
+    XCTAssertEqual(page.copiedContentBytes, ViewerPerformanceLimits.maximumCopiedContentBytes)
+    XCTAssertEqual(page.accountedBytes, ViewerPerformanceLimits.maximumEventPageBytes)
+
+    let oneMoreCopied = try makeCarrier(
+      ViewerPerformanceLimits.maximumEmittedEvents,
+      .canonical(Data([1]))
+    )
+    var excessiveCopy = Array(events.dropLast())
+    excessiveCopy.append(oneMoreCopied)
+    XCTAssertThrowsError(
+      try ViewerPerformanceEventPage(
+        scope: scope,
+        events: excessiveCopy,
+        examinedCandidateCount: excessiveCopy.count,
+        continuation: nil,
+        isComplete: true
+      )
+    )
+
+    let marker = "performance-content-must-not-reflect"
+    let redacted = try makeCarrier(
+      1,
+      .canonical(Data(marker.utf8))
+    )
+    XCTAssertFalse(String(reflecting: redacted).contains(marker))
+    XCTAssertFalse(String(describing: redacted.customMirror).contains(marker))
+  }
+
+  func testPerformanceGapPageAndLiveSliceReachExactCaps() throws {
+    let runtimeLogicalID = UUID()
+    let connectionID = UUID()
+    let makeGap: (Int) throws -> ViewerPerformanceGapCarrier = { index in
+      try ViewerPerformanceGapCarrier(
+        rowID: index < 32 ? Int64(index + 1) : nil,
+        recordingID: index < 32 ? 1 : nil,
+        deviceSessionID: index < 32 ? 2 : nil,
+        count: 1,
+        firstViewerWallMilliseconds: nil,
+        lastViewerWallMilliseconds: nil,
+        kind: .unknown,
+        applicability: .uncertain
+      )
+    }
+    let pageGaps = try (0..<ViewerPerformanceLimits.maximumGapPageEvents).map(makeGap)
+    let gapPage = try ViewerPerformanceGapPage(
+      gaps: pageGaps,
+      hasMoreRows: true,
+      applicableOrUncertainCount: 33,
+      hasMoreApplicableGaps: true
+    )
+    XCTAssertEqual(gapPage.accountedBytes, ViewerPerformanceLimits.maximumGapPageBytes)
+
+    let makeEvent: (Int) throws -> ViewerPerformanceEventCarrier = { index in
+      let content: ViewerPerformanceEventContent =
+        index < 64
+        ? .canonical(
+          Data(repeating: UInt8(index), count: ViewerPerformanceLimits.maximumRowContentBytes)
+        )
+        : .oversized(byteCount: Int64(ViewerPerformanceLimits.maximumRowContentBytes + 1))
+      return try ViewerPerformanceEventCarrier(
+        locator: .transient(observationID: UUID()),
+        key: ViewerEventJournalKey(
+          runtimeLogicalID: runtimeLogicalID,
+          connectionID: connectionID,
+          direction: .appToViewer,
+          wireSequence: UInt64(index)
+        ),
+        viewerWallMilliseconds: Int64(index),
+        viewerMonotonicNanoseconds: Int64(index),
+        content: content
+      )
+    }
+    let events = try (0..<ViewerPerformanceLimits.maximumEmittedEvents).map(makeEvent)
+    let liveGaps = try (0..<ViewerPerformanceLimits.maximumLiveGaps).map(makeGap)
+    let slice = try ViewerPerformanceLiveSlice(
+      runtimeLogicalID: runtimeLogicalID,
+      connectionID: connectionID,
+      liveGeneration: 1,
+      revision: 1,
+      anchorMonotonicNanoseconds: 1_000,
+      events: events,
+      gaps: liveGaps,
+      applicableOrUncertainCount: 129,
+      hasMoreApplicableGaps: true
+    )
+    XCTAssertEqual(slice.copiedContentBytes, ViewerPerformanceLimits.maximumCopiedContentBytes)
+    XCTAssertEqual(slice.accountedBytes, ViewerPerformanceLimits.maximumLiveSliceBytes)
+    XCTAssertEqual(slice.gaps.count, ViewerPerformanceLimits.maximumLiveGaps)
+    XCTAssertTrue(slice.hasMoreApplicableGaps)
+    XCTAssertFalse(String(reflecting: slice).contains("nearwire.performance.snapshot"))
+
+    let source = ViewerPerformanceSource.current(
+      runtimeLogicalID: runtimeLogicalID,
+      connectionID: connectionID
+    )
+    var session = try ViewerPerformanceProjectionSession(
+      receipt: ViewerPerformanceFrozenReceipt(
+        source: source,
+        storeScope: nil,
+        liveSlice: slice
+      ),
+      rangeKind: .currentSession,
+      bounds: ViewerPerformanceRangeBounds(
+        lowerMonotonicNanoseconds: 0,
+        upperMonotonicNanoseconds: 1_000
+      ),
+      deviceStartMonotonicNanoseconds: 0,
+      sourceGeneration: 1
+    )
+    XCTAssertEqual(session.retainedRawEventCount, ViewerPerformanceLimits.maximumEmittedEvents)
+    var decodedTurns = 0
+    while case .processed(let count) = try session.runDecodeTurn() {
+      XCTAssertEqual(count, ViewerPerformancePipelineLimits.maximumDecodedEventsPerTurn)
+      decodedTurns += 1
+    }
+    XCTAssertEqual(decodedTurns, 8)
+    let publication = try session.finalize(
+      sourceGeneration: 1,
+      deadlineRevision: 1,
+      currentUptimeNanoseconds: 1_000
+    )
+    XCTAssertEqual(publication.decodedEventCount, 512)
+    XCTAssertEqual(publication.decodeTurnCount, 8)
+  }
+
+  func testPerformanceScopeAndContinuationRejectInvalidBounds() throws {
+    XCTAssertThrowsError(
+      try ViewerPerformanceStoreScope(
+        storeGeneration: 0,
+        recordingID: 1,
+        deviceSessionID: 1,
+        lowerMonotonicNanoseconds: 2,
+        upperMonotonicNanoseconds: 1,
+        eventUpperRowID: 0,
+        gapUpperRowID: 0
+      )
+    )
+    XCTAssertThrowsError(
+      try ViewerPerformanceSource.makeHistorical(
+        recordingID: 0,
+        deviceSessionID: 1,
+        recordingLogicalID: UUID(),
+        deviceLogicalID: UUID()
+      )
+    )
+
+    let scope = try ViewerPerformanceStoreScope(
+      storeGeneration: 1,
+      recordingID: 1,
+      deviceSessionID: 1,
+      lowerMonotonicNanoseconds: 0,
+      upperMonotonicNanoseconds: 1,
+      eventUpperRowID: 0,
+      gapUpperRowID: 0
+    )
+    let continuation = ViewerPerformanceContinuation.initial(scope: scope)
+    XCTAssertNil(continuation.lastExaminedMonotonicNanoseconds)
+    XCTAssertNil(continuation.lastExaminedRowID)
+  }
+
   func testStoreCoordinatorAndRuntimeRootsHaveClosedReflection() throws {
     let paths = try makePaths()
     let markers = [
@@ -1836,6 +3039,1470 @@ final class ViewerStoreTests: XCTestCase {
   }
 
   @MainActor
+  func testStoreRematerializationClearsReusedRowIDsUntilReplacementCatalogsCommit()
+    async throws
+  {
+    let fixtureWallMilliseconds = Int64(Date().timeIntervalSince1970 * 1_000)
+    let viewerRuntimeLogicalID = UUID()
+    let oldRuntimeLogicalID = UUID()
+    let oldDeviceLogicalID = UUID()
+    let oldCoordinator = try ViewerStoreCoordinator(paths: makePaths())
+    let oldRecording = try oldCoordinator.services.eventStore.beginRecording(
+      logicalID: oldRuntimeLogicalID,
+      wallMilliseconds: fixtureWallMilliseconds,
+      monotonicNanoseconds: 2_000,
+      reason: "old-rematerialization-store"
+    )
+    let oldDevice = try oldCoordinator.services.eventStore.beginDeviceSession(
+      recording: oldRecording,
+      installationID: "old-rematerialization-device",
+      logicalID: oldDeviceLogicalID,
+      wallMilliseconds: fixtureWallMilliseconds,
+      monotonicNanoseconds: 2_000,
+      partialHistory: false,
+      displayName: "Old Rematerialization Device"
+    )
+    try oldCoordinator.services.eventStore.appendStructural(
+      .closeDevice(
+        oldDevice,
+        wallMilliseconds: fixtureWallMilliseconds + 1,
+        monotonicNanoseconds: 3_000
+      )
+    )
+    try oldCoordinator.services.eventStore.appendStructural(
+      .closeRecording(
+        oldRecording,
+        wallMilliseconds: fixtureWallMilliseconds + 2,
+        monotonicNanoseconds: 4_000
+      )
+    )
+
+    let newRuntimeLogicalID = UUID()
+    let newDeviceLogicalID = UUID()
+    let newCoordinator = try ViewerStoreCoordinator(paths: makePaths())
+    let newRecording = try newCoordinator.services.eventStore.beginRecording(
+      logicalID: newRuntimeLogicalID,
+      wallMilliseconds: fixtureWallMilliseconds + 10,
+      monotonicNanoseconds: 6_000,
+      reason: "new-rematerialization-store"
+    )
+    let newDevice = try newCoordinator.services.eventStore.beginDeviceSession(
+      recording: newRecording,
+      installationID: "new-rematerialization-device",
+      logicalID: newDeviceLogicalID,
+      wallMilliseconds: fixtureWallMilliseconds + 10,
+      monotonicNanoseconds: 6_000,
+      partialHistory: false,
+      displayName: "New Rematerialization Device"
+    )
+    try newCoordinator.services.eventStore.appendStructural(
+      .closeDevice(
+        newDevice,
+        wallMilliseconds: fixtureWallMilliseconds + 11,
+        monotonicNanoseconds: 7_000
+      )
+    )
+    try newCoordinator.services.eventStore.appendStructural(
+      .closeRecording(
+        newRecording,
+        wallMilliseconds: fixtureWallMilliseconds + 12,
+        monotonicNanoseconds: 8_000
+      )
+    )
+    XCTAssertEqual(oldRecording.rowID, newRecording.rowID)
+    XCTAssertEqual(oldDevice.rowID, newDevice.rowID)
+
+    let operationGate = ArmableViewerExecutionGate()
+    let gateway = ViewerStoreExplorerGateway(operationExecutionGate: { operationGate.run() })
+    gateway.install(oldCoordinator)
+    let oldCatalog: ViewerRecordingCatalogPage = try explorerValue(
+      "Load predecessor rematerialization catalog"
+    ) {
+      gateway.loadRecordingCatalog(cursor: nil, completion: $0)
+    }
+    XCTAssertEqual(oldCatalog.rows.first?.logicalID, oldRuntimeLogicalID)
+    let oldDeviceCatalog: ViewerDeviceCatalogPage = try explorerValue(
+      "Load predecessor rematerialization devices"
+    ) {
+      gateway.loadDeviceCatalog(recordingID: oldRecording.rowID, cursor: nil, completion: $0)
+    }
+    XCTAssertEqual(oldDeviceCatalog.rows.first?.logicalID, oldDeviceLogicalID)
+    let controller = ViewerEventExplorerController(
+      inputs: ViewerRuntimeExplorerInputs(
+        runtimeLogicalID: viewerRuntimeLogicalID,
+        storeGateway: gateway,
+        liveObservations: ViewerLiveEventWindow(runtimeLogicalID: viewerRuntimeLogicalID)
+      )
+    )
+    controller.start()
+    for _ in 0..<2_000 {
+      if controller.pendingCleanupWorkCount == 0 && !controller.model.recordingRows.isEmpty {
+        break
+      }
+      try await Task.sleep(nanoseconds: 1_000_000)
+    }
+    XCTAssertEqual(controller.model.recordingRows.first?.logicalID, oldRuntimeLogicalID)
+    controller.selectSource(
+      .historical(recordingID: oldRecording.rowID, recordingLogicalID: oldRuntimeLogicalID)
+    )
+    for _ in 0..<2_000 {
+      if controller.pendingCleanupWorkCount == 0 && !controller.deviceRows.isEmpty { break }
+      try await Task.sleep(nanoseconds: 1_000_000)
+    }
+    XCTAssertEqual(controller.deviceRows.first?.id, oldDeviceLogicalID)
+    controller.toggleDevice(oldDeviceLogicalID)
+    let predecessorSelection = controller.performanceTargetSelection()
+    guard case .target(let oldTarget) = predecessorSelection else {
+      return XCTFail(
+        "Expected the predecessor Store target before replacement; got \(predecessorSelection), "
+          + "recordings=\(controller.model.recordingRows), devices=\(controller.model.deviceRows), "
+          + "selectedDevices=\(controller.selectedDeviceIDs)"
+      )
+    }
+    XCTAssertEqual(oldTarget.storeIdentity.recordingID, oldRecording.rowID)
+    XCTAssertEqual(oldTarget.storeIdentity.deviceSessionID, oldDevice.rowID)
+
+    gateway.install(newCoordinator)
+    operationGate.arm()
+    let rematerialization = controller.rematerializeAfterStoreReplacement()
+    XCTAssertEqual(operationGate.waitUntilBlocked(), .success)
+    guard case .guidance = controller.performanceTargetSelection() else {
+      return XCTFail("Predecessor row identity remained selectable during rematerialization")
+    }
+    let completionCount = LockedCounter()
+    let completionObserver = Task {
+      await rematerialization.value
+      completionCount.increment()
+    }
+    await Task.yield()
+    XCTAssertEqual(completionCount.value, 0)
+
+    operationGate.release()
+    await completionObserver.value
+    XCTAssertEqual(completionCount.value, 1)
+    XCTAssertEqual(controller.model.recordingRows.first?.logicalID, newRuntimeLogicalID)
+    XCTAssertEqual(controller.model.deviceRows.first?.logicalID, nil)
+    XCTAssertEqual(
+      controller.selectedSourceID,
+      .current(runtimeLogicalID: viewerRuntimeLogicalID)
+    )
+    XCTAssertTrue(controller.selectedDeviceIDs.isEmpty)
+    guard case .guidance = controller.performanceTargetSelection() else {
+      return XCTFail("Replacement row identity became a selectable performance target")
+    }
+    XCTAssertEqual(controller.pendingCleanupWorkCount, 0)
+
+    await controller.sealAndClear().value
+    gateway.sealAndWait(originatingFrom: newCoordinator)
+    oldCoordinator.closeStorage()
+    newCoordinator.closeStorage()
+  }
+
+  @MainActor
+  func testStoreRematerializationUsesExactLogicalIdentityWithoutBroadeningMissingDevice()
+    async throws
+  {
+    let wallMilliseconds = Int64(Date().timeIntervalSince1970 * 1_000)
+    let viewerRuntimeLogicalID = UUID()
+    let recordingLogicalID = UUID()
+    let missingDeviceLogicalID = UUID()
+    let oldCoordinator = try ViewerStoreCoordinator(paths: makePaths())
+    let oldRecording = try oldCoordinator.services.eventStore.beginRecording(
+      logicalID: recordingLogicalID,
+      wallMilliseconds: wallMilliseconds,
+      monotonicNanoseconds: 1_000,
+      reason: "exact-rematerialization-old"
+    )
+    let oldDevice = try oldCoordinator.services.eventStore.beginDeviceSession(
+      recording: oldRecording,
+      installationID: "exact-rematerialization-old-device",
+      logicalID: missingDeviceLogicalID,
+      wallMilliseconds: wallMilliseconds,
+      monotonicNanoseconds: 1_000,
+      partialHistory: false,
+      displayName: "Missing after replacement"
+    )
+    try oldCoordinator.services.eventStore.appendStructural(
+      .closeDevice(
+        oldDevice,
+        wallMilliseconds: wallMilliseconds + 1,
+        monotonicNanoseconds: 2_000
+      )
+    )
+    try oldCoordinator.services.eventStore.appendStructural(
+      .closeRecording(
+        oldRecording,
+        wallMilliseconds: wallMilliseconds + 2,
+        monotonicNanoseconds: 3_000
+      )
+    )
+
+    let replacementCoordinator = try ViewerStoreCoordinator(paths: makePaths())
+    let replacementRecording = try replacementCoordinator.services.eventStore.beginRecording(
+      logicalID: recordingLogicalID,
+      wallMilliseconds: wallMilliseconds + 10,
+      monotonicNanoseconds: 10_000,
+      reason: "exact-rematerialization-replacement"
+    )
+    let reusedRowDeviceLogicalID = UUID()
+    let reusedRowDevice = try replacementCoordinator.services.eventStore.beginDeviceSession(
+      recording: replacementRecording,
+      installationID: "exact-rematerialization-reused-device",
+      logicalID: reusedRowDeviceLogicalID,
+      wallMilliseconds: wallMilliseconds + 10,
+      monotonicNanoseconds: 10_000,
+      partialHistory: false,
+      displayName: "Replacement row owner"
+    )
+    try replacementCoordinator.services.eventStore.appendStructural(
+      .closeDevice(
+        reusedRowDevice,
+        wallMilliseconds: wallMilliseconds + 11,
+        monotonicNanoseconds: 11_000
+      )
+    )
+    for index in 0..<100 {
+      let device = try replacementCoordinator.services.eventStore.beginDeviceSession(
+        recording: replacementRecording,
+        installationID: "exact-rematerialization-device-\(index)",
+        logicalID: UUID(),
+        wallMilliseconds: wallMilliseconds + 20 + Int64(index),
+        monotonicNanoseconds: 20_000 + UInt64(index),
+        partialHistory: false,
+        displayName: "Replacement Device \(index)"
+      )
+      try replacementCoordinator.services.eventStore.appendStructural(
+        .closeDevice(
+          device,
+          wallMilliseconds: wallMilliseconds + 21 + Int64(index),
+          monotonicNanoseconds: 21_000 + UInt64(index)
+        )
+      )
+    }
+    try replacementCoordinator.services.eventStore.appendStructural(
+      .closeRecording(
+        replacementRecording,
+        wallMilliseconds: wallMilliseconds + 200,
+        monotonicNanoseconds: 200_000
+      )
+    )
+    for index in 0..<50 {
+      let recording = try replacementCoordinator.services.eventStore.beginRecording(
+        logicalID: UUID(),
+        wallMilliseconds: wallMilliseconds + 300 + Int64(index),
+        monotonicNanoseconds: 300_000 + UInt64(index),
+        reason: "newer-rematerialization-recording-\(index)"
+      )
+      try replacementCoordinator.services.eventStore.appendStructural(
+        .closeRecording(
+          recording,
+          wallMilliseconds: wallMilliseconds + 301 + Int64(index),
+          monotonicNanoseconds: 301_000 + UInt64(index)
+        )
+      )
+    }
+    XCTAssertEqual(oldRecording.rowID, replacementRecording.rowID)
+    XCTAssertEqual(oldDevice.rowID, reusedRowDevice.rowID)
+
+    let operationGate = ArmableViewerExecutionGate()
+    let gateway = ViewerStoreExplorerGateway(operationExecutionGate: { operationGate.run() })
+    gateway.install(oldCoordinator)
+    let controller = ViewerEventExplorerController(
+      inputs: ViewerRuntimeExplorerInputs(
+        runtimeLogicalID: viewerRuntimeLogicalID,
+        storeGateway: gateway,
+        liveObservations: ViewerLiveEventWindow(runtimeLogicalID: viewerRuntimeLogicalID)
+      )
+    )
+    controller.start()
+    for _ in 0..<2_000 {
+      if controller.pendingCleanupWorkCount == 0 && !controller.model.recordingRows.isEmpty {
+        break
+      }
+      try await Task.sleep(nanoseconds: 1_000_000)
+    }
+    controller.selectSource(
+      .historical(
+        recordingID: oldRecording.rowID,
+        recordingLogicalID: recordingLogicalID
+      )
+    )
+    for _ in 0..<2_000 {
+      if controller.pendingCleanupWorkCount == 0 && !controller.deviceRows.isEmpty { break }
+      try await Task.sleep(nanoseconds: 1_000_000)
+    }
+    XCTAssertFalse(
+      controller.deviceRows.isEmpty,
+      "Predecessor devices did not materialize before exact rematerialization."
+    )
+    controller.toggleDevice(missingDeviceLogicalID)
+    XCTAssertEqual(controller.selectedDeviceIDs, [missingDeviceLogicalID])
+    guard case .target = controller.performanceTargetSelection() else {
+      return XCTFail("Expected the predecessor device to be selectable before replacement")
+    }
+
+    gateway.install(replacementCoordinator)
+    operationGate.arm(blockingCall: 5)
+    let rematerialization = controller.rematerializeAfterStoreReplacement()
+    let firstDeviceCatalogBlocked = await operationGate.waitUntilBlockedAsync()
+    XCTAssertEqual(firstDeviceCatalogBlocked, .success)
+    XCTAssertEqual(operationGate.value, 5)
+    XCTAssertEqual(controller.selectedDeviceIDs, [missingDeviceLogicalID])
+    XCTAssertFalse(controller.usesAllDevices)
+    guard case .guidance = controller.performanceTargetSelection() else {
+      return XCTFail("A reused replacement row became an authorized performance target")
+    }
+    let replacementCatalog = try replacementCoordinator.services.catalog.recordingPage(
+      storeGeneration: gateway.currentStoreGeneration,
+      cursor: nil,
+      limit: 100
+    )
+    let replacementRow = try XCTUnwrap(
+      replacementCatalog.rows.first { $0.logicalID == recordingLogicalID }
+    )
+    _ = try replacementCoordinator.services.maintenance.updateRecording(
+      ViewerRecordingRevision(
+        recordingID: replacementRecording.rowID,
+        revision: replacementRow.revision
+      ),
+      name: "Changed between catalog phases",
+      note: nil,
+      pinned: false,
+      wallMilliseconds: wallMilliseconds + 500
+    )
+    let completionCount = LockedCounter()
+    let completionObserver = Task {
+      await rematerialization.value
+      completionCount.increment()
+    }
+    await Task.yield()
+    XCTAssertEqual(completionCount.value, 0)
+
+    operationGate.release()
+    await completionObserver.value
+    XCTAssertEqual(completionCount.value, 1)
+    XCTAssertEqual(
+      controller.selectedSourceID,
+      .historical(
+        recordingID: replacementRecording.rowID,
+        recordingLogicalID: recordingLogicalID
+      )
+    )
+    XCTAssertEqual(controller.selectedRecordingRow?.logicalID, recordingLogicalID)
+    XCTAssertEqual(controller.selectedRecordingRow?.name, "Changed between catalog phases")
+    XCTAssertGreaterThan(operationGate.value, 6)
+    XCTAssertFalse(
+      controller.model.recordingRows.prefix(50).contains { row in
+        row.logicalID == recordingLogicalID
+      })
+    XCTAssertEqual(controller.selectedDeviceIDs, [missingDeviceLogicalID])
+    XCTAssertFalse(controller.usesAllDevices)
+    XCTAssertFalse(
+      controller.model.deviceRows.contains { row in
+        row.logicalID == missingDeviceLogicalID
+      })
+    XCTAssertNil(controller.model.compiledInputs?.durableQuery)
+    guard case .guidance = controller.performanceTargetSelection() else {
+      return XCTFail("A missing logical device broadened the replacement scope")
+    }
+    XCTAssertEqual(controller.pendingCleanupWorkCount, 0)
+
+    await controller.sealAndClear().value
+    gateway.sealAndWait(originatingFrom: replacementCoordinator)
+    oldCoordinator.closeStorage()
+    replacementCoordinator.closeStorage()
+  }
+
+  @MainActor
+  func testStoreRematerializationFailurePublishesTerminalStateAndPreservesExplicitScope()
+    async throws
+  {
+    let coordinator = try ViewerStoreCoordinator(paths: makePaths())
+    let viewerRuntimeLogicalID = UUID()
+    let historicalLogicalID = UUID()
+    let historicalDeviceLogicalID = UUID()
+    let wallMilliseconds = Int64(Date().timeIntervalSince1970 * 1_000)
+    let historicalRecording = try coordinator.services.eventStore.beginRecording(
+      logicalID: historicalLogicalID,
+      wallMilliseconds: wallMilliseconds,
+      monotonicNanoseconds: 2_000,
+      reason: "failed-rematerialization"
+    )
+    let historicalDevice = try coordinator.services.eventStore.beginDeviceSession(
+      recording: historicalRecording,
+      installationID: "failed-rematerialization-device",
+      logicalID: historicalDeviceLogicalID,
+      wallMilliseconds: wallMilliseconds,
+      monotonicNanoseconds: 2_000,
+      partialHistory: false,
+      displayName: "Fail-closed device"
+    )
+    try coordinator.services.eventStore.appendStructural(
+      .closeDevice(
+        historicalDevice,
+        wallMilliseconds: wallMilliseconds + 1,
+        monotonicNanoseconds: 2_001
+      )
+    )
+    try coordinator.services.eventStore.appendStructural(
+      .closeRecording(
+        historicalRecording,
+        wallMilliseconds: wallMilliseconds + 2,
+        monotonicNanoseconds: 2_002
+      )
+    )
+    for index in 0..<55 {
+      let recording = try coordinator.services.eventStore.beginRecording(
+        logicalID: UUID(),
+        wallMilliseconds: wallMilliseconds + 10 + Int64(index),
+        monotonicNanoseconds: 3_000 + UInt64(index),
+        reason: "failed-rematerialization-paging-\(index)"
+      )
+      try coordinator.services.eventStore.appendStructural(
+        .closeRecording(
+          recording,
+          wallMilliseconds: wallMilliseconds + 11 + Int64(index),
+          monotonicNanoseconds: 4_000 + UInt64(index)
+        )
+      )
+    }
+    let reusedCoordinator = try ViewerStoreCoordinator(paths: makePaths())
+    let reusedLogicalID = UUID()
+    let reusedRecording = try reusedCoordinator.services.eventStore.beginRecording(
+      logicalID: reusedLogicalID,
+      wallMilliseconds: wallMilliseconds + 100,
+      monotonicNanoseconds: 10_000,
+      reason: "failed-rematerialization-reused-row"
+    )
+    try reusedCoordinator.services.eventStore.appendStructural(
+      .closeRecording(
+        reusedRecording,
+        wallMilliseconds: wallMilliseconds + 101,
+        monotonicNanoseconds: 10_001
+      )
+    )
+    XCTAssertEqual(historicalRecording.rowID, reusedRecording.rowID)
+    let gateway = ViewerStoreExplorerGateway()
+    gateway.install(coordinator)
+    let controller = ViewerEventExplorerController(
+      inputs: ViewerRuntimeExplorerInputs(
+        runtimeLogicalID: viewerRuntimeLogicalID,
+        storeGateway: gateway,
+        liveObservations: ViewerLiveEventWindow(runtimeLogicalID: viewerRuntimeLogicalID)
+      )
+    )
+    controller.start()
+    for _ in 0..<2_000 {
+      if controller.pendingCleanupWorkCount == 0 && controller.hasOlderRecordings {
+        break
+      }
+      try await Task.sleep(nanoseconds: 1_000_000)
+    }
+    XCTAssertTrue(controller.hasOlderRecordings)
+    controller.loadOlderRecordings()
+    for _ in 0..<2_000 {
+      if controller.pendingCleanupWorkCount == 0,
+        controller.model.recordingRows.contains(where: { $0.logicalID == historicalLogicalID })
+      {
+        break
+      }
+      try await Task.sleep(nanoseconds: 1_000_000)
+    }
+    XCTAssertTrue(
+      controller.model.recordingRows.contains { $0.logicalID == historicalLogicalID }
+    )
+    controller.selectSource(
+      .historical(
+        recordingID: historicalRecording.rowID,
+        recordingLogicalID: historicalLogicalID
+      )
+    )
+    for _ in 0..<2_000 {
+      if controller.pendingCleanupWorkCount == 0 && !controller.deviceRows.isEmpty { break }
+      try await Task.sleep(nanoseconds: 1_000_000)
+    }
+    XCTAssertFalse(
+      controller.deviceRows.isEmpty,
+      "Historical devices did not materialize before the failure test."
+    )
+    controller.toggleDevice(historicalDeviceLogicalID)
+    XCTAssertEqual(controller.selectedDeviceIDs, [historicalDeviceLogicalID])
+    guard case .target = controller.performanceTargetSelection() else {
+      return XCTFail("Expected an explicit historical target before Store failure")
+    }
+
+    gateway.sealAndWait(originatingFrom: coordinator)
+    let completionCount = LockedCounter()
+    let rematerialization = controller.rematerializeAfterStoreReplacement()
+    XCTAssertTrue(controller.model.recordingRows.isEmpty)
+    XCTAssertNil(controller.selectedRecordingRow)
+    guard case .guidance = controller.performanceTargetSelection() else {
+      return XCTFail("Predecessor identity survived failed Store rematerialization")
+    }
+    let completionObserver = Task {
+      await rematerialization.value
+      completionCount.increment()
+    }
+    await completionObserver.value
+
+    XCTAssertEqual(completionCount.value, 1)
+    XCTAssertEqual(controller.recordingsState, .empty)
+    XCTAssertEqual(controller.devicesState, .empty)
+    XCTAssertTrue(controller.model.recordingRows.isEmpty)
+    XCTAssertTrue(controller.model.deviceRows.isEmpty)
+    XCTAssertNil(controller.model.compiledInputs?.durableQuery)
+    XCTAssertEqual(
+      controller.selectedSourceID,
+      .historical(
+        recordingID: historicalRecording.rowID,
+        recordingLogicalID: historicalLogicalID
+      )
+    )
+    XCTAssertEqual(controller.selectedDeviceIDs, [historicalDeviceLogicalID])
+    XCTAssertFalse(controller.usesAllDevices)
+    guard case .guidance = controller.performanceTargetSelection() else {
+      return XCTFail("Failed rematerialization retained an executable stale Store target")
+    }
+    XCTAssertFalse(controller.canManageSelectedRecording)
+    controller.clearFilter()
+    XCTAssertNil(controller.model.compiledInputs)
+    XCTAssertEqual(controller.selectedDeviceIDs, [historicalDeviceLogicalID])
+    controller.selectAllDevices()
+    XCTAssertNil(controller.model.compiledInputs)
+    XCTAssertTrue(controller.usesAllDevices)
+
+    gateway.install(coordinator)
+    controller.noteStoreChanged()
+    for _ in 0..<2_000 {
+      if controller.pendingCleanupWorkCount == 0 && controller.hasOlderRecordings { break }
+      try await Task.sleep(nanoseconds: 1_000_000)
+    }
+    XCTAssertTrue(controller.hasOlderRecordings)
+    XCTAssertNil(controller.selectedRecordingRow)
+    XCTAssertFalse(controller.canManageSelectedRecording)
+    XCTAssertNil(controller.model.compiledInputs)
+    controller.loadOlderRecordings()
+    for _ in 0..<2_000 {
+      if controller.pendingCleanupWorkCount == 0,
+        controller.model.recordingRows.contains(where: { $0.logicalID == historicalLogicalID })
+      {
+        break
+      }
+      try await Task.sleep(nanoseconds: 1_000_000)
+    }
+    XCTAssertTrue(
+      controller.model.recordingRows.contains { $0.logicalID == historicalLogicalID }
+    )
+    XCTAssertNil(controller.selectedRecordingRow)
+    XCTAssertFalse(controller.canManageSelectedRecording)
+    XCTAssertNil(controller.model.compiledInputs)
+    let workBeforeDevicePaging = controller.pendingCleanupWorkCount
+    controller.loadOlderDevices()
+    for _ in 0..<100 { await Task.yield() }
+    XCTAssertEqual(controller.pendingCleanupWorkCount, workBeforeDevicePaging)
+    controller.updateSelectedRecording(name: "Must not reach Store", note: nil, pinned: false)
+    XCTAssertEqual(controller.recordingOperationState, .failed(.unavailable))
+    XCTAssertEqual(controller.pendingCleanupWorkCount, 0)
+    guard case .guidance = controller.performanceTargetSelection() else {
+      return XCTFail("Ordinary paging restored failed historical authority")
+    }
+
+    gateway.install(reusedCoordinator)
+    controller.noteStoreChanged()
+    for _ in 0..<2_000 {
+      if controller.pendingCleanupWorkCount == 0,
+        controller.model.recordingRows.contains(where: { $0.logicalID == reusedLogicalID })
+      {
+        break
+      }
+      try await Task.sleep(nanoseconds: 1_000_000)
+    }
+    XCTAssertTrue(
+      controller.model.recordingRows.contains { row in
+        row.rowID == historicalRecording.rowID && row.logicalID == reusedLogicalID
+      }
+    )
+    XCTAssertNil(controller.selectedRecordingRow)
+    XCTAssertFalse(controller.canManageSelectedRecording)
+    XCTAssertNil(controller.model.compiledInputs)
+    guard case .guidance = controller.performanceTargetSelection() else {
+      return XCTFail("Reused numeric row ID restored failed historical authority")
+    }
+
+    controller.selectSource(.current(runtimeLogicalID: viewerRuntimeLogicalID))
+    XCTAssertNil(controller.model.compiledInputs?.durableQuery)
+    XCTAssertNotNil(controller.model.compiledInputs?.liveRequest)
+    XCTAssertNil(controller.model.materializationSnapshot?.recordingID)
+    XCTAssertTrue(
+      controller.model.materializationSnapshot?.deviceSessionIDsByLogicalID.isEmpty == true)
+    XCTAssertEqual(controller.pendingCleanupWorkCount, 0)
+
+    await controller.sealAndClear().value
+    gateway.sealAndWait(originatingFrom: reusedCoordinator)
+    coordinator.closeStorage()
+    reusedCoordinator.closeStorage()
+  }
+
+  @MainActor
+  func testStoreRematerializationClearsPartialCatalogAuthorityAfterDevicePhaseFailure()
+    async throws
+  {
+    let wallMilliseconds = Int64(Date().timeIntervalSince1970 * 1_000)
+    let viewerRuntimeLogicalID = UUID()
+    let historicalLogicalID = UUID()
+    let historicalDeviceLogicalID = UUID()
+    let coordinator = try ViewerStoreCoordinator(paths: makePaths())
+    let historicalRecording = try coordinator.services.eventStore.beginRecording(
+      logicalID: historicalLogicalID,
+      wallMilliseconds: wallMilliseconds,
+      monotonicNanoseconds: 1_000,
+      reason: "partial-catalog-failure"
+    )
+    let historicalDevice = try coordinator.services.eventStore.beginDeviceSession(
+      recording: historicalRecording,
+      installationID: "partial-catalog-failure-device",
+      logicalID: historicalDeviceLogicalID,
+      wallMilliseconds: wallMilliseconds,
+      monotonicNanoseconds: 1_000,
+      partialHistory: false,
+      displayName: "Partial catalog device"
+    )
+    try coordinator.services.eventStore.appendStructural(
+      .closeDevice(
+        historicalDevice,
+        wallMilliseconds: wallMilliseconds + 1,
+        monotonicNanoseconds: 2_000
+      )
+    )
+    try coordinator.services.eventStore.appendStructural(
+      .closeRecording(
+        historicalRecording,
+        wallMilliseconds: wallMilliseconds + 2,
+        monotonicNanoseconds: 3_000
+      )
+    )
+
+    let deviceCatalogFault = OneShotViewerStoreFault()
+    let gateway = ViewerStoreExplorerGateway()
+    gateway.install(coordinator)
+    let contentDriver = ViewerExplorerContentDriver(
+      gateway: gateway,
+      loadDeviceCatalog: {
+        recordingID, recordingSnapshot, cursor, direction, limit, completion in
+        let submittedRecordingID: Int64
+        do {
+          try deviceCatalogFault.check()
+          submittedRecordingID = recordingID
+        } catch {
+          submittedRecordingID = 0
+        }
+        return gateway.loadDeviceCatalog(
+          recordingID: submittedRecordingID,
+          recordingSnapshot: recordingSnapshot,
+          cursor: cursor,
+          direction: direction,
+          limit: limit,
+          completion: completion
+        )
+      }
+    )
+    let controller = ViewerEventExplorerController(
+      inputs: ViewerRuntimeExplorerInputs(
+        runtimeLogicalID: viewerRuntimeLogicalID,
+        storeGateway: gateway,
+        liveObservations: ViewerLiveEventWindow(runtimeLogicalID: viewerRuntimeLogicalID)
+      ),
+      contentDriver: contentDriver
+    )
+    controller.start()
+    for _ in 0..<2_000 {
+      if controller.pendingCleanupWorkCount == 0 && !controller.model.recordingRows.isEmpty {
+        break
+      }
+      try await Task.sleep(nanoseconds: 1_000_000)
+    }
+    controller.selectSource(
+      .historical(
+        recordingID: historicalRecording.rowID,
+        recordingLogicalID: historicalLogicalID
+      )
+    )
+    for _ in 0..<2_000 {
+      if controller.pendingCleanupWorkCount == 0 && !controller.deviceRows.isEmpty { break }
+      try await Task.sleep(nanoseconds: 1_000_000)
+    }
+    controller.toggleDevice(historicalDeviceLogicalID)
+    guard case .target = controller.performanceTargetSelection() else {
+      return XCTFail("Expected the predecessor historical target before partial failure")
+    }
+
+    deviceCatalogFault.failNext()
+    await controller.rematerializeAfterStoreReplacement().value
+    XCTAssertEqual(deviceCatalogFault.failureCount, 1)
+
+    XCTAssertTrue(controller.model.recordingRows.isEmpty)
+    XCTAssertTrue(controller.model.deviceRows.isEmpty)
+    XCTAssertNil(controller.deviceCatalogRecordingID)
+    XCTAssertNil(controller.model.compiledInputs)
+    XCTAssertFalse(controller.canManageSelectedRecording)
+    XCTAssertEqual(
+      controller.selectedSourceID,
+      .historical(
+        recordingID: historicalRecording.rowID,
+        recordingLogicalID: historicalLogicalID
+      )
+    )
+    XCTAssertEqual(controller.selectedDeviceIDs, [historicalDeviceLogicalID])
+    controller.clearFilter()
+    XCTAssertNil(controller.model.compiledInputs)
+    guard case .guidance = controller.performanceTargetSelection() else {
+      return XCTFail("Partial catalog failure retained executable replacement authority")
+    }
+    XCTAssertEqual(controller.pendingCleanupWorkCount, 0)
+    XCTAssertEqual(gateway.operationCountForTesting, 0)
+
+    await controller.sealAndClear().value
+    gateway.sealAndWait(originatingFrom: coordinator)
+    coordinator.closeStorage()
+  }
+
+  @MainActor
+  func testStoreRematerializationClearsCommittedDevicePageAfterExactIdentityFailure()
+    async throws
+  {
+    let wallMilliseconds = Int64(Date().timeIntervalSince1970 * 1_000)
+    let viewerRuntimeLogicalID = UUID()
+    let historicalLogicalID = UUID()
+    let selectedDeviceLogicalID = UUID()
+    let coordinator = try ViewerStoreCoordinator(paths: makePaths())
+    let historicalRecording = try coordinator.services.eventStore.beginRecording(
+      logicalID: historicalLogicalID,
+      wallMilliseconds: wallMilliseconds,
+      monotonicNanoseconds: 1_000,
+      reason: "exact-device-failure"
+    )
+    let selectedDevice = try coordinator.services.eventStore.beginDeviceSession(
+      recording: historicalRecording,
+      installationID: "exact-device-failure-selected",
+      logicalID: selectedDeviceLogicalID,
+      wallMilliseconds: wallMilliseconds,
+      monotonicNanoseconds: 1_000,
+      partialHistory: false,
+      displayName: "Exact identity device"
+    )
+    try coordinator.services.eventStore.appendStructural(
+      .closeDevice(
+        selectedDevice,
+        wallMilliseconds: wallMilliseconds + 1,
+        monotonicNanoseconds: 2_000
+      )
+    )
+    for index in 0..<100 {
+      let device = try coordinator.services.eventStore.beginDeviceSession(
+        recording: historicalRecording,
+        installationID: "exact-device-failure-\(index)",
+        logicalID: UUID(),
+        wallMilliseconds: wallMilliseconds + 10 + Int64(index),
+        monotonicNanoseconds: 3_000 + UInt64(index),
+        partialHistory: false,
+        displayName: "Exact identity page \(index)"
+      )
+      try coordinator.services.eventStore.appendStructural(
+        .closeDevice(
+          device,
+          wallMilliseconds: wallMilliseconds + 11 + Int64(index),
+          monotonicNanoseconds: 4_000 + UInt64(index)
+        )
+      )
+    }
+    try coordinator.services.eventStore.appendStructural(
+      .closeRecording(
+        historicalRecording,
+        wallMilliseconds: wallMilliseconds + 200,
+        monotonicNanoseconds: 10_000
+      )
+    )
+
+    let identityFault = OneShotViewerStoreFault()
+    let gateway = ViewerStoreExplorerGateway()
+    gateway.install(coordinator)
+    let contentDriver = ViewerExplorerContentDriver(
+      gateway: gateway,
+      loadDeviceIdentities: {
+        recordingID, logicalIDs, snapshot, completion in
+        let submittedRecordingID: Int64
+        do {
+          try identityFault.check()
+          submittedRecordingID = recordingID
+        } catch {
+          submittedRecordingID = 0
+        }
+        return gateway.loadDeviceIdentities(
+          recordingID: submittedRecordingID,
+          logicalIDs: logicalIDs,
+          snapshot: snapshot,
+          completion: completion
+        )
+      }
+    )
+    let controller = ViewerEventExplorerController(
+      inputs: ViewerRuntimeExplorerInputs(
+        runtimeLogicalID: viewerRuntimeLogicalID,
+        storeGateway: gateway,
+        liveObservations: ViewerLiveEventWindow(runtimeLogicalID: viewerRuntimeLogicalID)
+      ),
+      contentDriver: contentDriver
+    )
+    controller.start()
+    for _ in 0..<2_000 {
+      if controller.pendingCleanupWorkCount == 0 && !controller.model.recordingRows.isEmpty {
+        break
+      }
+      try await Task.sleep(nanoseconds: 1_000_000)
+    }
+    controller.selectSource(
+      .historical(
+        recordingID: historicalRecording.rowID,
+        recordingLogicalID: historicalLogicalID
+      )
+    )
+    for _ in 0..<2_000 {
+      if controller.pendingCleanupWorkCount == 0 && controller.model.deviceRows.count == 100 {
+        break
+      }
+      try await Task.sleep(nanoseconds: 1_000_000)
+    }
+    XCTAssertEqual(controller.model.deviceRows.count, 100)
+    XCTAssertFalse(
+      controller.model.deviceRows.contains { $0.logicalID == selectedDeviceLogicalID }
+    )
+    XCTAssertTrue(controller.hasOlderDevices)
+    controller.loadOlderDevices()
+    for _ in 0..<2_000 {
+      if controller.pendingCleanupWorkCount == 0 && controller.model.deviceRows.count == 101 {
+        break
+      }
+      try await Task.sleep(nanoseconds: 1_000_000)
+    }
+    XCTAssertEqual(controller.model.deviceRows.count, 101)
+    controller.toggleDevice(selectedDeviceLogicalID)
+    XCTAssertEqual(controller.selectedDeviceIDs, [selectedDeviceLogicalID])
+    guard case .target = controller.performanceTargetSelection() else {
+      return XCTFail("Expected the paged predecessor device to be selectable")
+    }
+
+    identityFault.failNext()
+    await controller.rematerializeAfterStoreReplacement().value
+    XCTAssertEqual(identityFault.failureCount, 1)
+    XCTAssertTrue(controller.model.recordingRows.isEmpty)
+    XCTAssertTrue(controller.model.deviceRows.isEmpty)
+    XCTAssertNil(controller.deviceCatalogRecordingID)
+    XCTAssertNil(controller.selectedRecordingRow)
+    XCTAssertNil(controller.model.compiledInputs)
+    XCTAssertFalse(controller.canManageSelectedRecording)
+    XCTAssertEqual(controller.selectedDeviceIDs, [selectedDeviceLogicalID])
+    guard case .guidance = controller.performanceTargetSelection() else {
+      return XCTFail("Exact-device failure retained partial device authority")
+    }
+    XCTAssertEqual(controller.pendingCleanupWorkCount, 0)
+    XCTAssertEqual(gateway.operationCountForTesting, 0)
+
+    await controller.sealAndClear().value
+    gateway.sealAndWait(originatingFrom: coordinator)
+    coordinator.closeStorage()
+  }
+
+  @MainActor
+  func testStoreRematerializationDevicePhaseSwitchToLiveCompletesReceiptAndSuccessor()
+    async throws
+  {
+    let wallMilliseconds = Int64(Date().timeIntervalSince1970 * 1_000)
+    let viewerRuntimeLogicalID = UUID()
+    let historicalLogicalID = UUID()
+    let routedUserRematerializations = LockedCounter()
+    let coordinator = try ViewerStoreCoordinator(paths: makePaths())
+    let historicalRecording = try coordinator.services.eventStore.beginRecording(
+      logicalID: historicalLogicalID,
+      wallMilliseconds: wallMilliseconds,
+      monotonicNanoseconds: 1_000,
+      reason: "device-phase-live-switch"
+    )
+    let historicalDevice = try coordinator.services.eventStore.beginDeviceSession(
+      recording: historicalRecording,
+      installationID: "device-phase-live-switch",
+      logicalID: UUID(),
+      wallMilliseconds: wallMilliseconds,
+      monotonicNanoseconds: 1_000,
+      partialHistory: false,
+      displayName: "Pending device"
+    )
+    try coordinator.services.eventStore.appendStructural(
+      .closeDevice(
+        historicalDevice,
+        wallMilliseconds: wallMilliseconds + 1,
+        monotonicNanoseconds: 2_000
+      )
+    )
+    try coordinator.services.eventStore.appendStructural(
+      .closeRecording(
+        historicalRecording,
+        wallMilliseconds: wallMilliseconds + 2,
+        monotonicNanoseconds: 3_000
+      )
+    )
+
+    let deviceCompletionGate = ArmableViewerExecutionGate()
+    let gateway = ViewerStoreExplorerGateway()
+    gateway.install(coordinator)
+    let contentDriver = ViewerExplorerContentDriver(
+      gateway: gateway,
+      loadDeviceCatalog: {
+        recordingID, recordingSnapshot, cursor, direction, limit, completion in
+        gateway.loadDeviceCatalog(
+          recordingID: recordingID,
+          recordingSnapshot: recordingSnapshot,
+          cursor: cursor,
+          direction: direction,
+          limit: limit
+        ) { result in
+          deviceCompletionGate.run()
+          completion(result)
+        }
+      }
+    )
+    let controller = ViewerEventExplorerController(
+      inputs: ViewerRuntimeExplorerInputs(
+        runtimeLogicalID: viewerRuntimeLogicalID,
+        storeGateway: gateway,
+        liveObservations: ViewerLiveEventWindow(runtimeLogicalID: viewerRuntimeLogicalID)
+      ),
+      contentDriver: contentDriver
+    )
+    controller.setAnalysisRematerializationHandler { _ in
+      routedUserRematerializations.increment()
+    }
+    controller.start()
+    for _ in 0..<2_000 {
+      if controller.pendingCleanupWorkCount == 0 && !controller.model.recordingRows.isEmpty {
+        break
+      }
+      try await Task.sleep(nanoseconds: 1_000_000)
+    }
+    controller.selectSource(
+      .historical(
+        recordingID: historicalRecording.rowID,
+        recordingLogicalID: historicalLogicalID
+      )
+    )
+    for _ in 0..<2_000 {
+      if controller.pendingCleanupWorkCount == 0 && !controller.model.deviceRows.isEmpty { break }
+      try await Task.sleep(nanoseconds: 1_000_000)
+    }
+    XCTAssertFalse(controller.model.deviceRows.isEmpty)
+
+    deviceCompletionGate.arm()
+    let rematerialization = controller.rematerializeAfterStoreReplacement()
+    let deviceCatalogBlocked = await deviceCompletionGate.waitUntilBlockedAsync()
+    XCTAssertEqual(deviceCatalogBlocked, .success)
+    XCTAssertEqual(deviceCompletionGate.value, 1)
+    controller.noteStoreChanged()
+    XCTAssertTrue(controller.hasPendingChangeSnapshotSuccessorForTesting)
+
+    let receiptCompletion = expectation(description: "Live switch completes receipt")
+    Task { @MainActor in
+      await rematerialization.value
+      receiptCompletion.fulfill()
+    }
+    controller.selectSource(.current(runtimeLogicalID: viewerRuntimeLogicalID))
+    await fulfillment(of: [receiptCompletion], timeout: 1)
+    XCTAssertEqual(controller.changeSnapshotRequestCountForTesting, 2)
+    XCTAssertFalse(controller.hasPendingChangeSnapshotSuccessorForTesting)
+    XCTAssertNil(controller.model.compiledInputs?.durableQuery)
+    XCTAssertNotNil(controller.model.compiledInputs?.liveRequest)
+    XCTAssertNil(controller.model.materializationSnapshot?.recordingID)
+    XCTAssertTrue(
+      controller.model.materializationSnapshot?.deviceSessionIDsByLogicalID.isEmpty == true)
+    XCTAssertNil(controller.selectedRecordingRow)
+    guard case .guidance = controller.performanceTargetSelection() else {
+      return XCTFail("Live switch retained the pending Store target")
+    }
+
+    deviceCompletionGate.release()
+    for _ in 0..<2_000 {
+      if controller.pendingCleanupWorkCount == 0 && gateway.operationCountForTesting == 0 { break }
+      try await Task.sleep(nanoseconds: 1_000_000)
+    }
+    XCTAssertEqual(controller.pendingCleanupWorkCount, 0)
+    XCTAssertEqual(gateway.operationCountForTesting, 0)
+    XCTAssertNil(controller.model.compiledInputs?.durableQuery)
+    XCTAssertNotNil(controller.model.compiledInputs?.liveRequest)
+    XCTAssertNil(controller.model.materializationSnapshot?.recordingID)
+    XCTAssertTrue(
+      controller.model.materializationSnapshot?.deviceSessionIDsByLogicalID.isEmpty == true)
+
+    XCTAssertTrue(
+      controller.model.recordingRows.contains { $0.logicalID == historicalLogicalID }
+    )
+    deviceCompletionGate.arm()
+    controller.selectSource(
+      .historical(
+        recordingID: historicalRecording.rowID,
+        recordingLogicalID: historicalLogicalID
+      )
+    )
+    XCTAssertEqual(routedUserRematerializations.value, 1)
+    let freshHistoricalDeviceBlocked = await deviceCompletionGate.waitUntilBlockedAsync()
+    XCTAssertEqual(freshHistoricalDeviceBlocked, .success)
+    XCTAssertEqual(
+      controller.selectedSourceID,
+      .historical(
+        recordingID: historicalRecording.rowID,
+        recordingLogicalID: historicalLogicalID
+      )
+    )
+    XCTAssertNil(controller.model.compiledInputs)
+    XCTAssertNil(controller.model.materializationSnapshot)
+    XCTAssertGreaterThan(controller.pendingCleanupWorkCount, 0)
+
+    deviceCompletionGate.release()
+    for _ in 0..<2_000 {
+      if controller.pendingCleanupWorkCount == 0 && gateway.operationCountForTesting == 0 { break }
+      try await Task.sleep(nanoseconds: 1_000_000)
+    }
+    XCTAssertEqual(controller.changeSnapshotRequestCountForTesting, 3)
+    XCTAssertEqual(controller.pendingCleanupWorkCount, 0)
+    XCTAssertEqual(gateway.operationCountForTesting, 0)
+    XCTAssertEqual(controller.selectedRecordingRow?.logicalID, historicalLogicalID)
+    XCTAssertEqual(
+      controller.model.compiledInputs?.durableQuery?.recordingID,
+      historicalRecording.rowID
+    )
+    XCTAssertNil(controller.model.compiledInputs?.liveRequest)
+    XCTAssertEqual(
+      controller.model.materializationSnapshot?.recordingID,
+      historicalRecording.rowID
+    )
+
+    await controller.sealAndClear().value
+    gateway.sealAndWait(originatingFrom: coordinator)
+    coordinator.closeStorage()
+  }
+
+  @MainActor
+  func testStoreRematerializationActiveHistoricalSwitchRestartsOneReceiptForNewIdentity()
+    async throws
+  {
+    let wallMilliseconds = Int64(Date().timeIntervalSince1970 * 1_000)
+    let viewerRuntimeLogicalID = UUID()
+    let firstLogicalID = UUID()
+    let firstDeviceLogicalID = UUID()
+    let secondLogicalID = UUID()
+    let secondDeviceLogicalID = UUID()
+    let coordinator = try ViewerStoreCoordinator(paths: makePaths())
+    let firstRecording = try coordinator.services.eventStore.beginRecording(
+      logicalID: firstLogicalID,
+      wallMilliseconds: wallMilliseconds,
+      monotonicNanoseconds: 1_000,
+      reason: "active-historical-switch-first"
+    )
+    let firstDevice = try coordinator.services.eventStore.beginDeviceSession(
+      recording: firstRecording,
+      installationID: "active-historical-switch-first",
+      logicalID: firstDeviceLogicalID,
+      wallMilliseconds: wallMilliseconds,
+      monotonicNanoseconds: 1_000,
+      partialHistory: false,
+      displayName: "First historical device"
+    )
+    try coordinator.services.eventStore.appendStructural(
+      .closeDevice(
+        firstDevice,
+        wallMilliseconds: wallMilliseconds + 1,
+        monotonicNanoseconds: 2_000
+      )
+    )
+    try coordinator.services.eventStore.appendStructural(
+      .closeRecording(
+        firstRecording,
+        wallMilliseconds: wallMilliseconds + 2,
+        monotonicNanoseconds: 3_000
+      )
+    )
+    let secondRecording = try coordinator.services.eventStore.beginRecording(
+      logicalID: secondLogicalID,
+      wallMilliseconds: wallMilliseconds + 10,
+      monotonicNanoseconds: 4_000,
+      reason: "active-historical-switch-second"
+    )
+    let secondDevice = try coordinator.services.eventStore.beginDeviceSession(
+      recording: secondRecording,
+      installationID: "active-historical-switch-second",
+      logicalID: secondDeviceLogicalID,
+      wallMilliseconds: wallMilliseconds + 10,
+      monotonicNanoseconds: 4_000,
+      partialHistory: false,
+      displayName: "Second historical device"
+    )
+    try coordinator.services.eventStore.appendStructural(
+      .closeDevice(
+        secondDevice,
+        wallMilliseconds: wallMilliseconds + 11,
+        monotonicNanoseconds: 5_000
+      )
+    )
+    try coordinator.services.eventStore.appendStructural(
+      .closeRecording(
+        secondRecording,
+        wallMilliseconds: wallMilliseconds + 12,
+        monotonicNanoseconds: 6_000
+      )
+    )
+
+    let deviceCompletionGate = ArmableViewerExecutionGate()
+    let gateway = ViewerStoreExplorerGateway()
+    gateway.install(coordinator)
+    let contentDriver = ViewerExplorerContentDriver(
+      gateway: gateway,
+      loadDeviceCatalog: {
+        recordingID, recordingSnapshot, cursor, direction, limit, completion in
+        gateway.loadDeviceCatalog(
+          recordingID: recordingID,
+          recordingSnapshot: recordingSnapshot,
+          cursor: cursor,
+          direction: direction,
+          limit: limit
+        ) { result in
+          deviceCompletionGate.run()
+          completion(result)
+        }
+      }
+    )
+    let controller = ViewerEventExplorerController(
+      inputs: ViewerRuntimeExplorerInputs(
+        runtimeLogicalID: viewerRuntimeLogicalID,
+        storeGateway: gateway,
+        liveObservations: ViewerLiveEventWindow(runtimeLogicalID: viewerRuntimeLogicalID)
+      ),
+      contentDriver: contentDriver
+    )
+    controller.start()
+    for _ in 0..<2_000 {
+      if controller.pendingCleanupWorkCount == 0 && controller.model.recordingRows.count == 2 {
+        break
+      }
+      try await Task.sleep(nanoseconds: 1_000_000)
+    }
+    controller.selectSource(
+      .historical(
+        recordingID: firstRecording.rowID,
+        recordingLogicalID: firstLogicalID
+      )
+    )
+    for _ in 0..<2_000 {
+      if controller.pendingCleanupWorkCount == 0,
+        controller.model.deviceRows.contains(where: { $0.logicalID == firstDeviceLogicalID })
+      {
+        break
+      }
+      try await Task.sleep(nanoseconds: 1_000_000)
+    }
+    XCTAssertEqual(controller.model.deviceRows.first?.logicalID, firstDeviceLogicalID)
+
+    deviceCompletionGate.arm()
+    let rematerialization = controller.rematerializeAfterStoreReplacement()
+    let firstDeviceCatalogBlocked = await deviceCompletionGate.waitUntilBlockedAsync()
+    XCTAssertEqual(firstDeviceCatalogBlocked, .success)
+    XCTAssertEqual(deviceCompletionGate.value, 1)
+    XCTAssertTrue(
+      controller.sourceRows.contains {
+        $0.id
+          == .historical(
+            recordingID: secondRecording.rowID,
+            recordingLogicalID: secondLogicalID
+          )
+      }
+    )
+    controller.noteStoreChanged()
+    XCTAssertTrue(controller.hasPendingChangeSnapshotSuccessorForTesting)
+
+    let receiptCompletions = LockedCounter()
+    let completionObserver = Task { @MainActor in
+      await rematerialization.value
+      receiptCompletions.increment()
+    }
+    controller.selectSource(
+      .historical(
+        recordingID: secondRecording.rowID,
+        recordingLogicalID: secondLogicalID
+      )
+    )
+    await Task.yield()
+    XCTAssertEqual(receiptCompletions.value, 0)
+    XCTAssertEqual(
+      controller.selectedSourceID,
+      .historical(
+        recordingID: secondRecording.rowID,
+        recordingLogicalID: secondLogicalID
+      )
+    )
+    XCTAssertNil(controller.model.compiledInputs)
+
+    deviceCompletionGate.release()
+    await completionObserver.value
+    for _ in 0..<2_000 {
+      if controller.pendingCleanupWorkCount == 0 && gateway.operationCountForTesting == 0 { break }
+      try await Task.sleep(nanoseconds: 1_000_000)
+    }
+    XCTAssertEqual(receiptCompletions.value, 1)
+    XCTAssertEqual(controller.changeSnapshotRequestCountForTesting, 2)
+    XCTAssertFalse(controller.hasPendingChangeSnapshotSuccessorForTesting)
+    XCTAssertEqual(controller.pendingCleanupWorkCount, 0)
+    XCTAssertEqual(gateway.operationCountForTesting, 0)
+    XCTAssertEqual(controller.selectedRecordingRow?.logicalID, secondLogicalID)
+    XCTAssertEqual(controller.model.deviceRows.map(\.logicalID), [secondDeviceLogicalID])
+    XCTAssertFalse(
+      controller.model.deviceRows.contains { $0.logicalID == firstDeviceLogicalID }
+    )
+    XCTAssertEqual(
+      controller.model.compiledInputs?.durableQuery?.recordingID,
+      secondRecording.rowID
+    )
+    XCTAssertNil(controller.model.compiledInputs?.liveRequest)
+    XCTAssertEqual(
+      controller.model.materializationSnapshot?.recordingID,
+      secondRecording.rowID
+    )
+
+    await controller.sealAndClear().value
+    gateway.sealAndWait(originatingFrom: coordinator)
+    coordinator.closeStorage()
+  }
+
+  @MainActor
+  func testStoreRematerializationRevokesPreparedExportAndDestinationAuthority()
+    async throws
+  {
+    let fixture = try await makePreparedControllerExportFixture(
+      reason: "prepared-export-rematerialization"
+    )
+    let delayedSelection = DelayedViewerExportDestinationSelection()
+    fixture.controller.beginExportDestinationSelection { completion in
+      delayedSelection.start(completion)
+    }
+    XCTAssertTrue(delayedSelection.hasCompletion)
+
+    let rematerialization = fixture.controller.rematerializeAfterStoreReplacement()
+    XCTAssertEqual(delayedSelection.cancellationCount, 1)
+    XCTAssertEqual(fixture.controller.exportState, .idle)
+    XCTAssertFalse(fixture.controller.canManageSelectedRecording)
+    await rematerialization.value
+
+    let staleDestination = fixture.paths.directory.appendingPathComponent("stale-export.json")
+    delayedSelection.respond(staleDestination)
+    for _ in 0..<100 { await Task.yield() }
+    XCTAssertFalse(FileManager.default.fileExists(atPath: staleDestination.path))
+    XCTAssertEqual(fixture.controller.exportState, .idle)
+    XCTAssertEqual(fixture.controller.pendingCleanupWorkCount, 0)
+
+    await fixture.controller.sealAndClear().value
+    fixture.gateway.sealAndWait(originatingFrom: fixture.coordinator)
+    fixture.coordinator.closeStorage()
+  }
+
+  @MainActor
+  func testStoreRematerializationRevokesPreparedDeleteAuthority() async throws {
+    let coordinator = try ViewerStoreCoordinator(paths: makePaths())
+    let wallMilliseconds = Int64(Date().timeIntervalSince1970 * 1_000)
+    let historicalLogicalID = UUID()
+    let historicalRecording = try coordinator.services.eventStore.beginRecording(
+      logicalID: historicalLogicalID,
+      wallMilliseconds: wallMilliseconds,
+      monotonicNanoseconds: 2_000,
+      reason: "prepared-delete-rematerialization"
+    )
+    try coordinator.services.eventStore.appendStructural(
+      .closeRecording(
+        historicalRecording,
+        wallMilliseconds: wallMilliseconds + 1,
+        monotonicNanoseconds: 3_000
+      )
+    )
+    let runtimeLogicalID = UUID()
+    _ = try coordinator.services.eventStore.beginRecording(
+      logicalID: runtimeLogicalID,
+      wallMilliseconds: wallMilliseconds + 2,
+      monotonicNanoseconds: 4_000,
+      reason: "prepared-delete-current"
+    )
+    let gateway = ViewerStoreExplorerGateway()
+    gateway.install(coordinator)
+    let controller = ViewerEventExplorerController(
+      inputs: ViewerRuntimeExplorerInputs(
+        runtimeLogicalID: runtimeLogicalID,
+        storeGateway: gateway,
+        liveObservations: ViewerLiveEventWindow(runtimeLogicalID: runtimeLogicalID)
+      )
+    )
+    controller.start()
+    for _ in 0..<2_000 {
+      if controller.pendingCleanupWorkCount == 0,
+        controller.model.recordingRows.contains(where: { $0.logicalID == historicalLogicalID })
+      {
+        break
+      }
+      await Task.yield()
+    }
+    controller.selectSource(
+      .historical(
+        recordingID: historicalRecording.rowID,
+        recordingLogicalID: historicalLogicalID
+      )
+    )
+    for _ in 0..<2_000 {
+      if controller.canManageSelectedRecording && controller.pendingCleanupWorkCount == 0 { break }
+      await Task.yield()
+    }
+    XCTAssertTrue(controller.canManageSelectedRecording)
+    controller.prepareSelectedRecordingDelete()
+    for _ in 0..<2_000 {
+      if controller.recordingOperationState == .awaitingDeleteConfirmation,
+        controller.pendingCleanupWorkCount == 0
+      {
+        break
+      }
+      await Task.yield()
+    }
+    XCTAssertEqual(controller.recordingOperationState, .awaitingDeleteConfirmation)
+
+    await controller.rematerializeAfterStoreReplacement().value
+    XCTAssertEqual(controller.recordingOperationState, .idle)
+    controller.confirmSelectedRecordingDelete()
+    for _ in 0..<2_000 where controller.pendingCleanupWorkCount != 0 { await Task.yield() }
+    XCTAssertEqual(controller.recordingOperationState, .failed(.invalidRequest))
+    XCTAssertTrue(
+      controller.model.recordingRows.contains { row in
+        row.logicalID == historicalLogicalID
+      })
+
+    await controller.sealAndClear().value
+    gateway.sealAndWait(originatingFrom: coordinator)
+    coordinator.closeStorage()
+  }
+
+  @MainActor
+  func testStoreRematerializationPreservesAuthoritativeCommittedExportCompletion()
+    async throws
+  {
+    let completionGate = ArmableViewerExecutionGate()
+    let fixture = try await makePreparedControllerExportFixture(
+      operationCompletionGate: { completionGate.run() },
+      reason: "committed-export-rematerialization"
+    )
+    let destination = fixture.paths.directory.appendingPathComponent(
+      "committed-rematerialization.json"
+    )
+    completionGate.arm()
+    fixture.controller.executePreparedExport(to: destination)
+    XCTAssertEqual(completionGate.waitUntilBlocked(), .success)
+    XCTAssertTrue(FileManager.default.fileExists(atPath: destination.path))
+
+    let replacementCoordinator = try ViewerStoreCoordinator(paths: makePaths())
+    _ = try replacementCoordinator.services.eventStore.beginRecording(
+      logicalID: UUID(),
+      wallMilliseconds: 2_000,
+      monotonicNanoseconds: 3_000,
+      reason: "committed-export-replacement"
+    )
+    let replacementFinished = expectation(description: "Replacement waits for committed export")
+    DispatchQueue.global(qos: .userInitiated).async {
+      fixture.gateway.install(replacementCoordinator)
+      replacementFinished.fulfill()
+    }
+    for _ in 0..<2_000 where fixture.gateway.currentStoreGeneration != 0 {
+      await Task.yield()
+    }
+    XCTAssertEqual(fixture.gateway.currentStoreGeneration, 0)
+
+    let rematerialization = fixture.controller.rematerializeAfterStoreReplacement()
+    XCTAssertEqual(fixture.controller.exportState, .cancelling(eventCount: 0))
+    completionGate.release()
+    await fulfillment(of: [replacementFinished], timeout: 2)
+    await rematerialization.value
+    for _ in 0..<2_000 {
+      if fixture.controller.exportState == .completed(eventCount: 0),
+        fixture.controller.pendingCleanupWorkCount == 0
+      {
+        break
+      }
+      await Task.yield()
+    }
+    XCTAssertEqual(fixture.controller.exportState, .completed(eventCount: 0))
+    XCTAssertEqual(fixture.controller.pendingCleanupWorkCount, 0)
+    XCTAssertEqual(fixture.gateway.operationCountForTesting, 0)
+    let root = try XCTUnwrap(
+      JSONSerialization.jsonObject(with: Data(contentsOf: destination)) as? [String: Any]
+    )
+    XCTAssertEqual(root["schemaVersion"] as? Int, 1)
+
+    await fixture.controller.sealAndClear().value
+    fixture.gateway.sealAndWait(originatingFrom: replacementCoordinator)
+    fixture.coordinator.closeStorage()
+    replacementCoordinator.closeStorage()
+  }
+
+  @MainActor
+  func testStoreRematerializationRetainsDirtyChangeUntilOneSuccessorSnapshotCompletes()
+    async throws
+  {
+    let coordinator = try ViewerStoreCoordinator(paths: makePaths())
+    let runtimeLogicalID = UUID()
+    _ = try coordinator.services.eventStore.beginRecording(
+      logicalID: runtimeLogicalID,
+      wallMilliseconds: 1_000,
+      monotonicNanoseconds: 2_000,
+      reason: "dirty-rematerialization"
+    )
+    let operationGate = ArmableViewerExecutionGate()
+    let gateway = ViewerStoreExplorerGateway(operationExecutionGate: { operationGate.run() })
+    gateway.install(coordinator)
+    let controller = ViewerEventExplorerController(
+      inputs: ViewerRuntimeExplorerInputs(
+        runtimeLogicalID: runtimeLogicalID,
+        storeGateway: gateway,
+        liveObservations: ViewerLiveEventWindow(runtimeLogicalID: runtimeLogicalID)
+      )
+    )
+
+    operationGate.arm(blockingCall: 3)
+    let rematerialization = controller.rematerializeAfterStoreReplacement()
+    let recordingCatalogBlocked = await operationGate.waitUntilBlockedAsync()
+    XCTAssertEqual(recordingCatalogBlocked, .success)
+    XCTAssertEqual(operationGate.value, 3)
+    controller.noteStoreChanged()
+    XCTAssertTrue(controller.hasPendingChangeSnapshotSuccessorForTesting)
+    XCTAssertEqual(controller.changeSnapshotRequestCountForTesting, 1)
+
+    operationGate.release()
+    await rematerialization.value
+    for _ in 0..<2_000 {
+      if controller.changeSnapshotRequestCountForTesting == 2,
+        controller.pendingCleanupWorkCount == 0
+      {
+        break
+      }
+      await Task.yield()
+    }
+    XCTAssertEqual(controller.changeSnapshotRequestCountForTesting, 2)
+    XCTAssertFalse(controller.hasPendingChangeSnapshotSuccessorForTesting)
+    XCTAssertEqual(controller.pendingCleanupWorkCount, 0)
+    XCTAssertEqual(gateway.operationCountForTesting, 0)
+
+    await controller.sealAndClear().value
+    gateway.sealAndWait(originatingFrom: coordinator)
+    coordinator.closeStorage()
+  }
+
+  @MainActor
   func testDelayedExportDestinationCannotMutateOrRetainSealedExplorer() async throws {
     let paths = try makePaths()
     let coordinator = try ViewerStoreCoordinator(paths: paths)
@@ -2395,6 +5062,7 @@ final class ViewerStoreTests: XCTestCase {
     let arbiter = ViewerExplorerQueryArbiter(
       queryService: ViewerStoreQueryService(pool: pool, leases: leases),
       diagnosticService: ViewerStoreDiagnosticService(pool: pool, leases: leases),
+      performanceService: ViewerPerformanceStoreService(pool: pool, leases: leases),
       exportService: exportService
     )
     let query = try ViewerEventQuery(
@@ -5028,6 +7696,8 @@ final class ViewerStoreTests: XCTestCase {
     let firstLogicalID = UUID()
     let secondLogicalID = UUID()
     let wallMilliseconds = Int64((Date().timeIntervalSince1970 * 1_000).rounded())
+    let firstStoreGeneration = runtime.status().storeGeneration
+    XCTAssertGreaterThan(firstStoreGeneration, 0)
 
     runtime.runtimeStarted(
       logicalID: firstLogicalID,
@@ -5041,6 +7711,7 @@ final class ViewerStoreTests: XCTestCase {
         state: "active"
       )) == 1
     }
+    XCTAssertEqual(runtime.status().storeGeneration, firstStoreGeneration)
     await runtime.runtimeEnded(
       logicalID: firstLogicalID,
       wallMilliseconds: wallMilliseconds + 1_000,
@@ -5050,6 +7721,7 @@ final class ViewerStoreTests: XCTestCase {
       try latestRecordingStateCount(at: paths, logicalID: firstLogicalID, state: "closed"),
       1
     )
+    XCTAssertEqual(runtime.status().storeGeneration, 0)
 
     runtime.runtimeStarted(
       logicalID: secondLogicalID,
@@ -5063,7 +7735,12 @@ final class ViewerStoreTests: XCTestCase {
           logicalID: secondLogicalID,
           state: "active"
         )) == 1)
+        && ((try? self.recordingStorageUnavailableGapCount(
+          at: paths,
+          logicalID: secondLogicalID
+        )) == 1)
     }
+    XCTAssertGreaterThan(runtime.status().storeGeneration, firstStoreGeneration)
     XCTAssertEqual(
       try latestRecordingStateCount(at: paths, logicalID: firstLogicalID, state: "closed"),
       1
@@ -9849,6 +12526,92 @@ final class ViewerStoreTests: XCTestCase {
     )
   }
 
+  private func makePerformanceFixture(
+    eventCount: Int,
+    eventTypeSQL: String,
+    contentSQL: String
+  ) throws -> (pool: ViewerSQLitePool, scope: ViewerPerformanceStoreScope) {
+    precondition((1...100_000).contains(eventCount))
+    let pool = try ViewerSQLitePool(migrating: makePaths())
+    do {
+      let store = ViewerEventStore(pool: pool, configuration: { .default })
+      let recording = try store.beginRecording(
+        wallMilliseconds: 1,
+        monotonicNanoseconds: 1,
+        reason: "performance-test"
+      )
+      let device = try store.beginDeviceSession(
+        recording: recording,
+        installationID: "performance-test",
+        wallMilliseconds: 1,
+        monotonicNanoseconds: 1,
+        partialHistory: false,
+        displayName: "Performance Test"
+      )
+      let eventUpperRowID = try pool.writer.run { database in
+        try ViewerSQLiteConnection.execute(
+          """
+          WITH digits(value) AS (
+            VALUES(0),(1),(2),(3),(4),(5),(6),(7),(8),(9)
+          ), numbers(value) AS (
+            SELECT a.value + 10*b.value + 100*c.value + 1000*d.value + 10000*e.value
+            FROM digits a, digits b, digits c, digits d, digits e
+            ORDER BY 1
+            LIMIT \(eventCount)
+          )
+          INSERT INTO Events(
+            recordingID, deviceSessionID, direction, wireSequence, eventUUID, eventType,
+            contentJSON, createdWallMs, viewerWallMs, originMonotonicNs,
+            viewerMonotonicNs, priority, ttlMs, schemaVersion, deterministicBytes,
+            correlationEventUUID, replyToEventUUID, quotaBytes
+          )
+          SELECT
+            \(recording.rowID),
+            \(device.rowID),
+            CASE WHEN value % 2 = 0 THEN 'appToViewer' ELSE 'viewerToApp' END,
+            value,
+            'performance-event-' || value,
+            \(eventTypeSQL),
+            \(contentSQL),
+            value + 1,
+            value + 1,
+            value + 1,
+            value + 1,
+            'normal',
+            60000,
+            1,
+            0,
+            NULL,
+            NULL,
+            0
+          FROM numbers
+          ORDER BY value
+          """,
+          on: database
+        )
+        return try ViewerStoreSchema.scalarInt64(
+          "SELECT COALESCE(MAX(rowID),0) FROM Events",
+          database: database
+        )
+      }
+      return (
+        pool,
+        try ViewerPerformanceStoreScope(
+          storeGeneration: 1,
+          recordingID: recording.rowID,
+          deviceSessionID: device.rowID,
+          lowerMonotonicNanoseconds: 0,
+          upperMonotonicNanoseconds: Int64(eventCount + 1),
+          eventUpperRowID: eventUpperRowID,
+          gapUpperRowID: 0
+        )
+      )
+    } catch {
+      pool.close()
+      throw error
+    }
+  }
+
   private func explorerResult<Value: Sendable>(
     _ description: String,
     submit:
@@ -10229,6 +12992,7 @@ final class ViewerStoreTests: XCTestCase {
     viewerMonotonicNanoseconds: UInt64? = nil,
     viewerWallMilliseconds: Int64? = nil,
     eventID: EventID = EventID(),
+    eventType: EventType? = nil,
     content: JSONValue? = nil,
     validationLimits: EventValidationLimits = .default
   ) throws -> ViewerPreparedEventObservation {
@@ -10244,7 +13008,7 @@ final class ViewerStoreTests: XCTestCase {
       : EventEndpoint(role: .app, id: app)
     let envelope = try EventEnvelope(
       id: eventID,
-      type: EventType.user("test.metric"),
+      type: eventType ?? EventType.user("test.metric"),
       content: content
         ?? .object([
           "message": .string(value),
@@ -10901,6 +13665,86 @@ private final class LockedViewerExplorerResult<Value: Sendable>: @unchecked Send
   }
 }
 
+private final class LockedPerformanceFreezeResult: @unchecked Sendable {
+  private let lock = NSLock()
+  private var result: Result<ViewerPerformanceFrozenReceipt, ViewerPerformanceFreezeFailure>?
+
+  var value: Result<ViewerPerformanceFrozenReceipt, ViewerPerformanceFreezeFailure>? {
+    lock.lock()
+    defer { lock.unlock() }
+    return result
+  }
+
+  func set(
+    _ result: Result<ViewerPerformanceFrozenReceipt, ViewerPerformanceFreezeFailure>
+  ) {
+    lock.lock()
+    self.result = result
+    lock.unlock()
+  }
+}
+
+private final class ViewerPerformanceFreezeLiveSpy: ViewerLiveObservationProviding,
+  @unchecked Sendable
+{
+  let runtimeLogicalID: UUID
+
+  private let lock = NSLock()
+  private let slice: ViewerPerformanceLiveSlice
+  private let beforeReturn: (() throws -> Void)?
+  private var connectionIDs: [UUID] = []
+
+  init(
+    slice: ViewerPerformanceLiveSlice,
+    beforeReturn: (() throws -> Void)? = nil
+  ) {
+    runtimeLogicalID = slice.runtimeLogicalID
+    self.slice = slice
+    self.beforeReturn = beforeReturn
+  }
+
+  func freezePerformance(connectionID: UUID) throws -> ViewerPerformanceLiveSlice {
+    lock.lock()
+    connectionIDs.append(connectionID)
+    lock.unlock()
+    guard connectionID == slice.connectionID else {
+      throw ViewerPerformanceStoreFailure.invalidScope
+    }
+    try beforeReturn?()
+    return slice
+  }
+
+  func snapshot() -> ViewerLiveProjectionSnapshot {
+    ViewerLiveProjectionSnapshot(
+      runtimeLogicalID: runtimeLogicalID,
+      generation: 0,
+      events: [],
+      sessions: [],
+      gaps: ViewerLiveGapSnapshot(
+        ingressOverflowCount: 0,
+        windowOverflowCount: 0,
+        residentConflictCount: 0,
+        diagnosticLossCount: 0,
+        storeUnavailableCount: 0,
+        storeRecoveryCount: 0,
+        storeUnavailable: false
+      ),
+      accountedEventBytes: 0
+    )
+  }
+
+  func setRefreshHandler(_ handler: @escaping @Sendable (UInt64) -> Void) {}
+  func storeStateChanged(_ state: ViewerStoreStatus.State) {}
+  func setPresentationPaused(_ paused: Bool) {}
+  func durableRowBecameVisible(key: ViewerEventJournalKey, observationID: UUID) {}
+
+  var frozenConnectionIDs: [UUID] {
+    lock.lock()
+    defer { lock.unlock() }
+    return connectionIDs
+  }
+}
+
 private final class DelayedViewerExportDestinationSelection: @unchecked Sendable {
   private let lock = NSLock()
   private var completion: (@Sendable (URL?) -> Void)?
@@ -11124,11 +13968,33 @@ private final class LockedViewerCounter: @unchecked Sendable {
   }
 }
 
+private final class ViewerPerformanceTestClock: @unchecked Sendable {
+  private let lock = NSLock()
+  private var values: [UInt64]
+  private var lastValue: UInt64
+
+  init(_ values: [UInt64]) {
+    precondition(!values.isEmpty)
+    self.values = values
+    lastValue = values[values.count - 1]
+  }
+
+  func now() -> UInt64 {
+    lock.lock()
+    defer { lock.unlock() }
+    guard !values.isEmpty else { return lastValue }
+    let value = values.removeFirst()
+    lastValue = value
+    return value
+  }
+}
+
 private final class ArmableViewerExecutionGate: @unchecked Sendable {
   private let lock = NSLock()
   private let entered = DispatchSemaphore(value: 0)
   private let resume = DispatchSemaphore(value: 0)
   private var armed = false
+  private var blockingCall = 1
   private var calls = 0
 
   var value: Int {
@@ -11137,9 +14003,11 @@ private final class ArmableViewerExecutionGate: @unchecked Sendable {
     return calls
   }
 
-  func arm() {
+  func arm(blockingCall: Int = 1) {
+    precondition(blockingCall > 0)
     lock.lock()
     armed = true
+    self.blockingCall = blockingCall
     calls = 0
     lock.unlock()
   }
@@ -11151,7 +14019,7 @@ private final class ArmableViewerExecutionGate: @unchecked Sendable {
       return
     }
     calls += 1
-    let shouldBlock = calls == 1
+    let shouldBlock = calls == blockingCall
     lock.unlock()
     if shouldBlock {
       entered.signal()
@@ -11161,6 +14029,14 @@ private final class ArmableViewerExecutionGate: @unchecked Sendable {
 
   func waitUntilBlocked() -> DispatchTimeoutResult {
     entered.wait(timeout: .now() + 2)
+  }
+
+  func waitUntilBlockedAsync() async -> DispatchTimeoutResult {
+    await withCheckedContinuation { continuation in
+      DispatchQueue.global(qos: .userInitiated).async { [self] in
+        continuation.resume(returning: waitUntilBlocked())
+      }
+    }
   }
 
   func release() { resume.signal() }

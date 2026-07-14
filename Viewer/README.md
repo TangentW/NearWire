@@ -16,6 +16,11 @@ The Viewer also records bounded local history through three serialized system-SQ
 
 The three-column Event Explorer, transient-versus-recorded semantics, source/device materialization, filtering, pause behavior, bounded renderers, causality inspection, recording operations, JSON export, and memory-only Viewer-to-App composer are documented in [Viewer-Event-Explorer.md](../Documentation/Viewer-Event-Explorer.md).
 
+The single-device Performance dashboard, Viewer receive-time semantics, cards, ranges, charts,
+availability states, diagnostic gaps, raw-Event reveal, deterministic bounds, privacy, cleanup, and
+release-signing boundary are documented in
+[Viewer-Performance.md](../Documentation/Viewer-Performance.md).
+
 Identity lifecycle, pairing, listener replacement, admission limits, recovery, sandbox, privacy behavior, and the three-phase stable-signer XCTest command sequence are documented in [Viewer-Foundation.md](../Documentation/Viewer-Foundation.md).
 
 Session ownership, logical correlation, policy negotiation, queue atomicity, receive backpressure, preferences, and the operational workspace are documented in [Viewer-MultiDevice-Flow-Control.md](../Documentation/Viewer-MultiDevice-Flow-Control.md).

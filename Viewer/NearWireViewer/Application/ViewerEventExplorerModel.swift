@@ -155,6 +155,21 @@ struct ViewerExplorerResidentWindow<
     )
   }
 
+  mutating func mergeResident(_ incomingRows: [Row]) -> Bool {
+    var incomingIdentities = Set<Identity>()
+    for row in incomingRows where !incomingIdentities.insert(identity(row)).inserted {
+      return false
+    }
+    let incomingByIdentity = Dictionary(
+      uniqueKeysWithValues: incomingRows.map { (identity($0), $0) }
+    )
+    let retained = rows.filter { incomingByIdentity[identity($0)] == nil }
+    let combined = (retained + incomingRows).sorted(by: isOrderedBefore)
+    guard combined.count <= capacity else { return false }
+    rows = combined
+    return true
+  }
+
   mutating func clear() {
     rows.removeAll(keepingCapacity: false)
     navigation = ViewerExplorerListNavigation()
@@ -463,6 +478,18 @@ final class ViewerEventExplorerModel: CustomReflectable, CustomStringConvertible
   }
 
   @discardableResult
+  func mergeRecordingIdentityPage(
+    _ page: ViewerRecordingCatalogPage,
+    token: ViewerExplorerPresentationToken
+  ) -> Bool {
+    guard acceptsSelection(token), page.rows.count <= 1,
+      recordingWindow.mergeResident(page.rows)
+    else { return false }
+    reconcileRecordingSelection()
+    return true
+  }
+
+  @discardableResult
   func applyDevicePage(
     _ page: ViewerDeviceCatalogPage,
     placement: ViewerExplorerPagePlacement,
@@ -478,6 +505,18 @@ final class ViewerEventExplorerModel: CustomReflectable, CustomStringConvertible
         trailingCursor: page.olderCursor,
         placement: placement
       ) != nil
+    else { return false }
+    reconcileDeviceSelection()
+    return true
+  }
+
+  @discardableResult
+  func mergeDeviceIdentityPage(
+    _ page: ViewerDeviceCatalogPage,
+    token: ViewerExplorerPresentationToken
+  ) -> Bool {
+    guard acceptsSelection(token), page.rows.count <= Self.maximumSelectedDevices,
+      deviceWindow.mergeResident(page.rows)
     else { return false }
     reconcileDeviceSelection()
     return true

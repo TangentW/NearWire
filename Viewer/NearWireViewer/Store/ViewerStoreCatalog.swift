@@ -219,6 +219,7 @@ final class ViewerStoreCatalogService: @unchecked Sendable {
   func devicePage(
     recordingID: Int64,
     storeGeneration: UInt64,
+    recordingSnapshot: ViewerRecordingCatalogSnapshot? = nil,
     cursor: ViewerDeviceCatalogCursor?,
     direction: ViewerCatalogPageDirection = .older,
     limit: Int = 100,
@@ -226,6 +227,12 @@ final class ViewerStoreCatalogService: @unchecked Sendable {
   ) throws -> ViewerDeviceCatalogPage {
     guard recordingID > 0, storeGeneration > 0, (1...200).contains(limit) else {
       throw ViewerStoreError.invalidValue
+    }
+    if let recordingSnapshot {
+      guard recordingSnapshot.storeGeneration == storeGeneration else {
+        throw ViewerStoreExplorerFailure.storeReplaced
+      }
+      guard cursor == nil, direction == .older else { throw ViewerStoreError.invalidValue }
     }
     let queryFingerprint = Self.fingerprint("devices-v1:\(recordingID)")
     if let cursor {
@@ -244,6 +251,12 @@ final class ViewerStoreCatalogService: @unchecked Sendable {
 
     return try pool.queryReader.run(operationID: operationID, budget: .query()) { database in
       try Self.withReadTransaction(database) {
+        if let recordingSnapshot {
+          let recordingBounds = try Self.globalBounds(database)
+          guard Self.bounds(recordingSnapshot) == recordingBounds,
+            recordingSnapshot.changeGeneration == recordingBounds.changeGeneration
+          else { throw ViewerStoreExplorerFailure.catalogChanged }
+        }
         let bounds = try Self.deviceBounds(recordingID: recordingID, database: database)
         let snapshot: ViewerDeviceCatalogSnapshot
         if let cursor {
@@ -278,6 +291,114 @@ final class ViewerStoreCatalogService: @unchecked Sendable {
           limit: limit,
           database: database,
           planObserver: planObserver
+        )
+      }
+    }
+  }
+
+  func recordingIdentityPage(
+    logicalID: UUID,
+    snapshot: ViewerRecordingCatalogSnapshot,
+    storeGeneration: UInt64,
+    operationID: UUID? = nil
+  ) throws -> ViewerRecordingCatalogPage {
+    guard storeGeneration > 0, snapshot.storeGeneration == storeGeneration else {
+      throw ViewerStoreExplorerFailure.storeReplaced
+    }
+    return try pool.queryReader.run(operationID: operationID, budget: .query()) { database in
+      try Self.withReadTransaction(database) {
+        let bounds = try Self.globalBounds(database)
+        guard Self.bounds(snapshot) == bounds,
+          snapshot.changeGeneration == bounds.changeGeneration
+        else { throw ViewerStoreExplorerFailure.catalogChanged }
+        let identity = try ViewerSQLiteStatement(
+          database: database,
+          sql: "SELECT rowID FROM Recordings WHERE logicalID=?1 AND rowID<=?2"
+        )
+        try identity.bind(logicalID.uuidString.lowercased(), at: 1)
+        try identity.bind(snapshot.recordingUpperRowID, at: 2)
+        guard try identity.step() else {
+          return ViewerRecordingCatalogPage(
+            snapshot: snapshot,
+            rows: [],
+            olderCursor: nil,
+            newerCursor: nil
+          )
+        }
+        let rowID = identity.int64(at: 0)
+        let cursor: ViewerRecordingCatalogCursor?
+        if rowID < Int64.max {
+          cursor = ViewerRecordingCatalogCursor(
+            queryFingerprint: Self.recordingFingerprint,
+            snapshot: snapshot,
+            direction: .older,
+            rowID: rowID + 1
+          )
+        } else {
+          cursor = nil
+        }
+        let page = try Self.queryRecordingPage(
+          snapshot: snapshot,
+          cursor: cursor,
+          direction: .older,
+          limit: 1,
+          database: database,
+          planObserver: planObserver
+        )
+        let row = page.rows.first {
+          $0.rowID == rowID && $0.logicalID == logicalID
+        }
+        return ViewerRecordingCatalogPage(
+          snapshot: snapshot,
+          rows: row.map { [$0] } ?? [],
+          olderCursor: nil,
+          newerCursor: nil
+        )
+      }
+    }
+  }
+
+  func deviceIdentityPage(
+    recordingID: Int64,
+    logicalIDs: [UUID],
+    snapshot: ViewerDeviceCatalogSnapshot,
+    storeGeneration: UInt64,
+    operationID: UUID? = nil
+  ) throws -> ViewerDeviceCatalogPage {
+    guard recordingID > 0, storeGeneration > 0,
+      snapshot.storeGeneration == storeGeneration,
+      snapshot.recordingID == recordingID,
+      (1...16).contains(logicalIDs.count),
+      Set(logicalIDs).count == logicalIDs.count
+    else { throw ViewerStoreError.invalidValue }
+    return try pool.queryReader.run(operationID: operationID, budget: .query()) { database in
+      try Self.withReadTransaction(database) {
+        let bounds = try Self.deviceBounds(recordingID: recordingID, database: database)
+        guard Self.bounds(snapshot) == bounds,
+          snapshot.changeGeneration == bounds.changeGeneration
+        else { throw ViewerStoreExplorerFailure.catalogChanged }
+        try Self.requireVisibleRecording(snapshot: snapshot, database: database)
+        var rows: [ViewerDeviceCatalogRow] = []
+        rows.reserveCapacity(logicalIDs.count)
+        for logicalID in logicalIDs {
+          if let row = try Self.queryDeviceIdentity(
+            recordingID: recordingID,
+            logicalID: logicalID,
+            snapshot: snapshot,
+            database: database
+          ) {
+            rows.append(row)
+          }
+        }
+        rows.sort {
+          $0.connectionOrdinal == $1.connectionOrdinal
+            ? $0.rowID > $1.rowID : $0.connectionOrdinal > $1.connectionOrdinal
+        }
+        return ViewerDeviceCatalogPage(
+          snapshot: snapshot,
+          rows: rows,
+          olderCursor: nil,
+          newerCursor: nil
         )
       }
     }
@@ -482,6 +603,48 @@ final class ViewerStoreCatalogService: @unchecked Sendable {
         )
       }
     )
+  }
+
+  private static func queryDeviceIdentity(
+    recordingID: Int64,
+    logicalID: UUID,
+    snapshot: ViewerDeviceCatalogSnapshot,
+    database: OpaquePointer
+  ) throws -> ViewerDeviceCatalogRow? {
+    let statement = try ViewerSQLiteStatement(
+      database: database,
+      sql: """
+        SELECT ds.rowID,ds.logicalID,ia.ordinal,ds.connectionOrdinal,
+          ds.applicationIdentifier,ds.applicationVersion,ds.startedWallMs,ds.startedMonotonicNs,
+          dv.revision,dv.displayName,dv.state,dv.partialHistory,dv.endedWallMs,dv.endedMonotonicNs,
+          EXISTS(SELECT 1 FROM GapVersions g INDEXED BY GapTimelineByDevice
+            WHERE g.recordingID=?1 AND g.deviceSessionID=ds.rowID AND g.rowID<=?7 LIMIT 1),
+          EXISTS(SELECT 1 FROM DropVersions d
+            WHERE d.deviceSessionID=ds.rowID AND d.rowID<=?8 LIMIT 1)
+        FROM DeviceSessions ds INDEXED BY sqlite_autoindex_DeviceSessions_1
+        CROSS JOIN InstallationAliases ia
+        CROSS JOIN DeviceSessionVersions dv
+        WHERE ds.recordingID=?1 AND ds.logicalID=?9 AND ds.rowID<=?4
+          AND ia.rowID=ds.installationAliasID AND ia.rowID<=?3
+          AND dv.deviceSessionID=ds.rowID
+          AND dv.rowID=(SELECT MAX(dv2.rowID) FROM DeviceSessionVersions dv2
+            WHERE dv2.deviceSessionID=ds.rowID AND dv2.rowID<=?5)
+          AND NOT EXISTS(SELECT 1 FROM Tombstones t
+            WHERE t.recordingID=?1 AND t.rowID<=?6)
+        LIMIT 1
+        """
+    )
+    try statement.bind(recordingID, at: 1)
+    try statement.bind(snapshot.recordingUpperRowID, at: 2)
+    try statement.bind(snapshot.installationAliasUpperRowID, at: 3)
+    try statement.bind(snapshot.deviceSessionUpperRowID, at: 4)
+    try statement.bind(snapshot.deviceVersionUpperRowID, at: 5)
+    try statement.bind(snapshot.tombstoneUpperRowID, at: 6)
+    try statement.bind(snapshot.gapUpperRowID, at: 7)
+    try statement.bind(snapshot.dropUpperRowID, at: 8)
+    try statement.bind(logicalID.uuidString.lowercased(), at: 9)
+    guard try statement.step() else { return nil }
+    return try deviceRow(statement, recordingID: recordingID)
   }
 
   private static func recordingRow(

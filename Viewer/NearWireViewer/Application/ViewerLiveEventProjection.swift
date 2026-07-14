@@ -395,6 +395,7 @@ private struct ViewerLiveSessionState: Sendable {
 
 final class ViewerLiveEventWindow: ViewerLiveObservationProviding, @unchecked Sendable {
   let runtimeLogicalID: UUID
+  let liveGeneration: UInt64
 
   private let ingressLock = NSLock()
   private var ingress = [ViewerLiveIngressEntry?](
@@ -433,6 +434,7 @@ final class ViewerLiveEventWindow: ViewerLiveObservationProviding, @unchecked Se
   private var sessions: [UUID: ViewerLiveSessionState] = [:]
   private var conflictMarkers = ViewerLiveConflictMarkers()
   private var projectionGeneration: UInt64 = 0
+  private var performanceSliceRevision: UInt64 = 0
   private var ingressOverflowCount: UInt64 = 0
   private var windowOverflowCount: UInt64 = 0
   private var diagnosticLossCount: UInt64 = 0
@@ -462,10 +464,13 @@ final class ViewerLiveEventWindow: ViewerLiveObservationProviding, @unchecked Se
 
   init(
     runtimeLogicalID: UUID,
+    liveGeneration: UInt64 = 1,
     projectionQueue: DispatchQueue? = nil,
     refreshScheduler: ViewerLiveRefreshScheduler = .live
   ) {
+    precondition(liveGeneration > 0)
     self.runtimeLogicalID = runtimeLogicalID
+    self.liveGeneration = liveGeneration
     self.projectionQueue =
       projectionQueue
       ?? DispatchQueue(label: "com.nearwire.viewer.live-projection.\(runtimeLogicalID.uuidString)")
@@ -754,6 +759,43 @@ final class ViewerLiveEventWindow: ViewerLiveObservationProviding, @unchecked Se
     return publishedSnapshot
   }
 
+  func freezePerformance(connectionID: UUID) throws -> ViewerPerformanceLiveSlice {
+    try projectionQueue.sync {
+      ingressLock.lock()
+      guard !cleared, !ingestionSealed else {
+        ingressLock.unlock()
+        throw ViewerPerformanceStoreFailure.unavailable
+      }
+      let anchor = refreshScheduler.now()
+      let work = takePendingWorkLocked()
+      ingressLock.unlock()
+
+      if applyPendingWork(work) { publishSnapshot() }
+      guard sessions[connectionID] != nil || window.contains(connectionID: connectionID) else {
+        throw ViewerPerformanceStoreFailure.invalidScope
+      }
+      guard performanceSliceRevision < UInt64.max else {
+        throw ViewerPerformanceStoreFailure.limitExceeded
+      }
+      performanceSliceRevision += 1
+      return try makePerformanceSlice(
+        connectionID: connectionID,
+        revision: performanceSliceRevision,
+        anchorMonotonicNanoseconds: anchor
+      )
+    }
+  }
+
+  func performanceEventLocator(for key: ViewerEventJournalKey) -> ViewerPerformanceEventLocator? {
+    projectionQueue.sync {
+      guard !cleared, key.runtimeLogicalID == runtimeLogicalID,
+        let node = window.node(for: key),
+        node.observation.envelope.type.rawValue == PerformanceSnapshotSchema.eventTypeRawValue
+      else { return nil }
+      return .transient(observationID: node.observation.observationID)
+    }
+  }
+
   @discardableResult
   func evict(_ key: ViewerEventJournalKey) -> ViewerCommittedEventObservation? {
     let removed = projectionQueue.sync { () -> ViewerLiveWindowNode? in
@@ -931,80 +973,7 @@ final class ViewerLiveEventWindow: ViewerLiveObservationProviding, @unchecked Se
     defer { activeDrainCount -= 1 }
     while true {
       let work = takePendingWork()
-      var changed = work.ingressOverflowCount > 0 || work.diagnosticLossCount > 0
-      ingressOverflowCount = Self.saturatingAdd(
-        ingressOverflowCount,
-        work.ingressOverflowCount
-      )
-      diagnosticLossCount = Self.saturatingAdd(
-        diagnosticLossCount,
-        work.diagnosticLossCount
-      )
-      if work.sessionLifecycleTransition {
-        changed =
-          reconcileDirectObservationSessions(
-            activeSessions: work.activeSessions,
-            terminatingSessions: Set(work.sessionTerminations.keys)
-          ) || changed
-      }
-      for (connectionID, termination) in work.sessionTerminations.sorted(by: {
-        $0.key.uuidString < $1.key.uuidString
-      }) {
-        if applySessionTermination(connectionID: connectionID, termination: termination) {
-          changed = true
-        } else {
-          diagnosticLossCount = Self.saturatingIncrement(diagnosticLossCount)
-          changed = true
-        }
-      }
-      for (connectionID, metadata) in work.activeSessions.sorted(by: {
-        $0.key.uuidString < $1.key.uuidString
-      }) {
-        changed = applyActiveSession(connectionID: connectionID, metadata: metadata) || changed
-      }
-      for entry in work.entries {
-        changed = true
-        let connectionID = entry.observation.key.connectionID
-        if !work.tracksSessionLifecycle || work.activeSessions[connectionID] != nil
-          || sessions[connectionID] != nil
-        {
-          process(entry)
-        } else {
-          discardForSessionChurn(entry)
-        }
-      }
-      for (connectionID, counts) in work.dropCounts {
-        guard var session = sessions[connectionID] else {
-          diagnosticLossCount = Self.saturatingIncrement(diagnosticLossCount)
-          changed = true
-          continue
-        }
-        for (reason, count) in counts { session.dropCounts[reason] = count }
-        sessions[connectionID] = session
-        changed = true
-      }
-      for (key, disposition) in work.dispositions {
-        if window.setDisposition(disposition, for: key) { changed = true }
-      }
-      for key in work.conflictKeys {
-        if !window.markPresentationConflict(key) {
-          diagnosticLossCount = Self.saturatingIncrement(diagnosticLossCount)
-        }
-        changed = true
-      }
-      for storeOutcome in work.storeOutcomes {
-        changed = apply(storeOutcome) || changed
-      }
-      changed = reclaimUnreferencedEndedSessions() || changed
-      if let unavailable = work.storeUnavailable {
-        if unavailable {
-          noteStoreUnavailable()
-        } else {
-          noteStoreAvailable()
-        }
-        changed = true
-      }
-      if changed { publishSnapshot() }
+      if applyPendingWork(work) { publishSnapshot() }
 
       ingressLock.lock()
       let hasMoreWork = hasPendingWorkLocked()
@@ -1037,6 +1006,12 @@ final class ViewerLiveEventWindow: ViewerLiveObservationProviding, @unchecked Se
 
   private func takePendingWork() -> PendingWork {
     ingressLock.lock()
+    let work = takePendingWorkLocked()
+    ingressLock.unlock()
+    return work
+  }
+
+  private func takePendingWorkLocked() -> PendingWork {
     var entries: [ViewerLiveIngressEntry] = []
     entries.reserveCapacity(ingressCount)
     while ingressCount > 0 {
@@ -1069,7 +1044,6 @@ final class ViewerLiveEventWindow: ViewerLiveObservationProviding, @unchecked Se
     pendingStoreUnavailable = nil
     pendingIngressOverflowCount = 0
     pendingDiagnosticLossCount = 0
-    ingressLock.unlock()
     return PendingWork(
       entries: entries,
       storeOutcomes: storeOutcomes,
@@ -1086,6 +1060,86 @@ final class ViewerLiveEventWindow: ViewerLiveObservationProviding, @unchecked Se
     )
   }
 
+  private func applyPendingWork(_ work: PendingWork) -> Bool {
+    var changed = work.ingressOverflowCount > 0 || work.diagnosticLossCount > 0
+    ingressOverflowCount = Self.saturatingAdd(
+      ingressOverflowCount,
+      work.ingressOverflowCount
+    )
+    diagnosticLossCount = Self.saturatingAdd(
+      diagnosticLossCount,
+      work.diagnosticLossCount
+    )
+    if work.sessionLifecycleTransition {
+      changed =
+        reconcileDirectObservationSessions(
+          activeSessions: work.activeSessions,
+          terminatingSessions: Set(work.sessionTerminations.keys)
+        ) || changed
+    }
+    for (connectionID, termination) in work.sessionTerminations.sorted(by: {
+      $0.key.uuidString < $1.key.uuidString
+    }) {
+      if applySessionTermination(connectionID: connectionID, termination: termination) {
+        changed = true
+      } else {
+        diagnosticLossCount = Self.saturatingIncrement(diagnosticLossCount)
+        changed = true
+      }
+    }
+    for (connectionID, metadata) in work.activeSessions.sorted(by: {
+      $0.key.uuidString < $1.key.uuidString
+    }) {
+      changed = applyActiveSession(connectionID: connectionID, metadata: metadata) || changed
+    }
+    let frozenActiveConnectionIDs: Set<UUID>? =
+      work.tracksSessionLifecycle
+      ? Set(work.activeSessions.keys) : nil
+    for entry in work.entries {
+      changed = true
+      let connectionID = entry.observation.key.connectionID
+      if !work.tracksSessionLifecycle || work.activeSessions[connectionID] != nil
+        || sessions[connectionID] != nil
+      {
+        process(entry, frozenActiveConnectionIDs: frozenActiveConnectionIDs)
+      } else {
+        discardForSessionChurn(entry)
+      }
+    }
+    for (connectionID, counts) in work.dropCounts {
+      guard var session = sessions[connectionID] else {
+        diagnosticLossCount = Self.saturatingIncrement(diagnosticLossCount)
+        changed = true
+        continue
+      }
+      for (reason, count) in counts { session.dropCounts[reason] = count }
+      sessions[connectionID] = session
+      changed = true
+    }
+    for (key, disposition) in work.dispositions {
+      if window.setDisposition(disposition, for: key) { changed = true }
+    }
+    for key in work.conflictKeys {
+      if !window.markPresentationConflict(key) {
+        diagnosticLossCount = Self.saturatingIncrement(diagnosticLossCount)
+      }
+      changed = true
+    }
+    for storeOutcome in work.storeOutcomes {
+      changed = apply(storeOutcome) || changed
+    }
+    changed = reclaimUnreferencedEndedSessions() || changed
+    if let unavailable = work.storeUnavailable {
+      if unavailable {
+        noteStoreUnavailable()
+      } else {
+        noteStoreAvailable()
+      }
+      changed = true
+    }
+    return changed
+  }
+
   private func hasPendingWorkLocked() -> Bool {
     ingressCount > 0 || !pendingStoreOutcomes.isEmpty || !pendingDispositions.isEmpty
       || sessionStateDirty || !pendingSessionTerminations.isEmpty
@@ -1094,10 +1148,17 @@ final class ViewerLiveEventWindow: ViewerLiveObservationProviding, @unchecked Se
       || pendingDiagnosticLossCount > 0 || pendingStoreUnavailable != nil || dirtySuccessor
   }
 
-  private func process(_ entry: ViewerLiveIngressEntry) {
+  private func process(
+    _ entry: ViewerLiveIngressEntry,
+    frozenActiveConnectionIDs: Set<UUID>?
+  ) {
     switch entry.kind {
     case .newAuthority:
-      insertNewAuthority(entry.observation, accountedBytes: entry.accountedBytes)
+      insertNewAuthority(
+        entry.observation,
+        accountedBytes: entry.accountedBytes,
+        frozenActiveConnectionIDs: frozenActiveConnectionIDs
+      )
     case .deferredDuplicate:
       if let existing = window.node(for: entry.observation.key) {
         completePendingDuplicate(for: entry.observation.key)
@@ -1108,7 +1169,11 @@ final class ViewerLiveEventWindow: ViewerLiveObservationProviding, @unchecked Se
           entry.deferredDecision?(.presentationConflict)
         }
       } else if claimMissingAuthority(entry.observation) {
-        insertNewAuthority(entry.observation, accountedBytes: entry.accountedBytes)
+        insertNewAuthority(
+          entry.observation,
+          accountedBytes: entry.accountedBytes,
+          frozenActiveConnectionIDs: frozenActiveConnectionIDs
+        )
         entry.deferredDecision?(.accepted)
       } else {
         diagnosticLossCount = Self.saturatingIncrement(diagnosticLossCount)
@@ -1130,11 +1195,17 @@ final class ViewerLiveEventWindow: ViewerLiveObservationProviding, @unchecked Se
 
   private func insertNewAuthority(
     _ observation: ViewerCommittedEventObservation,
-    accountedBytes: Int
+    accountedBytes: Int,
+    frozenActiveConnectionIDs: Set<UUID>?
   ) {
     if sessions[observation.key.connectionID] == nil {
       if makeRoomForSession(observation.key.connectionID) {
-        guard reserveProjectedSessionIDIfActive(observation.key.connectionID) else {
+        guard
+          reserveProjectedSessionIDIfActive(
+            observation.key.connectionID,
+            frozenActiveConnectionIDs: frozenActiveConnectionIDs
+          )
+        else {
           releaseAuthority(for: observation)
           windowOverflowCount = Self.saturatingIncrement(windowOverflowCount)
           return
@@ -1248,7 +1319,12 @@ final class ViewerLiveEventWindow: ViewerLiveObservationProviding, @unchecked Se
       diagnosticLossCount = Self.saturatingIncrement(diagnosticLossCount)
       return true
     }
-    guard reserveProjectedSessionIDIfActive(connectionID) else { return false }
+    guard
+      reserveProjectedSessionIDIfActive(
+        connectionID,
+        frozenActiveConnectionIDs: Set([connectionID])
+      )
+    else { return false }
     sessions[connectionID] = ViewerLiveSessionState(
       metadata: metadata,
       endedWallMilliseconds: nil,
@@ -1324,9 +1400,15 @@ final class ViewerLiveEventWindow: ViewerLiveObservationProviding, @unchecked Se
     return true
   }
 
-  private func reserveProjectedSessionIDIfActive(_ connectionID: UUID) -> Bool {
+  private func reserveProjectedSessionIDIfActive(
+    _ connectionID: UUID,
+    frozenActiveConnectionIDs: Set<UUID>?
+  ) -> Bool {
     ingressLock.lock()
-    guard !tracksSessionLifecycle || activeSessionMetadata[connectionID] != nil else {
+    let isActive =
+      frozenActiveConnectionIDs?.contains(connectionID)
+      ?? (!tracksSessionLifecycle || activeSessionMetadata[connectionID] != nil)
+    guard isActive else {
       ingressLock.unlock()
       return false
     }
@@ -1407,6 +1489,123 @@ final class ViewerLiveEventWindow: ViewerLiveObservationProviding, @unchecked Se
       storeUnavailable = true
       storeUnavailableCount = Self.saturatingIncrement(storeUnavailableCount)
     }
+  }
+
+  private func makePerformanceSlice(
+    connectionID: UUID,
+    revision: UInt64,
+    anchorMonotonicNanoseconds: UInt64
+  ) throws -> ViewerPerformanceLiveSlice {
+    let candidates = window.orderedNodes().compactMap { node -> ViewerCommittedEventObservation? in
+      let observation = node.observation
+      guard observation.key.connectionID == connectionID,
+        observation.durableProjection.eventType.rawValue
+          == PerformanceSnapshotSchema.eventTypeRawValue,
+        observation.viewerMonotonicNanoseconds <= anchorMonotonicNanoseconds
+      else { return nil }
+      return observation
+    }.sorted { lhs, rhs in
+      if lhs.viewerMonotonicNanoseconds != rhs.viewerMonotonicNanoseconds {
+        return lhs.viewerMonotonicNanoseconds < rhs.viewerMonotonicNanoseconds
+      }
+      return ViewerPerformanceCanonicalOrder.keyPrecedes(lhs.key, rhs.key)
+    }
+
+    var events: [ViewerPerformanceEventCarrier] = []
+    events.reserveCapacity(min(candidates.count, ViewerPerformanceLimits.maximumEmittedEvents))
+    var copiedContentBytes = 0
+    var omittedEventCount: UInt64 = 0
+    for (index, observation) in candidates.enumerated() {
+      guard events.count < ViewerPerformanceLimits.maximumEmittedEvents,
+        let viewerMonotonic = Int64(exactly: observation.viewerMonotonicNanoseconds)
+      else {
+        omittedEventCount = Self.saturatingAdd(
+          omittedEventCount,
+          UInt64(candidates.count - index)
+        )
+        break
+      }
+      let canonical = observation.durableProjection.canonicalContent
+      let content: ViewerPerformanceEventContent
+      if canonical.count > ViewerPerformanceLimits.maximumRowContentBytes {
+        content = .oversized(byteCount: Int64(canonical.count))
+      } else {
+        let (nextBytes, overflow) = copiedContentBytes.addingReportingOverflow(canonical.count)
+        guard !overflow, nextBytes <= ViewerPerformanceLimits.maximumCopiedContentBytes else {
+          omittedEventCount = Self.saturatingAdd(
+            omittedEventCount,
+            UInt64(candidates.count - index)
+          )
+          break
+        }
+        copiedContentBytes = nextBytes
+        content = .canonical(canonical)
+      }
+      events.append(
+        try ViewerPerformanceEventCarrier(
+          locator: .transient(observationID: observation.observationID),
+          key: observation.key,
+          viewerWallMilliseconds: observation.viewerWallMilliseconds,
+          viewerMonotonicNanoseconds: viewerMonotonic,
+          content: content
+        )
+      )
+    }
+
+    let snapshot = snapshot().gaps
+    let eventLossCount = Self.saturatingSum(
+      snapshot.ingressOverflowCount,
+      snapshot.windowOverflowCount,
+      omittedEventCount
+    )
+    var storageContinuityCount = Self.saturatingAdd(
+      snapshot.storeUnavailableCount,
+      snapshot.storeRecoveryCount
+    )
+    if snapshot.storeUnavailable, storageContinuityCount == 0 { storageContinuityCount = 1 }
+    let gapValues: [(UInt64, ViewerPerformanceGapKind)] = [
+      (eventLossCount, .eventLoss),
+      (storageContinuityCount, .storageContinuity),
+      (snapshot.residentConflictCount, .presentationLoss),
+      (snapshot.diagnosticLossCount, .unknown),
+    ]
+    var gaps: [ViewerPerformanceGapCarrier] = []
+    gaps.reserveCapacity(gapValues.count)
+    var applicableOrUncertainCount: UInt64 = 0
+    var hasMoreApplicableGaps = false
+    for (count, kind) in gapValues where count > 0 {
+      applicableOrUncertainCount = Self.saturatingAdd(applicableOrUncertainCount, count)
+      guard gaps.count < ViewerPerformanceLimits.maximumLiveGaps else {
+        hasMoreApplicableGaps = true
+        continue
+      }
+      gaps.append(
+        try ViewerPerformanceGapCarrier(
+          rowID: nil,
+          recordingID: nil,
+          deviceSessionID: nil,
+          count: count,
+          firstViewerWallMilliseconds: nil,
+          lastViewerWallMilliseconds: nil,
+          kind: kind,
+          applicability: .uncertain
+        )
+      )
+    }
+    if applicableOrUncertainCount > UInt64(ViewerPerformanceLimits.maximumLiveGaps) {
+      hasMoreApplicableGaps = true
+    }
+    return try ViewerPerformanceLiveSlice(
+      runtimeLogicalID: runtimeLogicalID,
+      connectionID: connectionID,
+      liveGeneration: liveGeneration,
+      revision: revision,
+      anchorMonotonicNanoseconds: anchorMonotonicNanoseconds,
+      events: events,
+      gaps: gaps,
+      applicableOrUncertainCount: applicableOrUncertainCount,
+      hasMoreApplicableGaps: hasMoreApplicableGaps
+    )
   }
 
   private func publishSnapshot() {

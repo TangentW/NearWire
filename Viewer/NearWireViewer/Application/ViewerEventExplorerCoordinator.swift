@@ -23,6 +23,7 @@ enum ViewerExplorerTraversalReason: Equatable, Sendable {
   case resume
   case jumpToLatest
   case refresh
+  case analysisModeSwitch
 }
 
 enum ViewerExplorerTraversalState: Equatable, Sendable {
@@ -211,6 +212,7 @@ final class ViewerEventExplorerCoordinator: CustomReflectable, CustomStringConve
   private var liveSnapshotCount: UInt64 = 0
   private var presentationHandler: PresentationHandler = {}
   private var liveEvaluationOperation: LiveEvaluationOperation?
+  private(set) var isAnalysisActive = true
 
   init(
     model: ViewerEventExplorerModel,
@@ -271,6 +273,48 @@ final class ViewerEventExplorerCoordinator: CustomReflectable, CustomStringConve
     cancelLiveEvaluation()
   }
 
+  @discardableResult
+  func deactivateAndReleaseTraversal() -> Task<Void, Never> {
+    guard isAnalysisActive else { return waitForIdle() }
+    isAnalysisActive = false
+    _ = model.beginPresentationReplacement(clearRows: false)
+    cancelLiveEvaluation()
+    progress = nil
+    releaseRequestCount = Self.saturatingIncrement(releaseRequestCount)
+    state = .releasing(.analysisModeSwitch)
+    presentationHandler()
+
+    let workID = workTracker.begin()
+    let delivery = ViewerExplorerStoreDelivery()
+    let storeToken = store.endTraversal { [weak self, workTracker, delivery] result in
+      Task { @MainActor in
+        self?.handleAnalysisDeactivation(result, delivery: delivery)
+        workTracker.complete(workID)
+      }
+    }
+    delivery.attach(storeToken)
+    return waitForIdle()
+  }
+
+  @discardableResult
+  func activateAndRefresh() -> Task<Void, Never> {
+    guard !isAnalysisActive else { return waitForIdle() }
+    isAnalysisActive = true
+    guard !model.isPaused else {
+      state = .paused
+      presentationHandler()
+      return waitForIdle()
+    }
+    let token = model.beginTimelineReplacement()
+    requestFreshTraversal(
+      reason: .analysisModeSwitch,
+      token: token,
+      jumpsToLatest: model.autoFollow
+    )
+    presentationHandler()
+    return waitForIdle()
+  }
+
   func setPresentationHandler(_ handler: @escaping PresentationHandler) {
     presentationHandler = handler
   }
@@ -292,7 +336,9 @@ final class ViewerEventExplorerCoordinator: CustomReflectable, CustomStringConve
     guard model.isPaused else { return model.currentToken }
     let token = model.setPaused(false)
     live.setPresentationPaused(false)
-    requestFreshTraversal(reason: .resume, token: token, jumpsToLatest: false)
+    if isAnalysisActive {
+      requestFreshTraversal(reason: .resume, token: token, jumpsToLatest: false)
+    }
     presentationHandler()
     return token
   }
@@ -301,14 +347,16 @@ final class ViewerEventExplorerCoordinator: CustomReflectable, CustomStringConve
   func jumpToLatest() -> ViewerExplorerPresentationToken {
     model.setAutoFollow(true)
     let token = model.beginTimelineReplacement()
-    requestFreshTraversal(reason: .jumpToLatest, token: token, jumpsToLatest: true)
+    if isAnalysisActive {
+      requestFreshTraversal(reason: .jumpToLatest, token: token, jumpsToLatest: true)
+    }
     presentationHandler()
     return token
   }
 
   @discardableResult
   func refresh() -> ViewerExplorerPresentationToken {
-    guard !model.isPaused else { return model.currentToken }
+    guard !model.isPaused, isAnalysisActive else { return model.currentToken }
     let token = model.beginTimelineReplacement()
     requestFreshTraversal(reason: .refresh, token: token, jumpsToLatest: false)
     presentationHandler()
@@ -321,7 +369,7 @@ final class ViewerEventExplorerCoordinator: CustomReflectable, CustomStringConve
     materialization: ViewerExplorerMaterializationSnapshot
   ) throws -> ViewerExplorerPresentationToken {
     let token = try model.replaceScope(scope, materialization: materialization)
-    guard !model.isPaused else { return token }
+    guard !model.isPaused, isAnalysisActive else { return token }
     requestFreshTraversal(reason: .scopeReplacement, token: token, jumpsToLatest: true)
     presentationHandler()
     return token
@@ -334,7 +382,7 @@ final class ViewerEventExplorerCoordinator: CustomReflectable, CustomStringConve
     let unchanged = model.materializationSnapshot == materialization
     guard let token = try model.replaceMaterialization(materialization) else { return nil }
     guard !unchanged else { return token }
-    guard !model.isPaused else { return token }
+    guard !model.isPaused, isAnalysisActive else { return token }
     requestFreshTraversal(
       reason: .materializationReplacement,
       token: token,
@@ -360,7 +408,7 @@ final class ViewerEventExplorerCoordinator: CustomReflectable, CustomStringConve
     token: ViewerExplorerPresentationToken,
     jumpsToLatest: Bool
   ) {
-    guard !model.isPaused, token == model.currentToken else { return }
+    guard isAnalysisActive, !model.isPaused, token == model.currentToken else { return }
     cancelLiveEvaluation()
     requestCount = Self.saturatingIncrement(requestCount)
     releaseRequestCount = Self.saturatingIncrement(releaseRequestCount)
@@ -392,7 +440,7 @@ final class ViewerEventExplorerCoordinator: CustomReflectable, CustomStringConve
   ) {
     releaseCompletionCount = Self.saturatingIncrement(releaseCompletionCount)
     guard let storeToken = delivery.validToken else { return }
-    guard token == model.currentToken, !model.isPaused else { return }
+    guard isAnalysisActive, token == model.currentToken, !model.isPaused else { return }
     guard case .success = result else {
       if case .failure(let failure) = result { state = .failed(failure) }
       presentationHandler()
@@ -460,7 +508,7 @@ final class ViewerEventExplorerCoordinator: CustomReflectable, CustomStringConve
     token: ViewerExplorerPresentationToken
   ) {
     if liveEvaluationOperation?.token == token { liveEvaluationOperation = nil }
-    guard token == model.currentToken, !model.isPaused else { return }
+    guard isAnalysisActive, token == model.currentToken, !model.isPaused else { return }
     switch result {
     case .complete(let output):
       do {
@@ -516,7 +564,7 @@ final class ViewerEventExplorerCoordinator: CustomReflectable, CustomStringConve
     delivery: ViewerExplorerStoreDelivery
   ) {
     guard let storeToken = delivery.validToken else { return }
-    guard token == model.currentToken, !model.isPaused else { return }
+    guard isAnalysisActive, token == model.currentToken, !model.isPaused else { return }
     guard case .success = result else {
       if case .failure(let failure) = result { state = .failed(failure) }
       progress = nil
@@ -551,7 +599,7 @@ final class ViewerEventExplorerCoordinator: CustomReflectable, CustomStringConve
     delivery: ViewerExplorerStoreDelivery
   ) {
     guard delivery.validToken != nil else { return }
-    guard token == model.currentToken, !model.isPaused else { return }
+    guard isAnalysisActive, token == model.currentToken, !model.isPaused else { return }
     switch result {
     case .success(let page):
       guard let mutation = model.applyTimelinePage(page, placement: .replace, token: token) else {
@@ -577,7 +625,7 @@ final class ViewerEventExplorerCoordinator: CustomReflectable, CustomStringConve
     delivery: ViewerExplorerStoreDelivery
   ) {
     guard delivery.validToken != nil else { return }
-    guard token == model.currentToken, !model.isPaused else { return }
+    guard isAnalysisActive, token == model.currentToken, !model.isPaused else { return }
     switch result {
     case .success(let page):
       guard model.applyGapPage(page, placement: .replace, token: token) else {
@@ -651,7 +699,7 @@ final class ViewerEventExplorerCoordinator: CustomReflectable, CustomStringConve
   }
 
   private func finishIfReady(token: ViewerExplorerPresentationToken) {
-    guard let current = progress, current.token == token,
+    guard isAnalysisActive, let current = progress, current.token == token,
       current.durableFinished, current.gapFinished, current.liveFinished
     else { return }
     progress = nil
@@ -663,6 +711,22 @@ final class ViewerEventExplorerCoordinator: CustomReflectable, CustomStringConve
   private func cancelLiveEvaluation() {
     liveEvaluationOperation?.cancellation.cancel()
     liveEvaluationOperation = nil
+  }
+
+  private func handleAnalysisDeactivation(
+    _ result: Result<Void, ViewerStoreExplorerFailure>,
+    delivery: ViewerExplorerStoreDelivery
+  ) {
+    releaseCompletionCount = Self.saturatingIncrement(releaseCompletionCount)
+    guard delivery.validToken != nil, !isAnalysisActive else { return }
+    progress = nil
+    switch result {
+    case .success:
+      state = model.isPaused ? .paused : .idle
+    case .failure(let failure):
+      state = .failed(failure)
+    }
+    presentationHandler()
   }
 
   private static func saturatingIncrement(_ value: UInt64) -> UInt64 {

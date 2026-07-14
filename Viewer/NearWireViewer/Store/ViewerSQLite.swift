@@ -135,7 +135,7 @@ enum ViewerStoreFileSecurity {
 
 struct ViewerSQLiteBudget: Sendable, Equatable {
   let maximumVirtualMachineSteps: Int
-  let deadline: ContinuousClock.Instant
+  let deadline: ContinuousClock.Instant?
 
   static func query(now: ContinuousClock.Instant = .now) -> ViewerSQLiteBudget {
     ViewerSQLiteBudget(maximumVirtualMachineSteps: 2_000_000, deadline: now + .milliseconds(250))
@@ -143,6 +143,14 @@ struct ViewerSQLiteBudget: Sendable, Equatable {
 
   static func export(now: ContinuousClock.Instant = .now) -> ViewerSQLiteBudget {
     ViewerSQLiteBudget(maximumVirtualMachineSteps: 8_000_000, deadline: now + .seconds(1))
+  }
+
+  static func performance() -> ViewerSQLiteBudget {
+    ViewerSQLiteBudget(maximumVirtualMachineSteps: 5_000_000, deadline: nil)
+  }
+
+  static func performanceClassification() -> ViewerSQLiteBudget {
+    ViewerSQLiteBudget(maximumVirtualMachineSteps: 2_000_000, deadline: nil)
   }
 }
 

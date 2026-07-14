@@ -143,6 +143,13 @@ final class ViewerStoreLeaseRegistry: @unchecked Sendable {
       || exportLease?.recordingID == recordingID
   }
 
+  var queryLeaseCountForTesting: Int {
+    lock.lock()
+    defer { lock.unlock() }
+    expireLocked(now: .now)
+    return queryLeases.count
+  }
+
   func withDeletionLock<T>(
     now: ContinuousClock.Instant = .now,
     _ body: (_ protectsRecording: (Int64) -> Bool) throws -> T

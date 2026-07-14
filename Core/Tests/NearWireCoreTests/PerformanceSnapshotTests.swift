@@ -4,6 +4,49 @@ import XCTest
 @_spi(NearWireInternal) @testable import NearWireCore
 
 final class PerformanceSnapshotTests: XCTestCase {
+  func testMetricInventoryHasStableOrderGroupsAndKinds() {
+    XCTAssertEqual(
+      PerformanceMetricKey.allCases.map(\.rawValue),
+      [
+        "process.cpuPercent",
+        "process.memoryFootprintBytes",
+        "display.estimatedFramesPerSecond",
+        "display.maximumFramesPerSecond",
+        "device.batteryLevel",
+        "device.batteryState",
+        "device.thermalState",
+        "device.lowPowerModeEnabled",
+        "device.gpuUtilization",
+        "device.powerWatts",
+        "device.temperatureCelsius",
+        "transport.uplinkQueueDepth",
+        "transport.droppedEventCount",
+        "transport.uplinkBytesPerSecond",
+        "transport.downlinkBytesPerSecond",
+        "transport.downlinkQueueDepth",
+      ]
+    )
+    XCTAssertEqual(
+      PerformanceMetricGroup.allCases.flatMap(\.keys),
+      PerformanceMetricKey.allCases
+    )
+    XCTAssertEqual(
+      PerformanceMetricKey.allCases.filter { $0.kind == .numeric }.count,
+      10
+    )
+    XCTAssertEqual(
+      PerformanceMetricKey.allCases.filter { $0.kind == .categorical }.count,
+      3
+    )
+    XCTAssertEqual(
+      PerformanceMetricKey.allCases.filter { $0.kind == .unavailableOnly }.count,
+      3
+    )
+    for group in PerformanceMetricGroup.allCases {
+      XCTAssertTrue(group.keys.allSatisfy { $0.group == group })
+    }
+  }
+
   func testCompleteSnapshotRoundTripsThroughContentCodec() throws {
     let snapshot = try PerformanceSnapshot(
       sampledAt: Date(timeIntervalSince1970: 1_700_000_000.125),

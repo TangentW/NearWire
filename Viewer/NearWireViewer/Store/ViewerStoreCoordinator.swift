@@ -97,6 +97,7 @@ final class ViewerStoreCoordinator: @unchecked Sendable, CustomReflectable,
     let catalog: ViewerStoreCatalogService
     let diagnostics: ViewerStoreDiagnosticService
     let query: ViewerStoreQueryService
+    let performance: ViewerPerformanceStoreService
     let export: ViewerStoreExportService
     let preferences: ViewerStoragePreferences
     let statusSignal: ViewerStoreStatusSignal
@@ -271,6 +272,7 @@ final class ViewerStoreCoordinator: @unchecked Sendable, CustomReflectable,
       catalog: ViewerStoreCatalogService(pool: pool),
       diagnostics: ViewerStoreDiagnosticService(pool: pool, leases: leases),
       query: ViewerStoreQueryService(pool: pool, leases: leases),
+      performance: ViewerPerformanceStoreService(pool: pool, leases: leases),
       export: ViewerStoreExportService(pool: pool, leases: leases),
       preferences: preferences,
       statusSignal: statusSignal
@@ -1475,10 +1477,12 @@ final class ViewerStoreRuntime: ViewerSessionJournaling, @unchecked Sendable,
     let needsRecovery = coordinatorNeedsRecovery
     let migrationStatus = migrationStatus
     lock.unlock()
+    let storeGeneration = explorerGateway.currentStoreGeneration
     let current = coordinator?.services.eventStore.status()
     if needsRecovery, let current {
       return ViewerStoreStatus(
         state: .unavailable,
+        storeGeneration: storeGeneration,
         migration: migrationStatus,
         capacityBytes: current.capacityBytes,
         logicalQuotaBytes: current.logicalQuotaBytes,
@@ -1489,9 +1493,10 @@ final class ViewerStoreRuntime: ViewerSessionJournaling, @unchecked Sendable,
         lastCleanupCategory: current.lastCleanupCategory
       )
     }
-    return current
+    return current?.replacingStoreGeneration(storeGeneration)
       ?? ViewerStoreStatus(
         state: .unavailable,
+        storeGeneration: storeGeneration,
         migration: migrationStatus,
         capacityBytes: preferences.load().capacityBytes,
         logicalQuotaBytes: 0,

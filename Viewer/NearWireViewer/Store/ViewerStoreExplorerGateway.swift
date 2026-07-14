@@ -162,6 +162,12 @@ final class ViewerStoreExplorerGateway: @unchecked Sendable {
     for delivery in deferredDeliveries { delivery() }
   }
 
+  var currentStoreGeneration: UInt64 {
+    lock.lock()
+    defer { lock.unlock() }
+    return activeGeneration?.generation ?? 0
+  }
+
   @discardableResult
   func loadChangeSnapshot(
     completion: @escaping SnapshotCompletion
@@ -271,6 +277,76 @@ final class ViewerStoreExplorerGateway: @unchecked Sendable {
   }
 
   @discardableResult
+  func beginPerformanceTraversal(
+    recordingID: Int64,
+    deviceSessionID: Int64,
+    lowerMonotonicNanoseconds: Int64,
+    upperMonotonicNanoseconds: Int64,
+    completion:
+      @escaping @Sendable (
+        Result<ViewerPerformanceStoreScope, ViewerStoreExplorerFailure>
+      ) -> Void
+  ) -> ViewerStoreExplorerOperationToken {
+    withGeneration(completion: completion) { generation in
+      generation.beginPerformanceTraversal(
+        recordingID: recordingID,
+        deviceSessionID: deviceSessionID,
+        lowerMonotonicNanoseconds: lowerMonotonicNanoseconds,
+        upperMonotonicNanoseconds: upperMonotonicNanoseconds,
+        completion: completion
+      )
+    }
+  }
+
+  @discardableResult
+  func loadPerformanceEventPage(
+    continuation: ViewerPerformanceContinuation?,
+    completion:
+      @escaping @Sendable (
+        Result<ViewerPerformanceEventPage, ViewerStoreExplorerFailure>
+      ) -> Void
+  ) -> ViewerStoreExplorerOperationToken {
+    withGeneration(completion: completion) { generation in
+      generation.loadPerformanceEventPage(
+        continuation: continuation,
+        completion: completion
+      )
+    }
+  }
+
+  @discardableResult
+  func loadPerformanceGapPage(
+    completion:
+      @escaping @Sendable (
+        Result<ViewerPerformanceGapPage, ViewerStoreExplorerFailure>
+      ) -> Void
+  ) -> ViewerStoreExplorerOperationToken {
+    withGeneration(completion: completion) { generation in
+      generation.loadPerformanceGapPage(completion: completion)
+    }
+  }
+
+  @discardableResult
+  func resolvePerformanceEventLocator(
+    recordingID: Int64,
+    deviceSessionID: Int64,
+    key: ViewerEventJournalKey,
+    completion:
+      @escaping @Sendable (
+        Result<ViewerPerformanceEventLocator?, ViewerStoreExplorerFailure>
+      ) -> Void
+  ) -> ViewerStoreExplorerOperationToken {
+    withGeneration(completion: completion) { generation in
+      generation.resolvePerformanceEventLocator(
+        recordingID: recordingID,
+        deviceSessionID: deviceSessionID,
+        key: key,
+        completion: completion
+      )
+    }
+  }
+
+  @discardableResult
   func loadRecordingCatalog(
     cursor: ViewerRecordingCatalogCursor?,
     direction: ViewerCatalogPageDirection = .older,
@@ -291,8 +367,27 @@ final class ViewerStoreExplorerGateway: @unchecked Sendable {
   }
 
   @discardableResult
+  func loadRecordingIdentity(
+    logicalID: UUID,
+    snapshot: ViewerRecordingCatalogSnapshot,
+    completion:
+      @escaping @Sendable (
+        Result<ViewerRecordingCatalogPage, ViewerStoreExplorerFailure>
+      ) -> Void
+  ) -> ViewerStoreExplorerOperationToken {
+    withGeneration(completion: completion) { generation in
+      generation.loadRecordingIdentity(
+        logicalID: logicalID,
+        snapshot: snapshot,
+        completion: completion
+      )
+    }
+  }
+
+  @discardableResult
   func loadDeviceCatalog(
     recordingID: Int64,
+    recordingSnapshot: ViewerRecordingCatalogSnapshot? = nil,
     cursor: ViewerDeviceCatalogCursor?,
     direction: ViewerCatalogPageDirection = .older,
     limit: Int = 100,
@@ -304,9 +399,30 @@ final class ViewerStoreExplorerGateway: @unchecked Sendable {
     withGeneration(completion: completion) { generation in
       generation.loadDeviceCatalog(
         recordingID: recordingID,
+        recordingSnapshot: recordingSnapshot,
         cursor: cursor,
         direction: direction,
         limit: limit,
+        completion: completion
+      )
+    }
+  }
+
+  @discardableResult
+  func loadDeviceIdentities(
+    recordingID: Int64,
+    logicalIDs: [UUID],
+    snapshot: ViewerDeviceCatalogSnapshot,
+    completion:
+      @escaping @Sendable (
+        Result<ViewerDeviceCatalogPage, ViewerStoreExplorerFailure>
+      ) -> Void
+  ) -> ViewerStoreExplorerOperationToken {
+    withGeneration(completion: completion) { generation in
+      generation.loadDeviceIdentities(
+        recordingID: recordingID,
+        logicalIDs: logicalIDs,
+        snapshot: snapshot,
         completion: completion
       )
     }
@@ -585,6 +701,7 @@ private final class ViewerStoreExplorerCoordinatorGeneration: @unchecked Sendabl
     arbiter = ViewerExplorerQueryArbiter(
       queryService: services.query,
       diagnosticService: services.diagnostics,
+      performanceService: services.performance,
       exportService: services.export
     )
     self.operationExecutionGate = operationExecutionGate
@@ -628,6 +745,85 @@ private final class ViewerStoreExplorerCoordinatorGeneration: @unchecked Sendabl
         cursor: cursor,
         direction: direction,
         limit: limit,
+        operationID: operationID
+      )
+    }
+  }
+
+  func beginPerformanceTraversal(
+    recordingID: Int64,
+    deviceSessionID: Int64,
+    lowerMonotonicNanoseconds: Int64,
+    upperMonotonicNanoseconds: Int64,
+    completion:
+      @escaping @Sendable (
+        Result<ViewerPerformanceStoreScope, ViewerStoreExplorerFailure>
+      ) -> Void
+  ) -> ViewerStoreExplorerOperationToken {
+    submitIdentified(
+      discardedSuccessfulCandidate: { [arbiter] in arbiter.endTraversal() },
+      completion: completion,
+      operation: { [arbiter, generation] operationID in
+        try arbiter.replacePerformanceTraversal(
+          storeGeneration: generation,
+          recordingID: recordingID,
+          deviceSessionID: deviceSessionID,
+          lowerMonotonicNanoseconds: lowerMonotonicNanoseconds,
+          upperMonotonicNanoseconds: upperMonotonicNanoseconds,
+          operationID: operationID
+        )
+      }
+    )
+  }
+
+  func loadPerformanceEventPage(
+    continuation: ViewerPerformanceContinuation?,
+    completion:
+      @escaping @Sendable (
+        Result<ViewerPerformanceEventPage, ViewerStoreExplorerFailure>
+      ) -> Void
+  ) -> ViewerStoreExplorerOperationToken {
+    submitIdentified(
+      discardedSuccessfulCandidate: { [arbiter] in arbiter.endTraversal() },
+      completion: completion,
+      operation: { [arbiter] operationID in
+        try arbiter.performanceEventPage(
+          continuation: continuation,
+          operationID: operationID
+        )
+      }
+    )
+  }
+
+  func loadPerformanceGapPage(
+    completion:
+      @escaping @Sendable (
+        Result<ViewerPerformanceGapPage, ViewerStoreExplorerFailure>
+      ) -> Void
+  ) -> ViewerStoreExplorerOperationToken {
+    submitIdentified(
+      discardedSuccessfulCandidate: { [arbiter] in arbiter.endTraversal() },
+      completion: completion,
+      operation: { [arbiter] operationID in
+        try arbiter.performanceGapPage(operationID: operationID)
+      }
+    )
+  }
+
+  func resolvePerformanceEventLocator(
+    recordingID: Int64,
+    deviceSessionID: Int64,
+    key: ViewerEventJournalKey,
+    completion:
+      @escaping @Sendable (
+        Result<ViewerPerformanceEventLocator?, ViewerStoreExplorerFailure>
+      ) -> Void
+  ) -> ViewerStoreExplorerOperationToken {
+    submitIdentified(completion: completion) { [arbiter] operationID in
+      try arbiter.resolvePerformanceEventLocator(
+        recordingID: recordingID,
+        deviceSessionID: deviceSessionID,
+        key: key,
         operationID: operationID
       )
     }
@@ -684,8 +880,27 @@ private final class ViewerStoreExplorerCoordinatorGeneration: @unchecked Sendabl
     }
   }
 
+  func loadRecordingIdentity(
+    logicalID: UUID,
+    snapshot: ViewerRecordingCatalogSnapshot,
+    completion:
+      @escaping @Sendable (
+        Result<ViewerRecordingCatalogPage, ViewerStoreExplorerFailure>
+      ) -> Void
+  ) -> ViewerStoreExplorerOperationToken {
+    submitIdentified(completion: completion) { [generation, services] operationID in
+      try services.catalog.recordingIdentityPage(
+        logicalID: logicalID,
+        snapshot: snapshot,
+        storeGeneration: generation,
+        operationID: operationID
+      )
+    }
+  }
+
   func loadDeviceCatalog(
     recordingID: Int64,
+    recordingSnapshot: ViewerRecordingCatalogSnapshot?,
     cursor: ViewerDeviceCatalogCursor?,
     direction: ViewerCatalogPageDirection,
     limit: Int,
@@ -698,9 +913,30 @@ private final class ViewerStoreExplorerCoordinatorGeneration: @unchecked Sendabl
       try services.catalog.devicePage(
         recordingID: recordingID,
         storeGeneration: generation,
+        recordingSnapshot: recordingSnapshot,
         cursor: cursor,
         direction: direction,
         limit: limit,
+        operationID: operationID
+      )
+    }
+  }
+
+  func loadDeviceIdentities(
+    recordingID: Int64,
+    logicalIDs: [UUID],
+    snapshot: ViewerDeviceCatalogSnapshot,
+    completion:
+      @escaping @Sendable (
+        Result<ViewerDeviceCatalogPage, ViewerStoreExplorerFailure>
+      ) -> Void
+  ) -> ViewerStoreExplorerOperationToken {
+    submitIdentified(completion: completion) { [generation, services] operationID in
+      try services.catalog.deviceIdentityPage(
+        recordingID: recordingID,
+        logicalIDs: logicalIDs,
+        snapshot: snapshot,
+        storeGeneration: generation,
         operationID: operationID
       )
     }
@@ -985,12 +1221,14 @@ private final class ViewerStoreExplorerCoordinatorGeneration: @unchecked Sendabl
   private func submit<Value: Sendable>(
     interruptsWhenActive: Bool = true,
     successfulCandidateIsAuthoritative: Bool = false,
+    discardedSuccessfulCandidate: @escaping @Sendable () -> Void = {},
     completion: @escaping @Sendable (Result<Value, ViewerStoreExplorerFailure>) -> Void,
     operation: @escaping @Sendable () throws -> Value
   ) -> ViewerStoreExplorerOperationToken {
     submitIdentified(
       interruptsWhenActive: interruptsWhenActive,
       successfulCandidateIsAuthoritative: successfulCandidateIsAuthoritative,
+      discardedSuccessfulCandidate: discardedSuccessfulCandidate,
       completion: completion
     ) { _ in
       try operation()
@@ -1000,6 +1238,7 @@ private final class ViewerStoreExplorerCoordinatorGeneration: @unchecked Sendabl
   private func submitIdentified<Value: Sendable>(
     interruptsWhenActive: Bool = true,
     successfulCandidateIsAuthoritative: Bool = false,
+    discardedSuccessfulCandidate: @escaping @Sendable () -> Void = {},
     completion: @escaping @Sendable (Result<Value, ViewerStoreExplorerFailure>) -> Void,
     operation: @escaping @Sendable (UUID) throws -> Value
   ) -> ViewerStoreExplorerOperationToken {
@@ -1022,6 +1261,9 @@ private final class ViewerStoreExplorerCoordinatorGeneration: @unchecked Sendabl
         candidate: candidate,
         successfulCandidateIsAuthoritative: successfulCandidateIsAuthoritative
       )
+      if case .success = candidate, case .failure = result {
+        discardedSuccessfulCandidate()
+      }
       prepareCompletion(token.operationID)
       complete(token.operationID)
       completion(result)
@@ -1166,6 +1408,19 @@ private final class ViewerStoreExplorerCoordinatorGeneration: @unchecked Sendabl
         return .failure(.refineQuery)
       case .invalidPath, .unsupportedSchema, .corruptStore, .capacityExceeded,
         .writeNotAuthorized, .unavailable:
+        return .failure(.unavailable)
+      }
+    } catch let error as ViewerPerformanceStoreFailure {
+      switch error {
+      case .storeReplaced:
+        return .failure(.storeReplaced)
+      case .cancelled:
+        return .failure(.cancelled)
+      case .invalidScope, .invalidContinuation:
+        return .failure(.invalidRequest)
+      case .workLimitExceeded, .limitExceeded:
+        return .failure(.refineQuery)
+      case .invalidCarrier, .unavailable:
         return .failure(.unavailable)
       }
     } catch {

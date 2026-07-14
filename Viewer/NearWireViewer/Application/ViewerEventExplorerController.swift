@@ -310,6 +310,15 @@ struct ViewerExplorerContentDriver: Sendable {
     @Sendable (Result<ViewerRecordingCatalogPage, ViewerStoreExplorerFailure>) -> Void
   typealias DeviceCompletion =
     @Sendable (Result<ViewerDeviceCatalogPage, ViewerStoreExplorerFailure>) -> Void
+  typealias DeviceCatalogLoader =
+    @Sendable (
+      Int64, ViewerRecordingCatalogSnapshot?, ViewerDeviceCatalogCursor?,
+      ViewerCatalogPageDirection, Int, @escaping DeviceCompletion
+    ) -> ViewerStoreExplorerOperationToken
+  typealias DeviceIdentitiesLoader =
+    @Sendable (
+      Int64, [UUID], ViewerDeviceCatalogSnapshot, @escaping DeviceCompletion
+    ) -> ViewerStoreExplorerOperationToken
   typealias EventCompletion =
     @Sendable (Result<ViewerEventPage, ViewerStoreExplorerFailure>) -> Void
   typealias GapCompletion = @Sendable (Result<ViewerGapPage, ViewerStoreExplorerFailure>) -> Void
@@ -331,11 +340,12 @@ struct ViewerExplorerContentDriver: Sendable {
     @Sendable (
       ViewerRecordingCatalogCursor?, ViewerCatalogPageDirection, Int, @escaping RecordingCompletion
     ) -> ViewerStoreExplorerOperationToken
-  let loadDeviceCatalog:
+  let loadRecordingIdentity:
     @Sendable (
-      Int64, ViewerDeviceCatalogCursor?, ViewerCatalogPageDirection, Int,
-      @escaping DeviceCompletion
+      UUID, ViewerRecordingCatalogSnapshot, @escaping RecordingCompletion
     ) -> ViewerStoreExplorerOperationToken
+  let loadDeviceCatalog: DeviceCatalogLoader
+  let loadDeviceIdentities: DeviceIdentitiesLoader
   let loadEventPage:
     @Sendable (
       ViewerEventCursor?, ViewerStoreQueryService.Direction, Int, @escaping EventCompletion
@@ -378,7 +388,11 @@ struct ViewerExplorerContentDriver: Sendable {
     ) -> ViewerStoreExplorerOperationToken
   let cancel: @Sendable (ViewerStoreExplorerOperationToken) -> Void
 
-  init(gateway: ViewerStoreExplorerGateway) {
+  init(
+    gateway: ViewerStoreExplorerGateway,
+    loadDeviceCatalog: DeviceCatalogLoader? = nil,
+    loadDeviceIdentities: DeviceIdentitiesLoader? = nil
+  ) {
     loadRecordingCatalog = { cursor, direction, limit, completion in
       gateway.loadRecordingCatalog(
         cursor: cursor,
@@ -387,15 +401,35 @@ struct ViewerExplorerContentDriver: Sendable {
         completion: completion
       )
     }
-    loadDeviceCatalog = { recordingID, cursor, direction, limit, completion in
-      gateway.loadDeviceCatalog(
-        recordingID: recordingID,
-        cursor: cursor,
-        direction: direction,
-        limit: limit,
+    loadRecordingIdentity = { logicalID, snapshot, completion in
+      gateway.loadRecordingIdentity(
+        logicalID: logicalID,
+        snapshot: snapshot,
         completion: completion
       )
     }
+    self.loadDeviceCatalog =
+      loadDeviceCatalog ?? {
+        recordingID, recordingSnapshot, cursor, direction, limit, completion in
+        gateway.loadDeviceCatalog(
+          recordingID: recordingID,
+          recordingSnapshot: recordingSnapshot,
+          cursor: cursor,
+          direction: direction,
+          limit: limit,
+          completion: completion
+        )
+      }
+    self.loadDeviceIdentities =
+      loadDeviceIdentities ?? {
+        recordingID, logicalIDs, snapshot, completion in
+        gateway.loadDeviceIdentities(
+          recordingID: recordingID,
+          logicalIDs: logicalIDs,
+          snapshot: snapshot,
+          completion: completion
+        )
+      }
     loadEventPage = { cursor, direction, limit, completion in
       gateway.loadPage(cursor: cursor, direction: direction, limit: limit, completion: completion)
     }
@@ -450,6 +484,11 @@ struct ViewerExplorerContentDriver: Sendable {
 final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
   CustomStringConvertible, CustomDebugStringConvertible
 {
+  typealias AnalysisSelectionHandler = @MainActor @Sendable () -> Void
+  typealias AnalysisRefreshHandler = @MainActor @Sendable () -> Void
+  typealias AnalysisRematerializationHandler =
+    @MainActor @Sendable (Task<Void, Never>) -> Void
+
   private enum OperationSlot: Hashable {
     case recordings
     case devices
@@ -463,6 +502,12 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
     case deleteExecution
     case exportPreparation
     case exportExecution
+  }
+
+  private enum StoreRematerializationResolution {
+    case unresolved
+    case resolved
+    case recordingAbsent
   }
 
   private struct ActiveOperation {
@@ -519,6 +564,7 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
   private let rendererDeliveryClaimed: @Sendable () -> Void
   private let operationTracker = ViewerAsyncWorkTracker()
   private let exportDestinationSelectionTracker = ViewerAsyncWorkTracker()
+  private let storeRematerializationTracker = ViewerAsyncWorkTracker()
   private var activeOperations: [OperationSlot: ActiveOperation] = [:]
   private var rendererDelivery: RendererDelivery?
   private var exportDestinationSelection: ExportDestinationSelection?
@@ -530,10 +576,15 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
   private var sessionSnapshots: [ViewerSessionSnapshot] = []
   private var materializationGeneration: UInt64 = 0
   private var changeSnapshotDirty = false
+  private var activeStoreRematerializationID: UUID?
+  private var storeRematerializationResolution: StoreRematerializationResolution = .resolved
   private(set) var changeSnapshotRequestCountForTesting = 0
   private var started = false
   private var sealed = false
   private var cleanupTask: Task<Void, Never>?
+  private var analysisSelectionHandler: AnalysisSelectionHandler = {}
+  private var analysisRefreshHandler: AnalysisRefreshHandler = {}
+  private var analysisRematerializationHandler: AnalysisRematerializationHandler = { _ in }
   private lazy var rendererDeliveryPump = ViewerLatestMainActorDeliveryPump<
     RendererDeliveryValue
   > { [weak self] delivery in
@@ -542,6 +593,7 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
 
   init(
     inputs: ViewerRuntimeExplorerInputs,
+    contentDriver: ViewerExplorerContentDriver? = nil,
     rendererService: ViewerRendererPreparationService = ViewerRendererPreparationService(),
     operationDeliveryClaimed: @escaping @Sendable () -> Void = {},
     rendererDeliveryClaimed: @escaping @Sendable () -> Void = {}
@@ -549,7 +601,7 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
     model = ViewerEventExplorerModel(runtimeLogicalID: inputs.runtimeLogicalID)
     coordinator = ViewerEventExplorerCoordinator(model: model, inputs: inputs)
     inspector = ViewerEventInspectorModel(runtimeLogicalID: inputs.runtimeLogicalID)
-    content = ViewerExplorerContentDriver(gateway: inputs.storeGateway)
+    content = contentDriver ?? ViewerExplorerContentDriver(gateway: inputs.storeGateway)
     live = inputs.liveObservations
     self.rendererService = rendererService
     self.operationDeliveryClaimed = operationDeliveryClaimed
@@ -590,7 +642,9 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
 
   var deviceRows: [ViewerExplorerDevicePresentationRow] {
     var values: [UUID: ViewerExplorerDevicePresentationRow] = [:]
-    if deviceCatalogRecordingID == selectedRecordingID {
+    if storeRematerializationResolution != .unresolved,
+      deviceCatalogRecordingID == selectedRecordingID
+    {
       for row in model.deviceRows {
         values[row.logicalID] = ViewerExplorerDevicePresentationRow(
           id: row.logicalID,
@@ -690,11 +744,12 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
   var hasOlderGaps: Bool { model.gapNavigation.leadingCursor != nil }
   var hasNewerGaps: Bool { model.gapNavigation.trailingCursor != nil }
   var selectedRecordingRow: ViewerRecordingCatalogRow? {
+    guard storeRematerializationResolution != .unresolved else { return nil }
     guard let recordingID = selectedRecordingID else { return nil }
     return model.recordingRows.first { $0.rowID == recordingID }
   }
   var canManageSelectedRecording: Bool {
-    recordingsState == .ready && selectedRecordingID.flatMap { recordingTargets[$0] } != nil
+    recordingsState == .ready && selectedRecordingTarget != nil
   }
   var canExportFilteredResult: Bool {
     canManageSelectedRecording && !model.isPaused && model.compiledInputs?.durableQuery != nil
@@ -718,6 +773,7 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
           transientChangeIncrement: 1
         )
         self.publish()
+        self.analysisRefreshHandler()
       }
     }
     applyScope()
@@ -726,17 +782,96 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
 
   func updateSessionSnapshots(_ snapshots: [ViewerSessionSnapshot]) {
     guard !sealed else { return }
-    sessionSnapshots = Array(snapshots.prefix(64))
+    let next = Array(snapshots.prefix(64))
+    guard sessionSnapshots != next else { return }
+    sessionSnapshots = next
     publish()
+    analysisSelectionHandler()
+  }
+
+  func setAnalysisSelectionHandler(_ handler: @escaping AnalysisSelectionHandler) {
+    analysisSelectionHandler = handler
+  }
+
+  func setAnalysisRefreshHandler(_ handler: @escaping AnalysisRefreshHandler) {
+    analysisRefreshHandler = handler
+  }
+
+  func setAnalysisRematerializationHandler(
+    _ handler: @escaping AnalysisRematerializationHandler
+  ) {
+    analysisRematerializationHandler = handler
   }
 
   func noteStoreChanged() {
     guard !sealed else { return }
+    guard activeStoreRematerializationID == nil else {
+      changeSnapshotDirty = true
+      return
+    }
     guard activeOperations[.changeSnapshot] == nil else {
       changeSnapshotDirty = true
       return
     }
     startChangeSnapshotRequest()
+  }
+
+  /// Clears all predecessor Store-derived identity immediately and completes only after the
+  /// replacement Store's change snapshot plus exact recording/device catalogs are installed.
+  @discardableResult
+  func rematerializeAfterStoreReplacement() -> Task<Void, Never> {
+    guard !sealed else { return Task {} }
+    let eventDeactivation = coordinator.deactivateAndReleaseTraversal()
+    if let activeStoreRematerializationID {
+      storeRematerializationTracker.complete(activeStoreRematerializationID)
+    }
+    let workID = storeRematerializationTracker.begin()
+    activeStoreRematerializationID = workID
+    storeRematerializationResolution = .unresolved
+    changeSnapshotDirty = false
+    clearStoreOperationAuthorityForReplacement()
+    _ = model.beginPresentationReplacement(clearRows: true)
+    recordingTargets.removeAll(keepingCapacity: true)
+    deviceCatalogRecordingID = nil
+    recordingsState = .loading
+    devicesState = .idle
+    clearInspector()
+    publish()
+    startChangeSnapshotRequest()
+    let rematerialization = storeRematerializationTracker.waitTask()
+    return Task {
+      async let event: Void = eventDeactivation.value
+      async let catalogs: Void = rematerialization.value
+      _ = await (event, catalogs)
+    }
+  }
+
+  private func clearStoreOperationAuthorityForReplacement() {
+    let preservesCommittedExport: Bool
+    let committedExportCount: Int64?
+    switch exportState {
+    case .exporting(let eventCount), .cancelling(let eventCount):
+      preservesCommittedExport = true
+      committedExportCount = eventCount
+    default:
+      preservesCommittedExport = false
+      committedExportCount = nil
+    }
+    for slot in Array(activeOperations.keys) {
+      if preservesCommittedExport, slot == .exportExecution { continue }
+      cancel(slot)
+    }
+    cancelExportDestinationSelection()
+    preparedDeleteConfirmation = nil
+    preparedExportTicket = nil
+    recordingOperationState = .idle
+    if let committedExportCount {
+      requestStoreCancellation(.exportExecution)
+      exportState = .cancelling(eventCount: committedExportCount)
+    } else {
+      cancel(.exportExecution)
+      exportState = .idle
+    }
   }
 
   private func startChangeSnapshotRequest() {
@@ -753,26 +888,55 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
     guard !sealed, sourceRows.contains(where: { $0.id == source }), source != selectedSource else {
       return
     }
-    cancel(.devices)
+    let changesActiveRematerialization = activeStoreRematerializationID != nil
+    let startsFreshHistoricalRematerialization: Bool
+    if !changesActiveRematerialization,
+      storeRematerializationResolution == .unresolved,
+      case .historical = source
+    {
+      startsFreshHistoricalRematerialization = true
+    } else {
+      startsFreshHistoricalRematerialization = false
+    }
+    if !changesActiveRematerialization { cancel(.devices) }
     cancel(.events)
     cancel(.gaps)
     clearInspector()
     selectedSource = source
     selectedDevices.removeAll(keepingCapacity: false)
     deviceCatalogRecordingID = nil
+    if changesActiveRematerialization {
+      switch source {
+      case .current:
+        completeStoreRematerializationForExplicitLiveSelection()
+      case .historical:
+        restartStoreRematerializationCatalogs()
+        analysisSelectionHandler()
+        return
+      }
+    }
+    if startsFreshHistoricalRematerialization {
+      let rematerialization = rematerializeAfterStoreReplacement()
+      analysisRematerializationHandler(rematerialization)
+      return
+    }
     applyScope()
-    if let recordingID = selectedRecordingID {
+    if storeRematerializationResolution != .unresolved,
+      let recordingID = selectedRecordingID
+    {
       loadDeviceCatalog(recordingID: recordingID, placement: .replace)
     } else {
       devicesState = .empty
     }
     publish()
+    analysisSelectionHandler()
   }
 
   func selectAllDevices() {
     guard !sealed, !selectedDevices.isEmpty else { return }
     selectedDevices.removeAll(keepingCapacity: false)
     applyScope()
+    analysisSelectionHandler()
   }
 
   func toggleDevice(_ logicalID: UUID) {
@@ -789,6 +953,62 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
       selectedDevices.sort { $0.uuidString < $1.uuidString }
     }
     applyScope()
+    analysisSelectionHandler()
+  }
+
+  func performanceTargetSelection() -> ViewerPerformanceTargetSelection {
+    guard storeRematerializationResolution != .unresolved else {
+      return .guidance(.sourceUnavailable)
+    }
+    return ViewerPerformanceTargetCompiler.compile(
+      source: selectedSource,
+      selectedDeviceIDs: selectedDevices,
+      catalogRecordingID: deviceCatalogRecordingID,
+      recordingRows: model.recordingRows,
+      deviceRows: model.deviceRows,
+      sessions: sessionSnapshots
+    )
+  }
+
+  @discardableResult
+  func deactivateForAnalysisSwitch() -> Task<Void, Never> {
+    guard !sealed else { return Task {} }
+    cancel(.events)
+    cancel(.gaps)
+    clearInspector()
+    cancelRendererDelivery()
+    let rendererWait = rendererService.cancelAndWait()
+    let rendererDeliveryWait = rendererDeliveryPump.waitForIdle()
+    let traversalWait = coordinator.deactivateAndReleaseTraversal()
+    let operationWait = operationTracker.waitTask()
+    publish()
+    return Task {
+      async let renderer: Void = rendererWait.value
+      async let rendererDelivery: Void = rendererDeliveryWait.value
+      async let traversal: Void = traversalWait.value
+      async let operations: Void = operationWait.value
+      _ = await (renderer, rendererDelivery, traversal, operations)
+    }
+  }
+
+  @discardableResult
+  func activateAfterAnalysisSwitch() -> Task<Void, Never> {
+    guard !sealed else { return Task {} }
+    return coordinator.activateAndRefresh()
+  }
+
+  func revealExactEvent(_ identity: ViewerExplorerEventIdentity) {
+    guard !sealed, coordinator.isAnalysisActive else { return }
+    clearInspector()
+    _ = model.selectEvent(identity, scrollToSelection: true)
+    inspectorState = .loading
+    switch identity {
+    case .durable(let rowID):
+      loadDurableDetail(rowID: rowID, identity: identity)
+    case .transient(let key):
+      loadTransientDetail(key: key, identity: identity)
+    }
+    publish()
   }
 
   @discardableResult
@@ -873,7 +1093,9 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
   }
 
   func loadOlderDevices() {
-    guard let recordingID = selectedRecordingID, hasOlderDevices else { return }
+    guard storeRematerializationResolution != .unresolved,
+      let recordingID = selectedRecordingID, hasOlderDevices
+    else { return }
     loadDeviceCatalog(recordingID: recordingID, placement: .trailing)
   }
 
@@ -1033,6 +1255,7 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
             self.deviceCatalogRecordingID = nil
             self.clearInspector()
             self.applyScope()
+            self.analysisSelectionHandler()
           }
           self.recordingOperationState = .succeeded("Recording deleted.")
         case .failure(let failure):
@@ -1232,13 +1455,21 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
     if let cleanupTask { return cleanupTask }
     sealed = true
     changeSnapshotDirty = false
+    if let activeStoreRematerializationID {
+      self.activeStoreRematerializationID = nil
+      storeRematerializationTracker.complete(activeStoreRematerializationID)
+    }
     for slot in Array(activeOperations.keys) { cancel(slot) }
     cancelRendererDelivery()
     cancelExportDestinationSelection()
     let rendererCleanup = rendererService.cancelAndWait()
     let rendererDeliveryCleanup = rendererDeliveryPump.sealAndWait()
     let exportDestinationCleanup = exportDestinationSelectionTracker.waitTask()
+    let storeRematerializationCleanup = storeRematerializationTracker.waitTask()
     live.setRefreshHandler { _ in }
+    analysisSelectionHandler = {}
+    analysisRefreshHandler = {}
+    analysisRematerializationHandler = { _ in }
     live.setPresentationPaused(true)
     coordinator.setPresentationHandler {}
     coordinator.cancelActiveWork()
@@ -1269,7 +1500,11 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
       async let operations: Void = operationCleanup.value
       async let rendererDelivery: Void = rendererDeliveryCleanup.value
       async let exportDestination: Void = exportDestinationCleanup.value
-      _ = await (renderer, coordinator, operations, rendererDelivery, exportDestination)
+      async let storeRematerialization: Void = storeRematerializationCleanup.value
+      _ = await (
+        renderer, coordinator, operations, rendererDelivery, exportDestination,
+        storeRematerialization
+      )
       _ = revision
     }
     cleanupTask = cleanup
@@ -1279,6 +1514,7 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
   var pendingCleanupWorkCount: Int {
     rendererService.pendingWorkCount + coordinator.pendingWorkCount + operationTracker.activeCount
       + rendererDeliveryPump.pendingWorkCount + exportDestinationSelectionTracker.activeCount
+      + storeRematerializationTracker.activeCount
   }
 
   var rendererDeliveryRetainedResultCountForTesting: Int {
@@ -1301,17 +1537,39 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
     switch selectedSource {
     case .current:
       return currentRecordingRow?.rowID
-    case .historical(let recordingID, _):
-      return recordingID
+    case .historical(let recordingID, let logicalID):
+      return model.recordingRows.first {
+        $0.rowID == recordingID && $0.logicalID == logicalID
+      }?.rowID
     }
   }
 
   private var selectedRecordingTarget: ViewerStoreRecordingTarget? {
-    selectedRecordingID.flatMap { recordingTargets[$0] }
+    guard storeRematerializationResolution != .unresolved else { return nil }
+    return selectedRecordingID.flatMap { recordingTargets[$0] }
   }
 
   private var currentRecordingRow: ViewerRecordingCatalogRow? {
     model.recordingRows.first { $0.logicalID == model.runtimeLogicalID }
+  }
+
+  private var selectedRecordingLogicalID: UUID {
+    switch selectedSource {
+    case .current(let runtimeLogicalID): return runtimeLogicalID
+    case .historical(_, let logicalID): return logicalID
+    }
+  }
+
+  private func adoptRematerializedRecordingIdentity() -> Int64? {
+    guard
+      let row = model.recordingRows.first(where: {
+        $0.logicalID == selectedRecordingLogicalID
+      })
+    else { return nil }
+    if case .historical(_, let logicalID) = selectedSource {
+      selectedSource = .historical(recordingID: row.rowID, recordingLogicalID: logicalID)
+    }
+    return row.rowID
   }
 
   private func validateRecordingText(name: String?, note: String?) -> Bool {
@@ -1420,6 +1678,20 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
   }
 
   private func makeMaterialization() throws -> ViewerExplorerMaterializationSnapshot {
+    if storeRematerializationResolution == .unresolved {
+      guard case .current = selectedSource else {
+        throw ViewerExplorerScopeError.staleMaterialization
+      }
+      materializationGeneration =
+        materializationGeneration == UInt64.max
+        ? 1 : materializationGeneration + 1
+      return try ViewerExplorerMaterializationSnapshot(
+        source: selectedSource,
+        generation: materializationGeneration,
+        recordingID: nil,
+        deviceSessionIDsByLogicalID: [:]
+      )
+    }
     materializationGeneration =
       materializationGeneration == UInt64.max
       ? 1 : materializationGeneration + 1
@@ -1494,7 +1766,12 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
     case .success(let page):
       guard model.applyRecordingPage(page, placement: placement, token: model.currentToken) else {
         recordingsState = .failed(.invalidRequest)
-        publish()
+        if activeStoreRematerializationID != nil {
+          devicesState = .empty
+          finishStoreRematerialization()
+        } else {
+          publish()
+        }
         return
       }
       let pageTargets = page.rows.compactMap { row in
@@ -1505,7 +1782,11 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
       let residentRecordingIDs = Set(model.recordingRows.map(\.rowID))
       recordingTargets = recordingTargets.filter { residentRecordingIDs.contains($0.key) }
       recordingsState = model.recordingRows.isEmpty ? .empty : .ready
-      if case .current = selectedSource, let recordingID = currentRecordingRow?.rowID {
+      if activeStoreRematerializationID == nil,
+        storeRematerializationResolution != .unresolved,
+        case .current = selectedSource,
+        let recordingID = currentRecordingRow?.rowID
+      {
         updateMaterializationIfNeeded()
         if deviceCatalogRecordingID != recordingID {
           loadDeviceCatalog(recordingID: recordingID, placement: .replace)
@@ -1517,10 +1798,93 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
     case .failure(let failure):
       recordingsState = failure == .unavailable ? .empty : .failed(failure)
     }
+    if activeStoreRematerializationID != nil {
+      switch result {
+      case .success(let page):
+        if let recordingID = adoptRematerializedRecordingIdentity() {
+          loadDeviceCatalog(
+            recordingID: recordingID,
+            placement: .replace,
+            recordingSnapshot: page.snapshot
+          )
+        } else {
+          loadRecordingIdentity(
+            logicalID: selectedRecordingLogicalID,
+            snapshot: page.snapshot
+          )
+        }
+        publish()
+      case .failure:
+        devicesState = .empty
+        finishStoreRematerialization()
+      }
+      return
+    }
     publish()
+    analysisSelectionHandler()
   }
 
-  private func loadDeviceCatalog(recordingID: Int64, placement: ViewerExplorerPagePlacement) {
+  private func loadRecordingIdentity(
+    logicalID: UUID,
+    snapshot: ViewerRecordingCatalogSnapshot
+  ) {
+    guard !sealed, activeStoreRematerializationID != nil else { return }
+    let operation = begin(.recordings)
+    let storeToken = content.loadRecordingIdentity(logicalID, snapshot) { [weak self] result in
+      guard operation.deliveryGate.claimDelivery() else { return }
+      Task { @MainActor in
+        self?.handleRecordingIdentity(result, operationID: operation.id)
+      }
+    }
+    attach(storeToken, to: .recordings, operationID: operation.id)
+  }
+
+  private func handleRecordingIdentity(
+    _ result: Result<ViewerRecordingCatalogPage, ViewerStoreExplorerFailure>,
+    operationID: UUID
+  ) {
+    guard finish(.recordings, operationID: operationID), !sealed,
+      activeStoreRematerializationID != nil
+    else { return }
+    switch result {
+    case .success(let page):
+      guard model.mergeRecordingIdentityPage(page, token: model.currentToken) else {
+        recordingsState = .failed(.invalidRequest)
+        devicesState = .empty
+        finishStoreRematerialization()
+        return
+      }
+      for row in page.rows {
+        if let target = page.recordingTarget(rowID: row.rowID) {
+          recordingTargets[row.rowID] = target
+        }
+      }
+      recordingsState = model.recordingRows.isEmpty ? .empty : .ready
+      if let recordingID = adoptRematerializedRecordingIdentity() {
+        loadDeviceCatalog(
+          recordingID: recordingID,
+          placement: .replace,
+          recordingSnapshot: page.snapshot
+        )
+      } else {
+        storeRematerializationResolution = .recordingAbsent
+        devicesState = .empty
+        finishStoreRematerialization()
+      }
+    case .failure(.catalogChanged):
+      restartStoreRematerializationCatalogs()
+    case .failure(let failure):
+      recordingsState = failure == .unavailable ? .empty : .failed(failure)
+      devicesState = .empty
+      finishStoreRematerialization()
+    }
+  }
+
+  private func loadDeviceCatalog(
+    recordingID: Int64,
+    placement: ViewerExplorerPagePlacement,
+    recordingSnapshot: ViewerRecordingCatalogSnapshot? = nil
+  ) {
     guard !sealed, recordingID > 0 else { return }
     let cursor: ViewerDeviceCatalogCursor?
     let direction: ViewerCatalogPageDirection
@@ -1537,7 +1901,13 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
     }
     devicesState = .loading
     let operation = begin(.devices)
-    let storeToken = content.loadDeviceCatalog(recordingID, cursor, direction, 100) {
+    let storeToken = content.loadDeviceCatalog(
+      recordingID,
+      recordingSnapshot,
+      cursor,
+      direction,
+      100
+    ) {
       [weak self] result in
       guard operation.deliveryGate.claimDelivery() else { return }
       Task { @MainActor in
@@ -1559,26 +1929,112 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
     placement: ViewerExplorerPagePlacement,
     operationID: UUID
   ) {
-    guard finish(.devices, operationID: operationID), !sealed,
-      selectedRecordingID == recordingID
-    else { return }
+    let isCurrent = finish(.devices, operationID: operationID)
+    guard isCurrent, !sealed else { return }
+    guard
+      adoptRematerializedRecordingIdentity() == recordingID
+        || activeStoreRematerializationID == nil
+    else {
+      devicesState = .empty
+      finishStoreRematerialization()
+      return
+    }
+    guard selectedRecordingID == recordingID else {
+      if activeStoreRematerializationID != nil { finishStoreRematerialization() }
+      return
+    }
     switch result {
     case .success(let page):
       guard model.applyDevicePage(page, placement: placement, token: model.currentToken) else {
         devicesState = .failed(.invalidRequest)
-        publish()
+        if activeStoreRematerializationID != nil {
+          finishStoreRematerialization()
+        } else {
+          publish()
+        }
         return
       }
       deviceCatalogRecordingID = recordingID
       devicesState = model.deviceRows.isEmpty ? .empty : .ready
-      updateMaterializationIfNeeded()
+      if activeStoreRematerializationID == nil { updateMaterializationIfNeeded() }
     case .failure(.catalogChanged):
-      loadDeviceCatalog(recordingID: recordingID, placement: .replace)
+      if activeStoreRematerializationID != nil {
+        restartStoreRematerializationCatalogs()
+      } else {
+        loadDeviceCatalog(recordingID: recordingID, placement: .replace)
+      }
       return
     case .failure(let failure):
       devicesState = failure == .unavailable ? .empty : .failed(failure)
     }
+    if activeStoreRematerializationID != nil {
+      let residentDeviceIDs = Set(model.deviceRows.map(\.logicalID))
+      let missingDeviceIDs = selectedDevices.filter { !residentDeviceIDs.contains($0) }
+      if case .success(let page) = result, !missingDeviceIDs.isEmpty {
+        loadDeviceIdentities(
+          recordingID: recordingID,
+          logicalIDs: missingDeviceIDs,
+          snapshot: page.snapshot
+        )
+      } else {
+        if case .success = result {
+          storeRematerializationResolution = .resolved
+        }
+        finishStoreRematerialization()
+      }
+      return
+    }
     publish()
+    analysisSelectionHandler()
+  }
+
+  private func loadDeviceIdentities(
+    recordingID: Int64,
+    logicalIDs: [UUID],
+    snapshot: ViewerDeviceCatalogSnapshot
+  ) {
+    guard !sealed, activeStoreRematerializationID != nil, !logicalIDs.isEmpty else { return }
+    let operation = begin(.devices)
+    let storeToken = content.loadDeviceIdentities(recordingID, logicalIDs, snapshot) {
+      [weak self] result in
+      guard operation.deliveryGate.claimDelivery() else { return }
+      Task { @MainActor in
+        self?.handleDeviceIdentities(
+          result,
+          recordingID: recordingID,
+          operationID: operation.id
+        )
+      }
+    }
+    attach(storeToken, to: .devices, operationID: operation.id)
+  }
+
+  private func handleDeviceIdentities(
+    _ result: Result<ViewerDeviceCatalogPage, ViewerStoreExplorerFailure>,
+    recordingID: Int64,
+    operationID: UUID
+  ) {
+    guard finish(.devices, operationID: operationID), !sealed,
+      activeStoreRematerializationID != nil,
+      adoptRematerializedRecordingIdentity() == recordingID
+    else { return }
+    switch result {
+    case .success(let page):
+      guard model.mergeDeviceIdentityPage(page, token: model.currentToken) else {
+        devicesState = .failed(.invalidRequest)
+        finishStoreRematerialization()
+        return
+      }
+      deviceCatalogRecordingID = recordingID
+      devicesState = model.deviceRows.isEmpty ? .empty : .ready
+      storeRematerializationResolution = .resolved
+      finishStoreRematerialization()
+    case .failure(.catalogChanged):
+      restartStoreRematerializationCatalogs()
+    case .failure(let failure):
+      devicesState = failure == .unavailable ? .empty : .failed(failure)
+      finishStoreRematerialization()
+    }
   }
 
   private func loadEventPage(edge: ViewerExplorerWindowEdge) {
@@ -1853,16 +2309,101 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
           durableUpperRowID: snapshot.eventUpperRowID
         )
         loadRecordingCatalog(placement: .replace)
-      case .failure:
-        break
+        if activeStoreRematerializationID != nil {
+          publish()
+          return
+        }
+      case .failure(let failure):
+        if activeStoreRematerializationID != nil {
+          recordingsState = failure == .unavailable ? .empty : .failed(failure)
+          devicesState = .empty
+          finishStoreRematerialization()
+          return
+        }
       }
+    }
+    if activeStoreRematerializationID != nil {
+      publish()
+      return
     }
     let needsSuccessor = changeSnapshotDirty
     changeSnapshotDirty = false
-    if needsSuccessor {
-      startChangeSnapshotRequest()
-    }
+    if needsSuccessor { startChangeSnapshotRequest() }
     publish()
+  }
+
+  private func restartStoreRematerializationCatalogs() {
+    guard !sealed, activeStoreRematerializationID != nil else { return }
+    cancel(.recordings)
+    cancel(.devices)
+    _ = model.beginPresentationReplacement(clearRows: true)
+    recordingTargets.removeAll(keepingCapacity: true)
+    deviceCatalogRecordingID = nil
+    storeRematerializationResolution = .unresolved
+    recordingsState = .loading
+    devicesState = .idle
+    loadRecordingCatalog(placement: .replace)
+    publish()
+  }
+
+  private func completeStoreRematerializationForExplicitLiveSelection() {
+    guard activeStoreRematerializationID != nil else { return }
+    cancel(.changeSnapshot)
+    cancel(.recordings)
+    cancel(.devices)
+    _ = model.beginPresentationReplacement(clearRows: true)
+    recordingTargets.removeAll(keepingCapacity: true)
+    deviceCatalogRecordingID = nil
+    storeRematerializationResolution = .unresolved
+    recordingsState = .empty
+    devicesState = .empty
+    finishStoreRematerialization()
+  }
+
+  private func finishStoreRematerialization() {
+    guard let workID = activeStoreRematerializationID else { return }
+    activeStoreRematerializationID = nil
+    switch storeRematerializationResolution {
+    case .resolved:
+      applyScope()
+    case .recordingAbsent:
+      reconcileSelectionAfterConfirmedRecordingAbsence()
+      applyScope()
+    case .unresolved:
+      clearUnresolvedStoreMaterialization()
+    }
+    storeRematerializationTracker.complete(workID)
+    let needsSuccessor = changeSnapshotDirty
+    changeSnapshotDirty = false
+    if needsSuccessor { startChangeSnapshotRequest() }
+    publish()
+  }
+
+  private func reconcileSelectionAfterConfirmedRecordingAbsence() {
+    if case .historical(_, let logicalID) = selectedSource,
+      !model.recordingRows.contains(where: { $0.logicalID == logicalID })
+    {
+      selectedSource = .current(runtimeLogicalID: model.runtimeLogicalID)
+      selectedDevices.removeAll(keepingCapacity: false)
+    }
+  }
+
+  private func clearUnresolvedStoreMaterialization() {
+    _ = model.beginPresentationReplacement(clearRows: true)
+    recordingTargets.removeAll(keepingCapacity: true)
+    deviceCatalogRecordingID = nil
+    switch recordingsState {
+    case .failed, .empty:
+      break
+    case .idle, .loading, .ready:
+      recordingsState = .empty
+    }
+    switch devicesState {
+    case .failed, .empty:
+      break
+    case .idle, .loading, .ready:
+      devicesState = .empty
+    }
   }
 
   private func durableDeviceAlias(_ deviceSessionID: Int64) -> String {

@@ -4,6 +4,7 @@ enum ViewerWorkspaceRegion: String, CaseIterable, Equatable, Sendable {
   case sourceAndDevices
   case eventTimeline
   case eventInspector
+  case performanceDashboard
   case controlComposer
 }
 
@@ -39,7 +40,7 @@ struct ViewerRootView: View {
             maxWidth: ViewerWorkspaceLayout.sourceMaximumWidth
           )
           .accessibilityIdentifier("nearwire.workspace.source-devices")
-        eventWorkspace
+        analysisWorkspace
       }
     }
     .sheet(isPresented: $showsDeviceDetails) {
@@ -223,8 +224,46 @@ struct ViewerRootView: View {
     }
   }
 
-  private var eventWorkspace: some View {
+  private var analysisWorkspace: some View {
     VSplitView {
+      VStack(spacing: 0) {
+        analysisModeHeader
+        Divider()
+        analysisContent
+      }
+      controlComposer
+        .frame(
+          minHeight: ViewerWorkspaceLayout.composerMinimumHeight,
+          idealHeight: ViewerWorkspaceLayout.composerIdealHeight,
+          maxHeight: ViewerWorkspaceLayout.composerMaximumHeight
+        )
+        .accessibilityIdentifier("nearwire.workspace.control-composer")
+    }
+  }
+
+  private var analysisModeHeader: some View {
+    HStack {
+      Text("Analysis").font(.headline)
+      Picker("Analysis Mode", selection: analysisModeBinding) {
+        Text("Events").tag(ViewerAnalysisMode.events)
+        Text("Performance").tag(ViewerAnalysisMode.performance)
+      }
+      .labelsHidden()
+      .pickerStyle(.segmented)
+      .frame(width: 240)
+      .disabled(model.analysisCoordinator == nil)
+      Spacer()
+    }
+    .padding(.horizontal, 14)
+    .padding(.vertical, 10)
+  }
+
+  @ViewBuilder
+  private var analysisContent: some View {
+    if let analysis = model.analysisCoordinator, analysis.mode == .performance {
+      ViewerPerformanceDashboardView(coordinator: analysis)
+        .accessibilityIdentifier("nearwire.workspace.performance-dashboard")
+    } else {
       HSplitView {
         eventTimeline
           .frame(
@@ -239,14 +278,20 @@ struct ViewerRootView: View {
           )
           .accessibilityIdentifier("nearwire.workspace.event-inspector")
       }
-      controlComposer
-        .frame(
-          minHeight: ViewerWorkspaceLayout.composerMinimumHeight,
-          idealHeight: ViewerWorkspaceLayout.composerIdealHeight,
-          maxHeight: ViewerWorkspaceLayout.composerMaximumHeight
-        )
-        .accessibilityIdentifier("nearwire.workspace.control-composer")
     }
+  }
+
+  private var analysisModeBinding: Binding<ViewerAnalysisMode> {
+    Binding(
+      get: { model.analysisCoordinator?.mode ?? .events },
+      set: { mode in
+        guard let analysis = model.analysisCoordinator else { return }
+        switch mode {
+        case .events: analysis.showEvents()
+        case .performance: analysis.showPerformance()
+        }
+      }
+    )
   }
 
   private var eventTimeline: some View {

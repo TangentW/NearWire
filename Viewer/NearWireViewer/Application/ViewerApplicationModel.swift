@@ -17,6 +17,7 @@ final class ViewerApplicationModel: ObservableObject {
   @Published private(set) var pendingApps: [ViewerPendingAppSummary] = []
   @Published private(set) var sessions: [ViewerSessionSnapshot] = []
   @Published private(set) var explorerController: ViewerEventExplorerController?
+  @Published private(set) var analysisCoordinator: ViewerAnalysisModeCoordinator?
   @Published private(set) var composerController: ViewerControlComposerController?
   @Published var selectedRoute: ViewerLogicalRoute?
   @Published var showsFullIdentityResetConfirmation = false
@@ -71,9 +72,15 @@ final class ViewerApplicationModel: ObservableObject {
       load: dependencies.loadStoreStatus
     ) { [weak self] value in
       guard let self else { return }
+      let replacedStore = value.storeGeneration != self.storeStatus.storeGeneration
       self.storeStatus = value
       self.runtimeComponents?.liveObservations.storeStateChanged(value.state)
-      self.explorerController?.noteStoreChanged()
+      if replacedStore {
+        self.analysisCoordinator?.noteStoreReplaced()
+      } else {
+        self.explorerController?.noteStoreChanged()
+        self.analysisCoordinator?.noteStoreChanged()
+      }
     }
     self.storeStatusRefreshCoordinator = storeStatusRefreshCoordinator
     dependencies.observeStoreStatus { [weak storeStatusRefreshCoordinator] in
@@ -234,6 +241,7 @@ final class ViewerApplicationModel: ObservableObject {
     pendingApps = []
     sessions = []
     explorerController = nil
+    analysisCoordinator = nil
     composerController = nil
     selectedRoute = nil
     isPaused = false
@@ -263,6 +271,24 @@ final class ViewerApplicationModel: ObservableObject {
     let explorerController = ViewerEventExplorerController(inputs: components.explorerInputs)
     self.explorerController = explorerController
     explorerController.start()
+    let performanceController = ViewerPerformanceDashboardController(
+      driver: ViewerPerformanceProjectionDriver(
+        live: components.liveObservations,
+        storeGateway: components.explorerInputs.storeGateway
+      ),
+      analysisActive: false
+    )
+    let rawResolver = ViewerPerformanceRawEventResolver(
+      store: ViewerPerformanceRawEventStoreDriver(
+        gateway: components.explorerInputs.storeGateway
+      ),
+      live: components.liveObservations
+    )
+    analysisCoordinator = ViewerAnalysisModeCoordinator(
+      eventController: explorerController,
+      performanceController: performanceController,
+      rawResolver: rawResolver
+    )
     composerController = try? ViewerControlComposerController(
       runtimeLogicalID: runtimeLogicalID,
       sessionControl: components.sessionControl
@@ -315,6 +341,8 @@ final class ViewerApplicationModel: ObservableObject {
     pendingCoalescer = nil
     sessionCoalescer?.deactivate()
     sessionCoalescer = nil
+    let analysisCleanup = analysisCoordinator?.sealAndWait() ?? Task {}
+    analysisCoordinator = nil
     let explorerCleanup = explorerController?.sealAndClear() ?? Task {}
     explorerController = nil
     let composerCleanup = composerController?.sealAndClear() ?? Task {}
@@ -322,8 +350,9 @@ final class ViewerApplicationModel: ObservableObject {
     let componentCleanup = runtimeComponents?.cleanupReceipt.begin() ?? Task {}
     let presentationCleanup = Task {
       async let explorer: Void = explorerCleanup.value
+      async let analysis: Void = analysisCleanup.value
       async let composer: Void = composerCleanup.value
-      _ = await (explorer, composer)
+      _ = await (explorer, analysis, composer)
     }
     let receipt = admissionManager.stop().joining(componentCleanup).joining(presentationCleanup)
     preparingListener?.admissionIngress.deactivate()
