@@ -22,5 +22,5 @@
 - [x] 4.1 Obtain independent architecture/API, correctness/testing, and
   security/performance/documentation reviews; resolve every actionable finding and repeat until a
   final review round has no unresolved findings.
-- [ ] 4.2 Archive the validated change, verify canonical specifications, commit only the scoped
+- [x] 4.2 Archive the validated change, verify canonical specifications, commit only the scoped
   files, and push the current branch.
