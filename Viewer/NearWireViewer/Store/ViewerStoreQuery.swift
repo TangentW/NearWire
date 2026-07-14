@@ -449,6 +449,10 @@ struct ViewerEventPage: Equatable, Sendable {
   let rows: [ViewerStoredEventRow]
   let nextCursor: ViewerEventCursor?
   let previousCursor: ViewerEventCursor?
+
+  func cursor(toward direction: ViewerStoreQueryService.Direction) -> ViewerEventCursor? {
+    [previousCursor, nextCursor].compactMap { $0 }.first { $0.direction == direction }
+  }
 }
 
 extension ViewerQueryScalar: CustomReflectable, CustomStringConvertible,
@@ -602,7 +606,7 @@ final class ViewerStoreQueryService: @unchecked Sendable {
         cursor.queryFingerprint == compiled.fingerprint,
         cursor.snapshot == snapshot,
         cursor.leaseID == lease.id,
-        cursor.leaseExpiresAt == lease.expiresAt,
+        cursor.leaseExpiresAt <= lease.expiresAt,
         cursor.direction == direction
       else { throw ViewerStoreError.invalidValue }
     }
@@ -645,7 +649,7 @@ final class ViewerStoreQueryService: @unchecked Sendable {
       }
       return direction == .forward ? result : result.reversed()
     }
-    let first = rows.first.map {
+    let reverseBoundary = (direction == .forward ? rows.first : rows.last).map {
       ViewerEventCursor(
         recordingID: query.recordingID, queryFingerprint: compiled.fingerprint,
         snapshot: snapshot, leaseID: refreshed.id,
@@ -654,7 +658,7 @@ final class ViewerStoreQueryService: @unchecked Sendable {
         viewerMonotonicNanoseconds: $0.viewerMonotonicNanoseconds, rowID: $0.rowID
       )
     }
-    let last = rows.last.map {
+    let continuationBoundary = (direction == .forward ? rows.last : rows.first).map {
       ViewerEventCursor(
         recordingID: query.recordingID, queryFingerprint: compiled.fingerprint,
         snapshot: snapshot, leaseID: refreshed.id,
@@ -663,7 +667,11 @@ final class ViewerStoreQueryService: @unchecked Sendable {
       )
     }
     return (
-      ViewerEventPage(rows: rows, nextCursor: last, previousCursor: first),
+      ViewerEventPage(
+        rows: rows,
+        nextCursor: continuationBoundary,
+        previousCursor: reverseBoundary
+      ),
       ViewerEventTraversal(query: query, snapshot: snapshot, lease: refreshed)
     )
   }

@@ -2577,6 +2577,8 @@ final class SDKSessionAdmissionTests: XCTestCase {
       await assertAdmissionError(.secureAdmissionTimedOut) { _ = try await task.value }
       await sdkWaitUntil { driver.cancelCount == 1 }
       XCTAssertEqual(driver.cancelCount, 1)
+      await sdkWaitUntil { discovery.cancelCount == 1 }
+      XCTAssertEqual(discovery.cancelCount, 1)
     }
 
     do {
@@ -2618,6 +2620,8 @@ final class SDKSessionAdmissionTests: XCTestCase {
         _ = try await admitted.attachEventPump()
       }
       XCTAssertEqual(driver.cancelCount, 1)
+      await sdkWaitUntil { discovery.cancelCount == 1 }
+      XCTAssertEqual(discovery.cancelCount, 1)
     }
   }
 
@@ -2788,6 +2792,7 @@ final class SDKSessionAdmissionTests: XCTestCase {
   func testAttachmentAndExternalHandleOwnershipCancelExactlyOnce() async throws {
     let fixture = try SessionAdmissionFixture()
     var admitted: SDKAdmittedSession? = try await fixture.admit()
+    XCTAssertEqual(fixture.discovery.cancelCount, 0)
     var attachment: SDKSessionPumpAttachment? = try await admitted?.attachEventPump()
     let weakCore = SessionWeakCore(attachment?.transportCore)
 
@@ -2800,6 +2805,8 @@ final class SDKSessionAdmissionTests: XCTestCase {
     attachment = nil
     await sdkWaitUntil { fixture.driver.cancelCount == 1 }
     XCTAssertEqual(fixture.driver.cancelCount, 1)
+    await sdkWaitUntil { fixture.discovery.cancelCount == 1 }
+    XCTAssertEqual(fixture.discovery.cancelCount, 1)
     await sdkWaitUntil { weakCore.value == nil }
     XCTAssertNil(weakCore.value)
   }
@@ -3232,6 +3239,41 @@ final class SDKSessionAdmissionTests: XCTestCase {
       await assertAdmissionError(.cancelled) { _ = try await task.value }
       await sdkWaitUntil { fixture.driver.cancelCount == 1 }
       XCTAssertEqual(fixture.driver.cancelCount, 1)
+      await sdkWaitUntil { fixture.discovery.cancelCount == 1 }
+      XCTAssertEqual(fixture.discovery.cancelCount, 1)
+    }
+
+    do {
+      let barrier = SessionAsyncBarrier()
+      let counters = SessionDependencyCounters()
+      let viewerHello = try makeSessionHello(role: .viewer)
+      let discovery = SessionTestDiscovery(
+        result: try makeDiscoveredViewer(viewerHello: viewerHello)
+      )
+      let admission = SDKSessionAdmission(
+        pairingCode: try PairingCode("ABC234"),
+        localHello: try makeSessionHello(role: .app),
+        phaseObserver: {
+          await barrier.wait()
+          return .authorized
+        },
+        dependencies: SDKSessionAdmissionDependencies(
+          makeDiscovery: { _ in discovery },
+          makeChannel: { _, _ in
+            counters.recordChannel()
+            return SecureByteChannel(driver: SessionSecureDriver()) { _ in }
+          },
+          sleep: sessionTestSleep
+        )
+      )
+      let task = Task { try await admission.run() }
+      await barrier.waitUntilEntered()
+      await admission.cancel()
+      barrier.release()
+
+      await assertAdmissionError(.cancelled) { _ = try await task.value }
+      XCTAssertEqual(discovery.cancelCount, 1)
+      XCTAssertEqual(counters.channelCount, 0)
     }
   }
 
@@ -3361,6 +3403,8 @@ final class SDKSessionAdmissionTests: XCTestCase {
     fixture.driver.emitState(.failed)
     await assertAdmissionError(.transportFailed) { _ = try await task.value }
     XCTAssertEqual(fixture.driver.cancelCount, 1)
+    await sdkWaitUntil { fixture.discovery.cancelCount == 1 }
+    XCTAssertEqual(fixture.discovery.cancelCount, 1)
   }
 
   func testRemoteErrorDuplicateHelloAndPolicyBeforeAcknowledgementAreTerminal() async throws {
@@ -3525,6 +3569,8 @@ final class SDKSessionAdmissionTests: XCTestCase {
     await assertAdmissionError(.cancelled) { _ = try await task.value }
     XCTAssertFalse(driver.isStarted)
     XCTAssertEqual(driver.cancelCount, 0)
+    await sdkWaitUntil { discovery.cancelCount == 1 }
+    XCTAssertEqual(discovery.cancelCount, 1)
   }
 
   func testUniquePullIdentityIgnoresDelayedImmediateAndConcurrentCancellation() async throws {
@@ -4214,6 +4260,7 @@ final class SDKSessionAdmissionTests: XCTestCase {
 private struct SessionAdmissionFixture {
   let admission: SDKSessionAdmission
   let driver: SessionSecureDriver
+  let discovery: SessionTestDiscovery
   let appHello: WireHello
   let viewerHello: WireHello
   let negotiation: WireNegotiationResult
@@ -4241,12 +4288,13 @@ private struct SessionAdmissionFixture {
     driver = sessionDriver
     let advertisedHello = try makeSessionHello(role: .viewer, installationID: advertisedViewerID)
     let discovered = try makeDiscoveredViewer(viewerHello: advertisedHello)
-    let discovery = SessionTestDiscovery(result: discovered)
+    let sessionDiscovery = SessionTestDiscovery(result: discovered)
+    discovery = sessionDiscovery
     let transportLimits =
       try providedTransportLimits
       ?? SecureTransportLimits(connectionTimeoutSeconds: 1)
     let dependencies = SDKSessionAdmissionDependencies(
-      makeDiscovery: { _ in discovery },
+      makeDiscovery: { _ in sessionDiscovery },
       makeChannel: { _, handler in
         SecureByteChannel(driver: sessionDriver, limits: transportLimits, eventHandler: handler)
       },
@@ -4298,6 +4346,12 @@ private final class SessionTestDiscovery: SDKSessionDiscoveryOperation, @uncheck
     lock.lock()
     _cancelCount += 1
     lock.unlock()
+  }
+
+  var cancelCount: Int {
+    lock.lock()
+    defer { lock.unlock() }
+    return _cancelCount
   }
 }
 

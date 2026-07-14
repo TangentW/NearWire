@@ -33,6 +33,10 @@ struct ViewerGapPage: Equatable, Sendable {
   let rows: [ViewerGapRow]
   let nextCursor: ViewerGapCursor?
   let previousCursor: ViewerGapCursor?
+
+  func cursor(toward direction: ViewerStoreQueryService.Direction) -> ViewerGapCursor? {
+    [previousCursor, nextCursor].compactMap { $0 }.first { $0.direction == direction }
+  }
 }
 
 enum ViewerCausalityEdgeKind: Equatable, Sendable {
@@ -119,7 +123,7 @@ final class ViewerStoreDiagnosticService: @unchecked Sendable {
         cursor.deviceSessionIDs == devices,
         cursor.gapUpperRowID == traversal.snapshot.gapUpperRowID,
         cursor.leaseID == traversal.lease.id,
-        cursor.leaseExpiresAt == traversal.lease.expiresAt,
+        cursor.leaseExpiresAt <= traversal.lease.expiresAt,
         cursor.direction == direction,
         cursor.rowID > 0
       else { throw ViewerStoreError.invalidValue }

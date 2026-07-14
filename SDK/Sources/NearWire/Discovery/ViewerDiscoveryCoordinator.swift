@@ -6,7 +6,7 @@ import Network
 #endif
 
 internal actor ViewerDiscoveryCoordinator {
-  private let expectedInstanceName: String
+  private var expectedInstanceName: String?
   private let driver: ViewerDiscoveryDriving
   private var operationState: ViewerDiscoveryState = .idle
   private var continuation: CheckedContinuation<DiscoveredViewer, Error>?
@@ -23,6 +23,7 @@ internal actor ViewerDiscoveryCoordinator {
   }
 
   var state: ViewerDiscoveryState { operationState }
+  var retainsExpectedInstanceName: Bool { expectedInstanceName != nil }
   var retainedCandidateCount: Int { retainedCandidates.count }
   var discardedResultCount: UInt64 { totalDiscardedResultCount }
   var ingressRetainedCounts: ViewerDiscoveryEventIngress.RetainedCounts? {
@@ -35,7 +36,12 @@ internal actor ViewerDiscoveryCoordinator {
     }
     guard !Task.isCancelled else {
       operationState = .cancelled
+      expectedInstanceName = nil
       throw ViewerDiscoveryError(.cancelled)
+    }
+    guard let expectedInstanceName else {
+      operationState = .failed
+      throw ViewerDiscoveryError(.browserFailure)
     }
 
     return try await withTaskCancellationHandler {
@@ -64,9 +70,12 @@ internal actor ViewerDiscoveryCoordinator {
     switch operationState {
     case .idle:
       operationState = .cancelled
+      expectedInstanceName = nil
     case .searching, .waiting:
       finishFailure(.cancelled, state: .cancelled, cancelDriver: true)
-    case .matched, .ambiguous, .failed, .cancelled:
+    case .matched:
+      cancelDriverOnce()
+    case .ambiguous, .failed, .cancelled:
       break
     }
   }
@@ -110,6 +119,7 @@ internal actor ViewerDiscoveryCoordinator {
   }
 
   private func evaluate(_ snapshot: ViewerDiscoverySnapshot) {
+    guard let expectedInstanceName else { return }
     var matches: [ViewerDiscoveryDiscriminator: ViewerDiscoveryCandidate] = [:]
     for candidate in snapshot.candidates
     where candidate.identity.instanceName == expectedInstanceName {
@@ -135,9 +145,10 @@ internal actor ViewerDiscoveryCoordinator {
     guard let waiter = continuation else { return }
     continuation = nil
     operationState = .matched
+    expectedInstanceName = nil
     ingress?.stop()
     ingress = nil
-    cancelDriverOnce()
+    driver.quiesceAfterMatch()
     retainedCandidates.removeAll(keepingCapacity: false)
     waiter.resume(
       returning: DiscoveredViewer(identity: candidate.identity, endpoint: candidate.endpoint)
@@ -152,6 +163,7 @@ internal actor ViewerDiscoveryCoordinator {
     let waiter = continuation
     continuation = nil
     operationState = state
+    expectedInstanceName = nil
     ingress?.stop()
     ingress = nil
     if cancelDriver { cancelDriverOnce() }

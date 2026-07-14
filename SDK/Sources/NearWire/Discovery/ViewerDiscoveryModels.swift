@@ -122,5 +122,6 @@ internal protocol ViewerDiscoveryDriving: AnyObject, Sendable {
     expectedInstanceName: String,
     handler: @escaping @Sendable (ViewerDiscoveryDriverEvent) -> Void
   ) throws
+  func quiesceAfterMatch()
   func cancel()
 }

@@ -9,6 +9,139 @@ import XCTest
 @testable import NearWireViewer
 
 final class ViewerStoreTests: XCTestCase {
+  @MainActor
+  func testExplorerControllerOwnsTraversalAcrossRefreshPaginationAndDetail() async throws {
+    let runtimeLogicalID = UUID()
+    let coordinator = try ViewerStoreCoordinator(paths: makePaths())
+    let store = coordinator.services.eventStore
+    let recording = try store.beginRecording(
+      logicalID: runtimeLogicalID,
+      wallMilliseconds: 1,
+      monotonicNanoseconds: 1,
+      reason: "explorer-controller-traversal-test"
+    )
+    let device = try store.beginDeviceSession(
+      recording: recording,
+      installationID: "explorer-controller-traversal-test",
+      logicalID: UUID(),
+      wallMilliseconds: 1,
+      monotonicNanoseconds: 1,
+      partialHistory: false,
+      displayName: "Traversal Test"
+    )
+    let rowID = try store.appendEvent(
+      makeObservation(
+        recording: recording,
+        device: device,
+        sequence: 1,
+        value: "traversal"
+      )
+    )
+    try store.appendStructural(
+      .gap(
+        recording: recording,
+        device: device,
+        sequence: 1,
+        reason: "explorerControllerTraversalTest",
+        count: 1,
+        firstWallMilliseconds: 1,
+        lastWallMilliseconds: 1,
+        directions: "appToViewer",
+        firstWireSequence: 1,
+        lastWireSequence: 1
+      )
+    )
+
+    let executionGate = ArmableViewerExecutionGate()
+    let gateway = ViewerStoreExplorerGateway(operationExecutionGate: { executionGate.run() })
+    gateway.install(coordinator)
+    let detailRequests = LockedCounter()
+    let live = ViewerLiveEventWindow(runtimeLogicalID: runtimeLogicalID)
+    let controller = ViewerEventExplorerController(
+      inputs: ViewerRuntimeExplorerInputs(
+        runtimeLogicalID: runtimeLogicalID,
+        storeGateway: gateway,
+        liveObservations: live
+      ),
+      contentDriver: ViewerExplorerContentDriver(
+        gateway: gateway,
+        loadDetail: { requestedRowID, completion in
+          detailRequests.increment()
+          return gateway.loadDetail(rowID: requestedRowID, completion: completion)
+        }
+      )
+    )
+    controller.start()
+    await waitUntilExplorerController {
+      if case .ready = controller.traversalState {
+        return controller.timelineRows.contains { $0.id == .durable(rowID: rowID) }
+          && controller.hasOlderEvents && controller.hasOlderGaps
+      }
+      return false
+    }
+
+    executionGate.arm()
+    _ = controller.coordinator.refresh()
+    let releaseBlocked = await executionGate.waitUntilBlockedAsync()
+    XCTAssertEqual(releaseBlocked, .success)
+    XCTAssertEqual(controller.traversalState, .releasing(.refresh))
+    controller.loadOlderEvents()
+    controller.loadOlderEvents()
+    controller.loadOlderGaps()
+    controller.loadOlderGaps()
+    controller.revealExactEvent(.durable(rowID: rowID))
+    XCTAssertEqual(controller.eventPageRequestCountForTesting, 0)
+    XCTAssertEqual(controller.gapPageRequestCountForTesting, 0)
+    XCTAssertEqual(detailRequests.value, 0)
+
+    executionGate.release()
+    executionGate.arm()
+    let replacementBlocked = await executionGate.waitUntilBlockedAsync()
+    XCTAssertEqual(replacementBlocked, .success)
+    XCTAssertEqual(controller.traversalState, .loading(.refresh))
+    controller.loadOlderEvents()
+    controller.loadOlderGaps()
+    XCTAssertEqual(controller.eventPageRequestCountForTesting, 0)
+    XCTAssertEqual(controller.gapPageRequestCountForTesting, 0)
+    XCTAssertEqual(detailRequests.value, 0)
+
+    executionGate.release()
+    await waitUntilExplorerController {
+      if case .ready = controller.traversalState {
+        return detailRequests.value == 1 && controller.selectedEventID == .durable(rowID: rowID)
+      }
+      return false
+    }
+    XCTAssertEqual(detailRequests.value, 1)
+
+    controller.loadOlderEvents()
+    controller.loadOlderEvents()
+    controller.loadOlderGaps()
+    controller.loadOlderGaps()
+    XCTAssertEqual(controller.eventPageRequestCountForTesting, 1)
+    XCTAssertEqual(controller.gapPageRequestCountForTesting, 1)
+
+    await waitUntilExplorerController { controller.pendingCleanupWorkCount == 0 }
+    executionGate.arm()
+    _ = controller.coordinator.refresh()
+    let absentRefreshBlocked = await executionGate.waitUntilBlockedAsync()
+    XCTAssertEqual(absentRefreshBlocked, .success)
+    let absentIdentity = ViewerExplorerEventIdentity.durable(rowID: Int64.max)
+    controller.revealExactEvent(absentIdentity)
+    XCTAssertEqual(controller.pendingExactRevealIdentityForTesting, absentIdentity)
+    executionGate.release()
+    await waitUntilExplorerController {
+      controller.traversalState.ownsQueryableTraversal
+        && controller.pendingExactRevealIdentityForTesting == nil
+    }
+    XCTAssertEqual(detailRequests.value, 1)
+    XCTAssertNil(controller.selectedEventID)
+
+    await controller.sealAndClear().value
+    gateway.sealAndWait(originatingFrom: coordinator)
+    coordinator.closeStorage()
+  }
+
   func testPerformanceRawEventLocatorRequiresExactSourceKeyAndReleasedTraversal() throws {
     let coordinator = try ViewerStoreCoordinator(paths: makePaths())
     defer { coordinator.closeStorage() }
@@ -3062,6 +3195,14 @@ final class ViewerStoreTests: XCTestCase {
       partialHistory: false,
       displayName: "Old Rematerialization Device"
     )
+    let oldEventRowID = try oldCoordinator.services.eventStore.appendEvent(
+      makeObservation(
+        recording: oldRecording,
+        device: oldDevice,
+        sequence: 1,
+        value: "old-rematerialization-event"
+      )
+    )
     try oldCoordinator.services.eventStore.appendStructural(
       .closeDevice(
         oldDevice,
@@ -3095,6 +3236,14 @@ final class ViewerStoreTests: XCTestCase {
       partialHistory: false,
       displayName: "New Rematerialization Device"
     )
+    let newEventRowID = try newCoordinator.services.eventStore.appendEvent(
+      makeObservation(
+        recording: newRecording,
+        device: newDevice,
+        sequence: 1,
+        value: "new-rematerialization-event"
+      )
+    )
     try newCoordinator.services.eventStore.appendStructural(
       .closeDevice(
         newDevice,
@@ -3111,6 +3260,7 @@ final class ViewerStoreTests: XCTestCase {
     )
     XCTAssertEqual(oldRecording.rowID, newRecording.rowID)
     XCTAssertEqual(oldDevice.rowID, newDevice.rowID)
+    XCTAssertEqual(oldEventRowID, newEventRowID)
 
     let operationGate = ArmableViewerExecutionGate()
     let gateway = ViewerStoreExplorerGateway(operationExecutionGate: { operationGate.run() })
@@ -3162,9 +3312,15 @@ final class ViewerStoreTests: XCTestCase {
     XCTAssertEqual(oldTarget.storeIdentity.recordingID, oldRecording.rowID)
     XCTAssertEqual(oldTarget.storeIdentity.deviceSessionID, oldDevice.rowID)
 
+    controller.pauseOrResume()
+    let pendingOldIdentity = ViewerExplorerEventIdentity.durable(rowID: oldEventRowID)
+    controller.revealExactEvent(pendingOldIdentity)
+    XCTAssertEqual(controller.pendingExactRevealIdentityForTesting, pendingOldIdentity)
+
     gateway.install(newCoordinator)
     operationGate.arm()
     let rematerialization = controller.rematerializeAfterStoreReplacement()
+    XCTAssertNil(controller.pendingExactRevealIdentityForTesting)
     XCTAssertEqual(operationGate.waitUntilBlocked(), .success)
     guard case .guidance = controller.performanceTargetSelection() else {
       return XCTFail("Predecessor row identity remained selectable during rematerialization")
@@ -5777,8 +5933,14 @@ final class ViewerStoreTests: XCTestCase {
     XCTAssertTrue(latestPage.rows.allSatisfy { $0.count == 1 })
     XCTAssertTrue(Mirror(reflecting: try XCTUnwrap(latestPage.rows.first)).children.isEmpty)
 
-    let (oldestPage, thirdTraversal) = try diagnostics.gapPage(
+    let (_, eventRefreshedTraversal) = try query.page(
       traversal: secondTraversal,
+      cursor: nil,
+      direction: .backward,
+      limit: 1
+    )
+    let (oldestPage, thirdTraversal) = try diagnostics.gapPage(
+      traversal: eventRefreshedTraversal,
       deviceSessionIDs: [],
       cursor: try XCTUnwrap(latestPage.nextCursor),
       direction: .backward,
@@ -9150,7 +9312,9 @@ final class ViewerStoreTests: XCTestCase {
         viewerMonotonicNanoseconds: 10_000
       )
     )
-    let service = ViewerStoreQueryService(pool: pool, leases: ViewerStoreLeaseRegistry())
+    let leases = ViewerStoreLeaseRegistry()
+    let service = ViewerStoreQueryService(pool: pool, leases: leases)
+    let diagnostics = ViewerStoreDiagnosticService(pool: pool, leases: leases)
     let query = try ViewerEventQuery(
       recordingID: recording.rowID,
       predicates: [
@@ -9183,6 +9347,60 @@ final class ViewerStoreTests: XCTestCase {
       limit: 2
     )
     XCTAssertEqual(previousPage.rows.map(\.rowID), [firstID, secondID])
+
+    let backwardTraversal = try service.begin(query: query)
+    let (tailPage, refreshedBackwardTraversal) = try service.page(
+      traversal: backwardTraversal,
+      cursor: nil,
+      direction: .backward,
+      limit: 2
+    )
+    XCTAssertEqual(tailPage.rows.map(\.rowID), [secondID, thirdID])
+    XCTAssertEqual(tailPage.nextCursor?.direction, .backward)
+    XCTAssertEqual(tailPage.nextCursor?.rowID, secondID)
+    XCTAssertEqual(tailPage.previousCursor?.direction, .forward)
+    XCTAssertEqual(tailPage.previousCursor?.rowID, thirdID)
+
+    let (_, traversalAfterSiblingGap) = try diagnostics.gapPage(
+      traversal: refreshedBackwardTraversal,
+      deviceSessionIDs: [],
+      cursor: nil,
+      direction: .backward,
+      limit: 1
+    )
+    let (_, traversalAfterDetail) = try service.detail(
+      traversal: traversalAfterSiblingGap,
+      rowID: thirdID
+    )
+    let (olderPage, finalTraversal) = try service.page(
+      traversal: traversalAfterDetail,
+      cursor: tailPage.nextCursor,
+      direction: .backward,
+      limit: 2
+    )
+    XCTAssertEqual(olderPage.rows.map(\.rowID), [firstID])
+
+    let issuedCursor = try XCTUnwrap(tailPage.nextCursor)
+    let futureCursor = ViewerEventCursor(
+      recordingID: issuedCursor.recordingID,
+      queryFingerprint: issuedCursor.queryFingerprint,
+      snapshot: issuedCursor.snapshot,
+      leaseID: issuedCursor.leaseID,
+      leaseExpiresAt: finalTraversal.lease.expiresAt + .seconds(1),
+      direction: issuedCursor.direction,
+      viewerMonotonicNanoseconds: issuedCursor.viewerMonotonicNanoseconds,
+      rowID: issuedCursor.rowID
+    )
+    XCTAssertThrowsError(
+      try service.page(
+        traversal: finalTraversal,
+        cursor: futureCursor,
+        direction: .backward,
+        limit: 2
+      )
+    ) { error in
+      XCTAssertEqual(error as? ViewerStoreError, .invalidValue)
+    }
   }
 
   func testQueryLeaseExpiresAndCannotBeRefreshed() throws {
@@ -12524,6 +12742,17 @@ final class ViewerStoreTests: XCTestCase {
       directory: directory,
       database: directory.appendingPathComponent("NearWire.sqlite")
     )
+  }
+
+  @MainActor
+  private func waitUntilExplorerController(
+    _ condition: @escaping @MainActor () -> Bool
+  ) async {
+    for _ in 0..<20_000 {
+      if condition() { return }
+      await Task.yield()
+    }
+    XCTFail("Timed out waiting for the Event Explorer controller")
   }
 
   private func makePerformanceFixture(

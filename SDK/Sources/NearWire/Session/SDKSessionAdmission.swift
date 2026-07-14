@@ -101,6 +101,7 @@ actor SDKSessionAdmission {
       state = .cancelled
       cancelDiscoveryDeadline()
       let operation = discovery
+      discovery = nil
       await operation?.cancel()
     case .transferred, .connecting, .exchangingHello, .awaitingApproval:
       if let core, let attemptToken {
@@ -170,8 +171,8 @@ actor SDKSessionAdmission {
       throw discoveryTerminalOverride
     }
     cancelDiscoveryDeadline()
-    self.discovery = nil
     guard let discoveredDiscriminator = discovered?.identity.viewerDiscriminator else {
+      await releaseMatchedDiscovery()
       state = .failed
       self.localHello = nil
       throw SDKSessionAdmissionError(.discoveryFailed)
@@ -180,6 +181,7 @@ actor SDKSessionAdmission {
     guard state == .discovering, discoveryTerminalOverride == nil,
       !Task.isCancelled, transitionGate.isAuthorized()
     else {
+      await releaseMatchedDiscovery()
       state = .cancelled
       self.localHello = nil
       throw SDKSessionAdmissionError(.cancelled)
@@ -188,10 +190,14 @@ actor SDKSessionAdmission {
     guard phaseAuthorization == .authorized, state == .discovering,
       discoveryTerminalOverride == nil, !Task.isCancelled, transitionGate.isAuthorized()
     else {
+      await releaseMatchedDiscovery()
       state = .cancelled
       self.localHello = nil
       throw SDKSessionAdmissionError(.cancelled)
     }
+
+    let retainedDiscovery = discovery
+    self.discovery = nil
 
     let ingress = SDKSessionChannelIngress(
       maximumEvents: admissionLimits.maximumIngressEvents,
@@ -207,6 +213,7 @@ actor SDKSessionAdmission {
       wireLimits: wireLimits,
       admissionLimits: admissionLimits,
       transitionGate: transitionGate,
+      retainedDiscovery: retainedDiscovery,
       sleep: dependencies.sleep
     )
     core = transportCore
@@ -300,6 +307,12 @@ actor SDKSessionAdmission {
     discoveryDeadlineToken = nil
     discoveryDeadlineTask?.cancel()
     discoveryDeadlineTask = nil
+  }
+
+  private func releaseMatchedDiscovery() async {
+    let operation = discovery
+    discovery = nil
+    await operation?.cancel()
   }
 
   private func finishDiscoveryStage(state: SDKSessionAdmissionState) {

@@ -44,6 +44,28 @@ final class SDKSessionLifetime: @unchecked Sendable {
   }
 }
 
+private final class SDKRetainedDiscovery: @unchecked Sendable {
+  private let lock = NSLock()
+  private var operation: (any SDKSessionDiscoveryOperation)?
+
+  init(operation: any SDKSessionDiscoveryOperation) {
+    self.operation = operation
+  }
+
+  func release() {
+    lock.lock()
+    let retained = operation
+    operation = nil
+    lock.unlock()
+    guard let retained else { return }
+    Task { await retained.cancel() }
+  }
+
+  deinit {
+    release()
+  }
+}
+
 final class SDKAdmittedSession: @unchecked Sendable {
   let route: SDKSessionRoute
   let capabilities: Set<WireCapability>
@@ -184,6 +206,7 @@ actor SDKSessionTransportCore {
   private let wireLimits: WireProtocolLimits
   private let admissionLimits: SDKSessionAdmissionLimits
   private let sleep: @Sendable (Int) async throws -> Void
+  private var retainedDiscovery: SDKRetainedDiscovery?
 
   private var channel: SecureByteChannel?
   private var state: SDKSessionAdmissionState = .transferred
@@ -255,6 +278,7 @@ actor SDKSessionTransportCore {
     wireLimits: WireProtocolLimits,
     admissionLimits: SDKSessionAdmissionLimits,
     transitionGate: SDKSessionTransitionGate = SDKSessionTransitionGate(),
+    retainedDiscovery: (any SDKSessionDiscoveryOperation)? = nil,
     sleep: @escaping @Sendable (Int) async throws -> Void
   ) {
     self.ingress = ingress
@@ -266,6 +290,7 @@ actor SDKSessionTransportCore {
     self.admissionLimits = admissionLimits
     self.sleep = sleep
     self.transitionGate = transitionGate
+    self.retainedDiscovery = retainedDiscovery.map(SDKRetainedDiscovery.init(operation:))
     frameDecoder = WireFrameDecoder(limits: wireLimits.frame)
     preHandshakeCodec = WirePreHandshakeCodec(limits: wireLimits)
   }
@@ -1889,6 +1914,9 @@ actor SDKSessionTransportCore {
     localHello = nil
     localHelloBytes = nil
     discoveredDiscriminator = nil
+    let discovery = retainedDiscovery
+    retainedDiscovery = nil
+    discovery?.release()
     admittedCapabilities.removeAll(keepingCapacity: false)
     admittedMaximumEventBytes = 0
     cancelDeadline()

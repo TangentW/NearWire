@@ -27,6 +27,9 @@ import Security
 
 enum SecureNetworkParameters {
   static let applicationProtocol = "nearwire/1"
+  static let keepaliveIdleSeconds = 10
+  static let keepaliveIntervalSeconds = 5
+  static let keepaliveProbeCount = 3
 
   static func appClient(
     limits: SecureTransportLimits = .default,
@@ -83,6 +86,9 @@ enum SecureNetworkParameters {
     let tcp = NWProtocolTCP.Options()
     tcp.noDelay = true
     tcp.enableKeepalive = true
+    tcp.keepaliveIdle = keepaliveIdleSeconds
+    tcp.keepaliveInterval = keepaliveIntervalSeconds
+    tcp.keepaliveCount = keepaliveProbeCount
     tcp.connectionTimeout = limits.connectionTimeoutSeconds
     let parameters = NWParameters(tls: tls, tcp: tcp)
     parameters.includePeerToPeer = true

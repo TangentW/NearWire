@@ -195,18 +195,22 @@ struct ViewerExplorerTimelineWindow: Sendable {
     switch placement {
     case .replace:
       navigation = ViewerExplorerListNavigation(
-        leadingCursor: page.previousCursor,
-        trailingCursor: page.nextCursor,
+        leadingCursor: page.cursor(toward: .backward),
+        trailingCursor: page.cursor(toward: .forward),
         reloadAnchor: nil,
         hasUnloadedLeadingRows: false,
         hasUnloadedTrailingRows: false
       )
     case .leading:
-      navigation.leadingCursor = page.previousCursor
-      if currentDurableRows.isEmpty { navigation.trailingCursor = page.nextCursor }
+      navigation.leadingCursor = page.cursor(toward: .backward)
+      if currentDurableRows.isEmpty {
+        navigation.trailingCursor = page.cursor(toward: .forward)
+      }
     case .trailing:
-      navigation.trailingCursor = page.nextCursor
-      if currentDurableRows.isEmpty { navigation.leadingCursor = page.previousCursor }
+      navigation.trailingCursor = page.cursor(toward: .forward)
+      if currentDurableRows.isEmpty {
+        navigation.leadingCursor = page.cursor(toward: .backward)
+      }
     }
     return rebuild(
       durableRows: durableRows,

@@ -603,8 +603,8 @@ final class ViewerEventExplorerModel: CustomReflectable, CustomStringConvertible
     guard accepts(token), page.rows.count <= Self.maximumGapPageRows else { return false }
     return gapWindow.apply(
       page.rows,
-      leadingCursor: page.previousCursor,
-      trailingCursor: page.nextCursor,
+      leadingCursor: page.cursor(toward: .backward),
+      trailingCursor: page.cursor(toward: .forward),
       placement: placement
     ) != nil
   }
@@ -637,6 +637,10 @@ final class ViewerEventExplorerModel: CustomReflectable, CustomStringConvertible
     selectedEventNeedsReload = identity.map { !eventWindow.contains($0) } ?? false
     if scrollToSelection { scrollAnchor = identity }
     return true
+  }
+
+  func isEventResident(_ identity: ViewerExplorerEventIdentity) -> Bool {
+    eventWindow.contains(identity)
   }
 
   @discardableResult

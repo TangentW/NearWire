@@ -585,6 +585,8 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
   private(set) var changeSnapshotRequestCountForTesting = 0
   private(set) var eventPageRequestCountForTesting = 0
   private(set) var gapPageRequestCountForTesting = 0
+  private var deferredSelectionRevision: UInt64 = 0
+  private var pendingExactRevealIdentity: ViewerExplorerEventIdentity?
   private var started = false
   private var sealed = false
   private var cleanupTask: Task<Void, Never>?
@@ -830,6 +832,8 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
   @discardableResult
   func rematerializeAfterStoreReplacement() -> Task<Void, Never> {
     guard !sealed else { return Task {} }
+    pendingExactRevealIdentity = nil
+    deferredSelectionRevision &+= 1
     let eventDeactivation = coordinator.deactivateAndReleaseTraversal()
     if let activeStoreRematerializationID {
       storeRematerializationTracker.complete(activeStoreRematerializationID)
@@ -982,6 +986,7 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
   @discardableResult
   func deactivateForAnalysisSwitch() -> Task<Void, Never> {
     guard !sealed else { return Task {} }
+    pendingExactRevealIdentity = nil
     cancel(.events)
     cancel(.gaps)
     clearInspector()
@@ -1008,13 +1013,20 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
 
   func revealExactEvent(_ identity: ViewerExplorerEventIdentity) {
     guard !sealed, coordinator.isAnalysisActive else { return }
+    deferredSelectionRevision &+= 1
     clearInspector()
     _ = model.selectEvent(identity, scrollToSelection: true)
     inspectorState = .loading
     switch identity {
     case .durable(let rowID):
-      loadDurableDetail(rowID: rowID, identity: identity)
+      if canSubmitTraversalWork {
+        pendingExactRevealIdentity = nil
+        loadDurableDetail(rowID: rowID, identity: identity)
+      } else {
+        pendingExactRevealIdentity = identity
+      }
     case .transient(let key):
+      pendingExactRevealIdentity = nil
       loadTransientDetail(key: key, identity: identity)
     }
     publish()
@@ -1109,6 +1121,7 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
   }
 
   func loadOlderEvents() {
+    guard canSubmitTraversalWork else { return }
     coordinator.noteManualScroll(model.timelineRows.first?.identity)
     loadEventPage(edge: .leading)
   }
@@ -1417,7 +1430,43 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
     publish()
   }
 
+  func deferEventSelection(_ identity: ViewerExplorerEventIdentity?) {
+    guard !sealed else { return }
+    pendingExactRevealIdentity = nil
+    deferredSelectionRevision &+= 1
+    let intentRevision = deferredSelectionRevision
+    let presentationToken = model.currentToken
+    Task { @MainActor [weak self] in
+      await Task.yield()
+      self?.applyDeferredEventSelection(
+        identity,
+        presentationToken: presentationToken,
+        intentRevision: intentRevision
+      )
+    }
+  }
+
   func selectEvent(_ identity: ViewerExplorerEventIdentity?) {
+    guard !sealed else { return }
+    pendingExactRevealIdentity = nil
+    deferredSelectionRevision &+= 1
+    applyEventSelection(identity)
+  }
+
+  private func applyDeferredEventSelection(
+    _ identity: ViewerExplorerEventIdentity?,
+    presentationToken: ViewerExplorerPresentationToken,
+    intentRevision: UInt64
+  ) {
+    guard !sealed, intentRevision == deferredSelectionRevision,
+      presentationToken == model.currentToken,
+      identity.map(model.isEventResident) ?? true
+    else { return }
+    deferredSelectionRevision &+= 1
+    applyEventSelection(identity)
+  }
+
+  private func applyEventSelection(_ identity: ViewerExplorerEventIdentity?) {
     guard !sealed else { return }
     clearInspector()
     guard let identity else {
@@ -1436,6 +1485,11 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
     let token = model.currentToken
     let tokenChanged = reconciledPresentationToken.map { $0 != token } ?? false
     reconciledPresentationToken = token
+    if tokenChanged {
+      timelinePageFailure = nil
+      gapPageFailure = nil
+    }
+    revealPendingExactEventIfReady()
 
     guard let selectedIdentity = model.selectedEventIdentity else {
       if inspectorState != .empty || inspector.selectedIdentity != nil {
@@ -1463,6 +1517,23 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
       loadSelectedEvent(selectedIdentity)
     }
     publish()
+  }
+
+  private func revealPendingExactEventIfReady() {
+    guard coordinator.isAnalysisActive, canSubmitTraversalWork,
+      let identity = pendingExactRevealIdentity,
+      case .durable(let rowID) = identity
+    else { return }
+    pendingExactRevealIdentity = nil
+    guard model.isEventResident(identity) else {
+      clearInspector()
+      _ = model.selectEvent(nil)
+      return
+    }
+    clearInspector()
+    _ = model.selectEvent(identity, scrollToSelection: true)
+    inspectorState = .loading
+    loadDurableDetail(rowID: rowID, identity: identity)
   }
 
   func showRawChunk(_ index: Int) {
@@ -1520,6 +1591,7 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
     recordingTargets.removeAll(keepingCapacity: false)
     preparedDeleteConfirmation = nil
     preparedExportTicket = nil
+    pendingExactRevealIdentity = nil
     selectedDevices.removeAll(keepingCapacity: false)
     rawChunk = nil
     inspectorTreeState = nil
@@ -1553,6 +1625,10 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
     rendererService.pendingWorkCount + coordinator.pendingWorkCount + operationTracker.activeCount
       + rendererDeliveryPump.pendingWorkCount + exportDestinationSelectionTracker.activeCount
       + storeRematerializationTracker.activeCount
+  }
+
+  var pendingExactRevealIdentityForTesting: ViewerExplorerEventIdentity? {
+    pendingExactRevealIdentity
   }
 
   var rendererDeliveryRetainedResultCountForTesting: Int {
@@ -1696,6 +1772,7 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
 
   private func applyScope() {
     guard !sealed else { return }
+    pendingExactRevealIdentity = nil
     do {
       let devices: ViewerExplorerDeviceScope =
         selectedDevices.isEmpty
@@ -2076,26 +2153,25 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
   }
 
   private func loadEventPage(edge: ViewerExplorerWindowEdge) {
-    guard !sealed, !model.isPaused, activeOperations[.events] == nil else { return }
+    guard !sealed, !model.isPaused, canSubmitTraversalWork,
+      activeOperations[.events] == nil
+    else { return }
     let cursor: ViewerEventCursor?
-    let direction: ViewerStoreQueryService.Direction
     let placement: ViewerExplorerPagePlacement
     switch edge {
     case .leading:
       cursor = model.eventNavigation.leadingCursor
-      direction = .backward
       placement = .leading
     case .trailing:
       cursor = model.eventNavigation.trailingCursor
-      direction = .forward
       placement = .trailing
     }
-    guard cursor != nil else { return }
+    guard let cursor else { return }
     timelinePageFailure = nil
     let presentationToken = model.currentToken
     let operation = begin(.events)
     eventPageRequestCountForTesting += 1
-    let storeToken = content.loadEventPage(cursor, direction, 100) { [weak self] result in
+    let storeToken = content.loadEventPage(cursor, cursor.direction, 100) { [weak self] result in
       guard operation.deliveryGate.claimDelivery() else { return }
       Task { @MainActor in
         self?.handleEventPage(
@@ -2144,21 +2220,20 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
   }
 
   private func loadGapPage(edge: ViewerExplorerWindowEdge) {
-    guard !sealed, !model.isPaused, activeOperations[.gaps] == nil else { return }
+    guard !sealed, !model.isPaused, canSubmitTraversalWork,
+      activeOperations[.gaps] == nil
+    else { return }
     let cursor: ViewerGapCursor?
-    let direction: ViewerStoreQueryService.Direction
     let placement: ViewerExplorerPagePlacement
     switch edge {
     case .leading:
       cursor = model.gapNavigation.leadingCursor
-      direction = .backward
       placement = .leading
     case .trailing:
       cursor = model.gapNavigation.trailingCursor
-      direction = .forward
       placement = .trailing
     }
-    guard cursor != nil else { return }
+    guard let cursor else { return }
     gapPageFailure = nil
     let presentationToken = model.currentToken
     let operation = begin(.gaps)
@@ -2166,7 +2241,7 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
     let storeToken = content.loadGapPage(
       durableDeviceSessionIDs(),
       cursor,
-      direction,
+      cursor.direction,
       32
     ) { [weak self] result in
       guard operation.deliveryGate.claimDelivery() else { return }
@@ -2233,10 +2308,15 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
   private func loadSelectedEvent(_ identity: ViewerExplorerEventIdentity) {
     switch identity {
     case .durable(let rowID):
+      guard canSubmitTraversalWork else { return }
       loadDurableDetail(rowID: rowID, identity: identity)
     case .transient(let key):
       loadTransientDetail(key: key, identity: identity)
     }
+  }
+
+  private var canSubmitTraversalWork: Bool {
+    return coordinator.state.ownsQueryableTraversal
   }
 
   private func handleDurableDetail(

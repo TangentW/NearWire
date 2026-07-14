@@ -228,6 +228,7 @@ internal final class NWBrowserDiscoveryDriver: ViewerDiscoveryDriving, @unchecke
   private var handler: (@Sendable (ViewerDiscoveryDriverEvent) -> Void)?
   private var callbackEdge: BonjourBrowserCallbackEdge?
   private var hasStarted = false
+  private var hasQuiesced = false
   private var hasCancelled = false
   private var hasReportedTerminal = false
 
@@ -284,6 +285,21 @@ internal final class NWBrowserDiscoveryDriver: ViewerDiscoveryDriving, @unchecke
       }
     }
     browser.start(queue: callbackQueue)
+  }
+
+  func quiesceAfterMatch() {
+    lock.lock()
+    guard hasStarted, !hasQuiesced, !hasCancelled, !hasReportedTerminal else {
+      lock.unlock()
+      return
+    }
+    hasQuiesced = true
+    handler = nil
+    callbackEdge = nil
+    lock.unlock()
+
+    browser.stateUpdateHandler = nil
+    browser.browseResultsChangedHandler = nil
   }
 
   func cancel() {

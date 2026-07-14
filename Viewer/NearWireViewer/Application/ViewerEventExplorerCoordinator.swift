@@ -33,6 +33,15 @@ enum ViewerExplorerTraversalState: Equatable, Sendable {
   case loading(ViewerExplorerTraversalReason)
   case ready(ViewerExplorerTraversalReason)
   case failed(ViewerStoreExplorerFailure)
+
+  var ownsQueryableTraversal: Bool {
+    switch self {
+    case .ready:
+      return true
+    case .idle, .paused, .releasing, .loading, .failed:
+      return false
+    }
+  }
 }
 
 struct ViewerExplorerTraversalDiagnostics: Equatable, Sendable {

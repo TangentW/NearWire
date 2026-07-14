@@ -13,6 +13,7 @@ final class TestViewerDiscoveryDriver: ViewerDiscoveryDriving, @unchecked Sendab
   private let lock = NSLock()
   private var handler: (@Sendable (ViewerDiscoveryDriverEvent) -> Void)?
   private var _startCount = 0
+  private var _quiesceCount = 0
   private var _cancelCount = 0
   private var _expectedInstanceNames: [String] = []
   var startFailure: Error?
@@ -42,6 +43,13 @@ final class TestViewerDiscoveryDriver: ViewerDiscoveryDriving, @unchecked Sendab
     lock.unlock()
   }
 
+  func quiesceAfterMatch() {
+    lock.lock()
+    _quiesceCount += 1
+    handler = nil
+    lock.unlock()
+  }
+
   func emit(_ event: ViewerDiscoveryDriverEvent) {
     lock.lock()
     let callback = handler
@@ -61,6 +69,12 @@ final class TestViewerDiscoveryDriver: ViewerDiscoveryDriving, @unchecked Sendab
     return _cancelCount
   }
 
+  var quiesceCount: Int {
+    lock.lock()
+    defer { lock.unlock() }
+    return _quiesceCount
+  }
+
   var expectedInstanceNames: [String] {
     lock.lock()
     defer { lock.unlock() }
@@ -72,6 +86,7 @@ final class TestCallbackEdgeDriver: ViewerDiscoveryDriving, @unchecked Sendable 
   private let lock = NSLock()
   private var edge: BonjourBrowserCallbackEdge?
   private var _startCount = 0
+  private var _quiesceCount = 0
   private var _cancelCount = 0
 
   func start(
@@ -87,6 +102,13 @@ final class TestCallbackEdgeDriver: ViewerDiscoveryDriving, @unchecked Sendable 
   func cancel() {
     lock.lock()
     _cancelCount += 1
+    edge = nil
+    lock.unlock()
+  }
+
+  func quiesceAfterMatch() {
+    lock.lock()
+    _quiesceCount += 1
     edge = nil
     lock.unlock()
   }
@@ -112,6 +134,12 @@ final class TestCallbackEdgeDriver: ViewerDiscoveryDriving, @unchecked Sendable 
     lock.lock()
     defer { lock.unlock() }
     return _cancelCount
+  }
+
+  var quiesceCount: Int {
+    lock.lock()
+    defer { lock.unlock() }
+    return _quiesceCount
   }
 
   private func readEdge() -> BonjourBrowserCallbackEdge? {
@@ -163,7 +191,7 @@ private actor DiscoveryTestGate {
 final class ViewerDiscoveryTests: XCTestCase {
   private let pairingCode = try! PairingCode("7K3M9Q")
 
-  func testExactMatchReturnsInterfaceNeutralEndpointAndCancelsOnce() async throws {
+  func testExactMatchReturnsInterfaceNeutralEndpointAndRetainsBrowserUntilRelease() async throws {
     let driver = TestViewerDiscoveryDriver()
     let coordinator = ViewerDiscoveryCoordinator(pairingCode: pairingCode, driver: driver)
     let task = Task { try await coordinator.run() }
@@ -176,7 +204,10 @@ final class ViewerDiscoveryTests: XCTestCase {
     let matchedState = await coordinator.state
     XCTAssertEqual(matchedState, .matched)
     XCTAssertEqual(driver.expectedInstanceNames, ["NearWire-7K3M9Q"])
-    XCTAssertEqual(driver.cancelCount, 1)
+    XCTAssertEqual(driver.quiesceCount, 1)
+    XCTAssertEqual(driver.cancelCount, 0)
+    let retainsExpectedInstanceName = await coordinator.retainsExpectedInstanceName
+    XCTAssertFalse(retainsExpectedInstanceName)
     let retainedAfterMatch = await coordinator.retainedCandidateCount
     XCTAssertEqual(retainedAfterMatch, 0)
     if case .service(let name, let type, let domain, let interface) = viewer.endpoint {
@@ -188,12 +219,19 @@ final class ViewerDiscoveryTests: XCTestCase {
       XCTFail("Expected an interface-neutral service endpoint.")
     }
 
+    driver.emit(.failed(.browserFailure))
+    let stateAfterLateEvent = await coordinator.state
+    XCTAssertEqual(stateAfterLateEvent, .matched)
+
     _ = SecureAppTransport.makeChannel(
       endpoint: viewer.endpoint,
       connectionQueue: DispatchQueue(label: "test.discovery.connection"),
       verificationQueue: DispatchQueue(label: "test.discovery.verification"),
       eventHandler: { _ in }
     )
+    await coordinator.cancel()
+    await coordinator.cancel()
+    XCTAssertEqual(driver.cancelCount, 1)
   }
 
   func testUnrelatedConflictSuffixAndEmptySnapshotsDoNotMatch() async throws {
@@ -366,6 +404,8 @@ final class ViewerDiscoveryTests: XCTestCase {
     _ = try await task.value
     let state = await coordinator.state
     XCTAssertEqual(state, .matched)
+    XCTAssertEqual(driver.cancelCount, 0)
+    await coordinator.cancel()
     XCTAssertEqual(driver.cancelCount, 1)
   }
 
@@ -454,6 +494,8 @@ final class ViewerDiscoveryTests: XCTestCase {
     driver.emit(.cancelled)
     let finalState = await coordinator.state
     XCTAssertEqual(finalState, .matched)
+    XCTAssertEqual(driver.cancelCount, 0)
+    await coordinator.cancel()
     XCTAssertEqual(driver.cancelCount, 1)
   }
 
@@ -471,6 +513,7 @@ final class ViewerDiscoveryTests: XCTestCase {
       _ = try? await task.value
       let state = await coordinator.state
       XCTAssertTrue(state == .matched || state == .cancelled)
+      await coordinator.cancel()
       XCTAssertEqual(driver.cancelCount, 1)
       let retainedCount = await coordinator.retainedCandidateCount
       XCTAssertEqual(retainedCount, 0)
@@ -798,6 +841,30 @@ final class BonjourBrowserAdapterTests: XCTestCase {
     XCTAssertNil(retainedToken)
     driver = nil
     XCTAssertEqual(controller.cancelCount, 0)
+  }
+
+  func testMatchedBrowserQuiescesCallbacksWithoutCancellingLifetime() throws {
+    final class Token: @unchecked Sendable {}
+
+    let controller = TestNWBrowserController()
+    let driver = NWBrowserDiscoveryDriver { _, _ in controller }
+    var token: Token? = Token()
+    weak let retainedToken = token
+    try driver.start(expectedInstanceName: "NearWire-7K3M9Q") { [token] _ in
+      _ = token
+    }
+    token = nil
+    XCTAssertNotNil(retainedToken)
+
+    driver.quiesceAfterMatch()
+    driver.quiesceAfterMatch()
+    XCTAssertNil(controller.stateUpdateHandler)
+    XCTAssertNil(controller.browseResultsChangedHandler)
+    XCTAssertNil(retainedToken)
+    XCTAssertEqual(controller.cancelCount, 0)
+
+    driver.cancel()
+    XCTAssertEqual(controller.cancelCount, 1)
   }
 
   func testPolicyDenialClassificationDoesNotExposeUnderlyingError() {

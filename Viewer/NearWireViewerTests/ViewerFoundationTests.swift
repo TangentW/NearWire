@@ -12764,26 +12764,62 @@ final class ViewerFoundationTests: XCTestCase {
   }
 
   @MainActor
-  func testRefreshFailureRestartsPendingDetailAndClearsRemovedInspectorContent() async throws {
+  func testExplorerTraversalOwnershipAdmitsOnlyReadyStoreRowWork() {
+    XCTAssertFalse(ViewerExplorerTraversalState.idle.ownsQueryableTraversal)
+    XCTAssertFalse(
+      ViewerExplorerTraversalState.releasing(.refresh).ownsQueryableTraversal
+    )
+    XCTAssertFalse(
+      ViewerExplorerTraversalState.loading(.refresh).ownsQueryableTraversal
+    )
+    XCTAssertTrue(ViewerExplorerTraversalState.ready(.refresh).ownsQueryableTraversal)
+    XCTAssertFalse(ViewerExplorerTraversalState.paused.ownsQueryableTraversal)
+    XCTAssertFalse(
+      ViewerExplorerTraversalState.failed(.invalidRequest).ownsQueryableTraversal
+    )
+  }
+
+  @MainActor
+  func testPauseDuringReleaseDoesNotClaimTraversalOwnership() async throws {
     let runtimeLogicalID = UUID()
-    let detailCompletions = FoundationDetailCompletionBox()
-    let gateway = ViewerStoreExplorerGateway()
+    let source = ViewerExplorerSource.current(runtimeLogicalID: runtimeLogicalID)
+    let model = ViewerEventExplorerModel(runtimeLogicalID: runtimeLogicalID)
+    _ = try model.replaceScope(
+      ViewerExplorerScope(source: source, filter: ViewerExplorerFilter()),
+      materialization: ViewerExplorerMaterializationSnapshot(
+        source: source,
+        generation: 1,
+        recordingID: 1,
+        deviceSessionIDsByLogicalID: [:]
+      )
+    )
+    let store = ExplorerStoreDriverSpy()
+    let coordinator = ViewerEventExplorerCoordinator(
+      model: model,
+      store: store.driver,
+      live: ViewerLiveEventWindow(runtimeLogicalID: runtimeLogicalID)
+    )
+
+    _ = coordinator.refresh()
+    XCTAssertEqual(coordinator.state, .releasing(.refresh))
+    _ = coordinator.pause()
+    XCTAssertEqual(coordinator.state, .paused)
+    XCTAssertFalse(coordinator.state.ownsQueryableTraversal)
+
+    store.completeNextRelease(.success(()))
+    await coordinator.waitForIdle().value
+    XCTAssertEqual(coordinator.state, .paused)
+    XCTAssertFalse(coordinator.state.ownsQueryableTraversal)
+  }
+
+  @MainActor
+  func testDeferredEventSelectionIsGenerationBoundLatestOnlyAndResident() async throws {
+    let runtimeLogicalID = UUID()
     let controller = ViewerEventExplorerController(
       inputs: ViewerRuntimeExplorerInputs(
         runtimeLogicalID: runtimeLogicalID,
-        storeGateway: gateway,
+        storeGateway: ViewerStoreExplorerGateway(),
         liveObservations: ViewerLiveEventWindow(runtimeLogicalID: runtimeLogicalID)
-      ),
-      contentDriver: ViewerExplorerContentDriver(
-        gateway: gateway,
-        loadDetail: { _, completion in
-          let operationID = UUID()
-          detailCompletions.append(completion)
-          return ViewerStoreExplorerOperationToken(
-            coordinatorGeneration: 0,
-            operationID: operationID
-          )
-        }
       )
     )
     let source = ViewerExplorerSource.current(runtimeLogicalID: runtimeLogicalID)
@@ -12801,9 +12837,9 @@ final class ViewerFoundationTests: XCTestCase {
       deviceSessionID: 1,
       direction: "appToViewer",
       wireSequence: 1,
-      eventUUID: "refresh-detail-event",
-      eventType: "test.refresh.detail",
-      contentByteCount: 27,
+      eventUUID: "deferred-selection",
+      eventType: "test.deferred.selection",
+      contentByteCount: 1,
       createdWallMilliseconds: 1,
       viewerWallMilliseconds: 1,
       viewerMonotonicNanoseconds: 1,
@@ -12812,72 +12848,64 @@ final class ViewerFoundationTests: XCTestCase {
       deviceRevision: 1,
       resolvedDisposition: "buffered"
     )
+    let revealRow = ViewerStoredEventRow(
+      rowID: 2,
+      deviceSessionID: 1,
+      direction: "appToViewer",
+      wireSequence: 2,
+      eventUUID: "exact-reveal-selection",
+      eventType: "test.exact.reveal.selection",
+      contentByteCount: 1,
+      createdWallMilliseconds: 2,
+      viewerWallMilliseconds: 2,
+      viewerMonotonicNanoseconds: 2,
+      priority: "normal",
+      recordingRevision: 1,
+      deviceRevision: 1,
+      resolvedDisposition: "buffered"
+    )
     XCTAssertNotNil(
       controller.model.applyTimelinePage(
-        ViewerEventPage(rows: [row], nextCursor: nil, previousCursor: nil),
+        ViewerEventPage(rows: [row, revealRow], nextCursor: nil, previousCursor: nil),
         placement: .replace,
         token: token
       )
     )
-    controller.coordinatorPresentationChanged()
-    controller.selectEvent(.durable(rowID: row.rowID))
-    XCTAssertEqual(controller.inspectorState, .loading)
-    XCTAssertEqual(detailCompletions.count, 1)
+    let identity = ViewerExplorerEventIdentity.durable(rowID: row.rowID)
 
-    let refreshToken = controller.model.beginTimelineReplacement(retainingPresentation: true)
-    controller.coordinatorPresentationChanged()
-    XCTAssertTrue(controller.model.selectedEventNeedsReload)
-    XCTAssertEqual(controller.inspectorState, .loading)
+    controller.deferEventSelection(identity)
+    XCTAssertNil(controller.selectedEventID)
+    for _ in 0..<20 where controller.selectedEventID == nil { await Task.yield() }
+    XCTAssertEqual(controller.selectedEventID, identity)
 
-    XCTAssertTrue(controller.model.finishRetainedRefreshFailure(token: refreshToken))
-    controller.coordinatorPresentationChanged()
-    XCTAssertFalse(controller.model.selectedEventNeedsReload)
-    XCTAssertEqual(detailCompletions.count, 2)
+    let revealIdentity = ViewerExplorerEventIdentity.durable(rowID: revealRow.rowID)
+    controller.selectEvent(nil)
+    controller.deferEventSelection(identity)
+    controller.revealExactEvent(revealIdentity)
+    for _ in 0..<20 { await Task.yield() }
+    XCTAssertEqual(controller.selectedEventID, revealIdentity)
 
-    let detail = makeRendererDetail(
-      rowID: row.rowID,
-      eventType: row.eventType,
-      content: Data(#"{"secret":"refresh-detail"}"#.utf8)
-    )
-    detailCompletions.complete(at: 0, with: .success(detail))
-    detailCompletions.complete(at: 1, with: .success(detail))
-    for _ in 0..<2_000 where controller.inspectorState != .ready {
-      await Task.yield()
-    }
-    XCTAssertEqual(controller.inspectorState, .ready)
-    XCTAssertEqual(controller.inspectorMetadata?.eventType, row.eventType)
+    controller.selectEvent(nil)
+    controller.deferEventSelection(identity)
+    _ = controller.model.beginTimelineReplacement(retainingPresentation: true)
+    for _ in 0..<20 { await Task.yield() }
+    XCTAssertNil(controller.selectedEventID)
 
-    let successorToken = controller.model.beginTimelineReplacement(retainingPresentation: true)
-    controller.coordinatorPresentationChanged()
-    XCTAssertNotNil(
-      controller.model.applyTimelinePage(
-        ViewerEventPage(rows: [row], nextCursor: nil, previousCursor: nil),
-        placement: .replace,
-        token: successorToken
-      )
-    )
-    controller.coordinatorPresentationChanged()
-    XCTAssertFalse(controller.model.selectedEventNeedsReload)
-    XCTAssertEqual(detailCompletions.count, 2)
-    XCTAssertEqual(controller.inspectorState, .ready)
-    XCTAssertEqual(controller.inspectorMetadata?.eventType, row.eventType)
+    controller.deferEventSelection(identity)
+    controller.deferEventSelection(nil)
+    for _ in 0..<20 { await Task.yield() }
+    XCTAssertNil(controller.selectedEventID)
 
-    let removalToken = controller.model.beginTimelineReplacement(retainingPresentation: true)
-    controller.coordinatorPresentationChanged()
+    controller.deferEventSelection(identity)
     XCTAssertTrue(
       controller.model.clearAbsentRefreshLanes(
         hasDurableLane: false,
-        hasLiveLane: false,
-        token: removalToken
+        hasLiveLane: true,
+        token: controller.model.currentToken
       )
     )
-    controller.model.finishFreshTraversal(token: removalToken)
-    controller.coordinatorPresentationChanged()
-
+    for _ in 0..<20 { await Task.yield() }
     XCTAssertNil(controller.selectedEventID)
-    XCTAssertEqual(controller.inspectorState, .empty)
-    XCTAssertNil(controller.inspector.canonicalBuffer)
-    XCTAssertNil(controller.rendererPreparation)
     await controller.sealAndClear().value
   }
 
@@ -13008,14 +13036,22 @@ final class ViewerFoundationTests: XCTestCase {
   }
 
   @MainActor
-  func testExplorerCoalescesRepeatedBoundaryRequestsWhileEachLaneIsActive() async throws {
+  func testExplorerSuppressesBoundaryRequestsWithoutTraversalOwnership() async throws {
     let runtimeLogicalID = UUID()
     let gateway = ViewerStoreExplorerGateway()
+    let detailRequests = LockedTestCounter()
     let controller = ViewerEventExplorerController(
       inputs: ViewerRuntimeExplorerInputs(
         runtimeLogicalID: runtimeLogicalID,
         storeGateway: gateway,
         liveObservations: ViewerLiveEventWindow(runtimeLogicalID: runtimeLogicalID)
+      ),
+      contentDriver: ViewerExplorerContentDriver(
+        gateway: gateway,
+        loadDetail: { rowID, completion in
+          detailRequests.increment()
+          return gateway.loadDetail(rowID: rowID, completion: completion)
+        }
       )
     )
     let source = ViewerExplorerSource.current(runtimeLogicalID: runtimeLogicalID)
@@ -13046,6 +13082,16 @@ final class ViewerFoundationTests: XCTestCase {
       viewerMonotonicNanoseconds: 1,
       rowID: 1
     )
+    let eventForwardCursor = ViewerEventCursor(
+      recordingID: 1,
+      queryFingerprint: "single-flight-event",
+      snapshot: snapshot,
+      leaseID: eventCursor.leaseID,
+      leaseExpiresAt: eventCursor.leaseExpiresAt,
+      direction: .forward,
+      viewerMonotonicNanoseconds: 1,
+      rowID: 1
+    )
     let event = ViewerStoredEventRow(
       rowID: 1,
       deviceSessionID: 1,
@@ -13064,11 +13110,17 @@ final class ViewerFoundationTests: XCTestCase {
     )
     XCTAssertNotNil(
       controller.model.applyTimelinePage(
-        ViewerEventPage(rows: [event], nextCursor: nil, previousCursor: eventCursor),
+        ViewerEventPage(
+          rows: [event],
+          nextCursor: eventForwardCursor,
+          previousCursor: eventCursor
+        ),
         placement: .replace,
         token: token
       )
     )
+    XCTAssertEqual(controller.model.eventNavigation.leadingCursor?.direction, .backward)
+    XCTAssertEqual(controller.model.eventNavigation.trailingCursor?.direction, .forward)
     let gapCursor = ViewerGapCursor(
       recordingID: 1,
       queryFingerprint: "single-flight-gap",
@@ -13077,6 +13129,17 @@ final class ViewerFoundationTests: XCTestCase {
       leaseID: UUID(),
       leaseExpiresAt: .now + .seconds(60),
       direction: .backward,
+      lastViewerWallMilliseconds: 1,
+      rowID: 1
+    )
+    let gapForwardCursor = ViewerGapCursor(
+      recordingID: 1,
+      queryFingerprint: "single-flight-gap",
+      deviceSessionIDs: [],
+      gapUpperRowID: 1,
+      leaseID: gapCursor.leaseID,
+      leaseExpiresAt: gapCursor.leaseExpiresAt,
+      direction: .forward,
       lastViewerWallMilliseconds: 1,
       rowID: 1
     )
@@ -13100,21 +13163,26 @@ final class ViewerFoundationTests: XCTestCase {
               count: 1
             )
           ],
-          nextCursor: nil,
+          nextCursor: gapForwardCursor,
           previousCursor: gapCursor
         ),
         placement: .replace,
         token: token
       )
     )
+    XCTAssertEqual(controller.model.gapNavigation.leadingCursor?.direction, .backward)
+    XCTAssertEqual(controller.model.gapNavigation.trailingCursor?.direction, .forward)
 
     controller.loadOlderEvents()
     controller.loadOlderEvents()
     controller.loadOlderGaps()
     controller.loadOlderGaps()
+    controller.revealExactEvent(.durable(rowID: event.rowID))
 
-    XCTAssertEqual(controller.eventPageRequestCountForTesting, 1)
-    XCTAssertEqual(controller.gapPageRequestCountForTesting, 1)
+    XCTAssertEqual(controller.eventPageRequestCountForTesting, 0)
+    XCTAssertEqual(controller.gapPageRequestCountForTesting, 0)
+    XCTAssertEqual(detailRequests.value, 0)
+    XCTAssertEqual(controller.inspectorState, .loading)
     await controller.sealAndClear().value
   }
 
@@ -13295,6 +13363,8 @@ final class ViewerFoundationTests: XCTestCase {
     XCTAssertNotEqual(pausedToken, scopeToken)
     XCTAssertTrue(model.isPaused)
     XCTAssertEqual(live.pausedValues.last, true)
+    XCTAssertEqual(coordinator.state, .paused)
+    XCTAssertFalse(coordinator.state.ownsQueryableTraversal)
     XCTAssertEqual(model.timelineRows, pausedRows)
     XCTAssertTrue(model.selectEvent(.durable(rowID: 99)))
     XCTAssertTrue(
@@ -15730,35 +15800,6 @@ private func renderedPNGData(of view: NSView) -> Data? {
   }
   view.cacheDisplay(in: view.bounds, to: representation)
   return representation.representation(using: .png, properties: [:])
-}
-
-private final class FoundationDetailCompletionBox: @unchecked Sendable {
-  typealias Completion = ViewerExplorerContentDriver.DetailCompletion
-
-  private let lock = NSLock()
-  private var completions: [Completion] = []
-
-  func append(_ completion: @escaping Completion) {
-    lock.lock()
-    completions.append(completion)
-    lock.unlock()
-  }
-
-  var count: Int {
-    lock.lock()
-    defer { lock.unlock() }
-    return completions.count
-  }
-
-  func complete(
-    at index: Int,
-    with result: Result<ViewerStoredEventDetail?, ViewerStoreExplorerFailure>
-  ) {
-    lock.lock()
-    let completion = completions[index]
-    lock.unlock()
-    completion(result)
-  }
 }
 
 private final class LockedTestCounter: @unchecked Sendable {

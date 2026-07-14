@@ -412,7 +412,9 @@ struct ViewerExplorerTimelineView: View {
   private var selectedEventBinding: Binding<ViewerExplorerEventIdentity?> {
     Binding(
       get: { explorer.selectedEventID },
-      set: { explorer.selectEvent($0) }
+      set: { identity in
+        explorer.deferEventSelection(identity)
+      }
     )
   }
 

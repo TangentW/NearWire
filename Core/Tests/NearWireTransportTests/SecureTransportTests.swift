@@ -79,7 +79,13 @@ final class SecureTransportTests: XCTestCase {
           $0 is NWProtocolTLS.Options
         }
       )
-      XCTAssertTrue(parameters.defaultProtocolStack.transportProtocol is NWProtocolTCP.Options)
+      let tcp = try XCTUnwrap(
+        parameters.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options
+      )
+      XCTAssertTrue(tcp.enableKeepalive)
+      XCTAssertEqual(tcp.keepaliveIdle, SecureNetworkParameters.keepaliveIdleSeconds)
+      XCTAssertEqual(tcp.keepaliveInterval, SecureNetworkParameters.keepaliveIntervalSeconds)
+      XCTAssertEqual(tcp.keepaliveCount, SecureNetworkParameters.keepaliveProbeCount)
     }
   }
 
