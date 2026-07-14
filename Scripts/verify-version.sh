@@ -25,4 +25,19 @@ if [[ "$sdk_version" != "$version" ]]; then
   exit 1
 fi
 
+ruby -e '
+  expected = ARGV.shift
+  ARGV.each do |path|
+    source = File.read(path)
+    versions = source.scan(/MARKETING_VERSION = ([^;]+);/).flatten.map(&:strip)
+    abort "No MARKETING_VERSION values found in #{path}." if versions.empty?
+    mismatches = versions.reject { |value| value == expected }
+    unless mismatches.empty?
+      abort "MARKETING_VERSION in #{path} does not match #{expected}: #{mismatches.uniq.join(", ")}"
+    end
+  end
+' "$version" \
+  Viewer/NearWireViewer.xcodeproj/project.pbxproj \
+  Demo/NearWireDemo.xcodeproj/project.pbxproj
+
 echo "Version verification passed for $version."

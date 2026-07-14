@@ -1,0 +1,28 @@
+platform :ios, "16.0"
+
+selected_root = ENV.fetch("NEARWIRE_ROOT", File.expand_path("..", __dir__))
+nearwire_root = File.realpath(selected_root)
+required_entries = [
+  "Package.swift",
+  "NearWire.podspec",
+  "VERSION",
+  "LICENSE",
+  "Core",
+  "SDK"
+]
+missing_entries = required_entries.reject do |entry|
+  File.exist?(File.join(nearwire_root, entry))
+end
+unless missing_entries.empty?
+  abort "NearWire root is missing: #{missing_entries.join(", ")}"
+end
+
+project "NearWireDemo.xcodeproj"
+install! "cocoapods", :deterministic_uuids => true
+
+target "NearWireDemoCocoaPods" do
+  use_frameworks! :linkage => :static
+
+  pod "NearWire/UI", :path => nearwire_root
+  pod "NearWire/Performance", :path => nearwire_root
+end

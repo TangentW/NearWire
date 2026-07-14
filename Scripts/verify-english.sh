@@ -23,7 +23,7 @@ paths=(
 )
 
 set +e
-matches="$(rg --pcre2 -n '\p{Han}|\p{Hiragana}|\p{Katakana}|\p{Hangul}' "${paths[@]}" \
+matches="$(rg --pcre2 -n '\p{sc=Han}|\p{sc=Hiragana}|\p{sc=Katakana}|\p{sc=Hangul}' "${paths[@]}" \
   --glob '*.swift' \
   --glob '*.md' \
   --glob '*.sh' \

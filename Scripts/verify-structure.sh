@@ -9,6 +9,11 @@ required_files=(
   "Package.swift"
   "NearWire.podspec"
   "NearWire.xcworkspace/contents.xcworkspacedata"
+  "Demo/NearWireDemo.xcodeproj/project.pbxproj"
+  "Demo/NearWireDemo.xcodeproj/xcshareddata/xcschemes/NearWireDemo.xcscheme"
+  "Demo/NearWireDemo.xcodeproj/xcshareddata/xcschemes/NearWireDemoCocoaPods.xcscheme"
+  "Demo/NearWireDemo/Resources/Info.plist"
+  "Demo/Podfile"
   "VERSION"
   "README.md"
   "CHANGELOG.md"
@@ -85,6 +90,39 @@ while IFS= read -r script; do
 done < <(find Scripts -type f -name '*.rb' -print | sort)
 
 ruby -c NearWire.podspec >/dev/null
+ruby -c Demo/Podfile >/dev/null
+plutil -lint Demo/NearWireDemo.xcodeproj/project.pbxproj >/dev/null
+plutil -lint Demo/NearWireDemo/Resources/Info.plist >/dev/null
 xmllint --noout NearWire.xcworkspace/contents.xcworkspacedata
+xmllint --noout Demo/NearWireDemo.xcodeproj/xcshareddata/xcschemes/NearWireDemo.xcscheme
+xmllint --noout Demo/NearWireDemo.xcodeproj/xcshareddata/xcschemes/NearWireDemoCocoaPods.xcscheme
+
+for reference in \
+  'group:Viewer/NearWireViewer.xcodeproj' \
+  'group:Demo/NearWireDemo.xcodeproj'; do
+  if ! rg -Fq "$reference" NearWire.xcworkspace/contents.xcworkspacedata; then
+    echo "Missing root workspace reference: $reference" >&2
+    exit 1
+  fi
+done
+
+if ! rg -Fq 'relativePath = "..";' Demo/NearWireDemo.xcodeproj/project.pbxproj; then
+  echo "Demo must use the repository-relative local package reference." >&2
+  exit 1
+fi
+
+condition_count="$(rg -o 'NEARWIRE_DEMO_SEPARATE_MODULES' \
+  Demo/NearWireDemo.xcodeproj/project.pbxproj | wc -l | tr -d ' ')"
+if [[ "$condition_count" != "2" ]]; then
+  echo "The SwiftPM-only Demo import condition must exist in exactly two build configurations." >&2
+  exit 1
+fi
+
+for generated_path in Demo/Pods Demo/Podfile.lock Demo/NearWireDemo.xcworkspace; do
+  if [[ -e "$generated_path" ]]; then
+    echo "Generated CocoaPods state must not be committed: $generated_path" >&2
+    exit 1
+  fi
+done
 
 echo "Repository structure verification passed."

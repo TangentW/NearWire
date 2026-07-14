@@ -2,4 +2,6 @@
 <Workspace version="1.0">
    <FileRef location="group:Viewer/NearWireViewer.xcodeproj">
    </FileRef>
+   <FileRef location="group:Demo/NearWireDemo.xcodeproj">
+   </FileRef>
 </Workspace>

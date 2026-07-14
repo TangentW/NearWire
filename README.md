@@ -8,6 +8,8 @@ The supported SDK event and explicit connection facade is documented in [Documen
 
 The native macOS listener, persistent Viewer identity, pairing-code publication, bounded new-device admission, sandbox, and recovery behavior are documented in [Documentation/Viewer-Foundation.md](Documentation/Viewer-Foundation.md). Event inspection, live-versus-recorded semantics, filtering, history operations, JSON export, and Viewer-to-App control composition are documented in [Documentation/Viewer-Event-Explorer.md](Documentation/Viewer-Event-Explorer.md). The single-device performance analysis surface, time and availability semantics, projection bounds, raw traceability, and privacy behavior are documented in [Documentation/Viewer-Performance.md](Documentation/Viewer-Performance.md).
 
+The maintained iOS reference application and its Swift Package Manager and CocoaPods workflows are documented in [Demo/README.md](Demo/README.md).
+
 ```swift
 let nearWire = NearWire()
 try await nearWire.connect(code: "ABC234")

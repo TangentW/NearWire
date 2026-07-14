@@ -5,16 +5,19 @@ require "pathname"
 
 options = {
   core_root: "Core",
-  sdk_root: "SDK/Sources"
+  sdk_root: "SDK/Sources",
+  demo_root: "Demo/NearWireDemo"
 }
 
 OptionParser.new do |parser|
   parser.on("--core-root PATH") { |path| options[:core_root] = path }
   parser.on("--sdk-root PATH") { |path| options[:sdk_root] = path }
+  parser.on("--demo-root PATH") { |path| options[:demo_root] = path }
 end.parse!
 
 PLATFORM_UI_MODULES = %w[AppKit SwiftUI UIKit].freeze
 INTERNAL_CORE_MODULES = %w[NearWireCore NearWireFlowControl NearWireTransport].freeze
+DEMO_MODULES = %w[Foundation NearWire NearWirePerformance NearWireUI SwiftUI].freeze
 
 def swift_files(root)
   path = Pathname.new(root)
@@ -133,6 +136,12 @@ imports_in(options.fetch(:sdk_root)).each do |import|
   next unless import.fetch(:exported) || import.fetch(:public)
 
   violations << "#{import.fetch(:path)}:#{import.fetch(:line)}: SDK must not re-export #{import.fetch(:module_name)}"
+end
+
+imports_in(options.fetch(:demo_root)).each do |import|
+  next if DEMO_MODULES.include?(import.fetch(:module_name))
+
+  violations << "#{import.fetch(:path)}:#{import.fetch(:line)}: Demo must not import #{import.fetch(:module_name)}"
 end
 
 unless violations.empty?
