@@ -545,6 +545,35 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
     let result: ViewerRendererPreparationResult
   }
 
+  @MainActor
+  private final class ExactRevealPreflight {
+    let id: UUID
+    let intentRevision: UInt64
+    let identity: ViewerExplorerEventIdentity
+    let completion: @MainActor @Sendable (Bool) -> Void
+    var storeToken: ViewerStoreExplorerOperationToken?
+    var isCancelled = false
+    private var didCompleteAcceptance = false
+
+    init(
+      id: UUID,
+      intentRevision: UInt64,
+      identity: ViewerExplorerEventIdentity,
+      completion: @escaping @MainActor @Sendable (Bool) -> Void
+    ) {
+      self.id = id
+      self.intentRevision = intentRevision
+      self.identity = identity
+      self.completion = completion
+    }
+
+    func completeAcceptance(_ accepted: Bool) {
+      guard !didCompleteAcceptance else { return }
+      didCompleteAcceptance = true
+      completion(accepted)
+    }
+  }
+
   private struct ExportDestinationSelection {
     let id: UUID
     let deliveryGate: ViewerOperationDeliveryGate
@@ -581,9 +610,12 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
   private let operationDeliveryClaimed: @Sendable () -> Void
   private let rendererDeliveryClaimed: @Sendable () -> Void
   private let operationTracker = ViewerAsyncWorkTracker()
+  private let exactRevealTracker = ViewerAsyncWorkTracker()
   private let exportDestinationSelectionTracker = ViewerAsyncWorkTracker()
   private let storeRematerializationTracker = ViewerAsyncWorkTracker()
   private var activeOperations: [OperationSlot: ActiveOperation] = [:]
+  private var exactRevealPreflights: [UUID: ExactRevealPreflight] = [:]
+  private var activeExactRevealPreflightID: UUID?
   private var rendererDelivery: RendererDelivery?
   private var exportDestinationSelection: ExportDestinationSelection?
   private var recordingTargets: [Int64: ViewerStoreRecordingTarget] = [:]
@@ -1099,13 +1131,15 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
     analysisSelectionHandler()
   }
 
-  func performanceTargetSelection() -> ViewerPerformanceTargetSelection {
+  func performanceTargetSelection(
+    deviceID: UUID? = nil
+  ) -> ViewerPerformanceTargetSelection {
     guard storeRematerializationResolution != .unresolved else {
       return .guidance(.sourceUnavailable)
     }
     return ViewerPerformanceTargetCompiler.compile(
       source: selectedSource,
-      selectedDeviceIDs: selectedDevices,
+      selectedDeviceIDs: deviceID.map { [$0] } ?? selectedDevices,
       catalogRecordingID: deviceCatalogRecordingID,
       recordingRows: model.recordingRows,
       deviceRows: model.deviceRows,
@@ -1125,13 +1159,15 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
     let rendererDeliveryWait = rendererDeliveryPump.waitForIdle()
     let traversalWait = coordinator.deactivateAndReleaseTraversal()
     let operationWait = operationTracker.waitTask()
+    let exactRevealWait = exactRevealTracker.waitTask()
     publish()
     return Task {
       async let renderer: Void = rendererWait.value
       async let rendererDelivery: Void = rendererDeliveryWait.value
       async let traversal: Void = traversalWait.value
       async let operations: Void = operationWait.value
-      _ = await (renderer, rendererDelivery, traversal, operations)
+      async let exactReveal: Void = exactRevealWait.value
+      _ = await (renderer, rendererDelivery, traversal, operations, exactReveal)
     }
   }
 
@@ -1141,8 +1177,15 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
     return coordinator.activateAndRefresh()
   }
 
-  func revealExactEvent(_ identity: ViewerExplorerEventIdentity) {
-    guard !sealed, coordinator.isAnalysisActive else { return }
+  @discardableResult
+  func refreshTraversalForExactReveal() -> Task<Bool, Never> {
+    guard !sealed else { return Task { false } }
+    return coordinator.prepareExactReveal()
+  }
+
+  @discardableResult
+  func revealExactEvent(_ identity: ViewerExplorerEventIdentity) -> Bool {
+    guard !sealed, coordinator.isAnalysisActive else { return false }
     deferredSelectionRevision &+= 1
     clearInspector()
     _ = model.selectEvent(identity, scrollToSelection: true)
@@ -1152,13 +1195,126 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
       if canSubmitTraversalWork {
         pendingExactRevealIdentity = nil
         loadDurableDetail(rowID: rowID, identity: identity)
+        publish()
+        return true
       } else {
         pendingExactRevealIdentity = identity
+        publish()
+        return false
       }
     case .transient(let key):
       pendingExactRevealIdentity = nil
-      loadTransientDetail(key: key, identity: identity)
+      let accepted = loadTransientDetail(key: key, identity: identity)
+      publish()
+      return accepted
     }
+  }
+
+  func acceptExactReveal(_ identity: ViewerExplorerEventIdentity) async -> Bool {
+    await withCheckedContinuation { continuation in
+      beginExactRevealPreflight(identity) { accepted in
+        continuation.resume(returning: accepted)
+      }
+    }
+  }
+
+  private func beginExactRevealPreflight(
+    _ identity: ViewerExplorerEventIdentity,
+    completion: @escaping @MainActor @Sendable (Bool) -> Void
+  ) {
+    guard !sealed, coordinator.isAnalysisActive else {
+      completion(false)
+      return
+    }
+    cancelExactRevealPreflight()
+    switch identity {
+    case .durable(let rowID):
+      guard canSubmitTraversalWork else {
+        completion(false)
+        return
+      }
+      let id = UUID()
+      exactRevealTracker.begin(id: id)
+      let preflight = ExactRevealPreflight(
+        id: id,
+        intentRevision: deferredSelectionRevision,
+        identity: identity,
+        completion: completion
+      )
+      exactRevealPreflights[id] = preflight
+      activeExactRevealPreflightID = id
+      let storeToken = content.loadDetail(rowID) { [weak self] result in
+        Task { @MainActor in
+          self?.finishDurableExactRevealPreflight(result, id: id)
+        }
+      }
+      guard let active = exactRevealPreflights[id] else {
+        content.cancel(storeToken)
+        return
+      }
+      active.storeToken = storeToken
+    case .transient(let key):
+      let snapshot = live.snapshot()
+      guard snapshot.runtimeLogicalID == model.runtimeLogicalID,
+        let event = snapshot.events.first(where: { $0.observation.key == key }),
+        let buffer = try? inspector.prepare(liveEvent: event, identity: identity)
+      else {
+        completion(false)
+        return
+      }
+      commitTransientExactReveal(buffer, identity: identity)
+      completion(true)
+    }
+  }
+
+  private func finishDurableExactRevealPreflight(
+    _ result: Result<ViewerStoredEventDetail?, ViewerStoreExplorerFailure>,
+    id: UUID
+  ) {
+    guard let active = exactRevealPreflights.removeValue(forKey: id) else { return }
+    if activeExactRevealPreflightID == id { activeExactRevealPreflightID = nil }
+    exactRevealTracker.complete(id)
+    guard !active.isCancelled, !sealed, coordinator.isAnalysisActive, canSubmitTraversalWork,
+      active.intentRevision == deferredSelectionRevision,
+      case .success(let detail?) = result,
+      let buffer = try? inspector.prepare(detail: detail, identity: active.identity)
+    else {
+      active.completeAcceptance(false)
+      return
+    }
+    commitDurableExactReveal(detail, buffer: buffer, identity: active.identity)
+    active.completeAcceptance(true)
+  }
+
+  private func commitDurableExactReveal(
+    _ detail: ViewerStoredEventDetail,
+    buffer: ViewerCanonicalEventDetailBuffer,
+    identity: ViewerExplorerEventIdentity
+  ) {
+    deferredSelectionRevision &+= 1
+    clearInspector()
+    _ = model.selectEvent(identity, scrollToSelection: true)
+    inspectorState = .loading
+    pendingExactRevealIdentity = nil
+    _ = model.applySelectedDetail(detail, identity: identity, token: model.currentToken)
+    submitRenderer(inspector.select(preparedDurableBuffer: buffer, identity: identity))
+    if case .durable(let rowID) = identity {
+      loadCausality(rowID: rowID, identity: identity)
+    }
+    publish()
+  }
+
+  private func commitTransientExactReveal(
+    _ buffer: ViewerCanonicalEventDetailBuffer,
+    identity: ViewerExplorerEventIdentity
+  ) {
+    deferredSelectionRevision &+= 1
+    clearInspector()
+    _ = model.selectEvent(identity, scrollToSelection: true)
+    inspectorState = .loading
+    pendingExactRevealIdentity = nil
+    submitRenderer(inspector.select(preparedLiveBuffer: buffer, identity: identity))
+    causalityState = .recordedDataRequired
     publish()
   }
 
@@ -1701,6 +1857,7 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
       self.activeStoreRematerializationID = nil
       storeRematerializationTracker.complete(activeStoreRematerializationID)
     }
+    let exactRevealCleanup = cancelExactRevealAndWait()
     for slot in Array(activeOperations.keys) { cancel(slot) }
     cancelRendererDelivery()
     cancelExportDestinationSelection()
@@ -1742,11 +1899,12 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
       async let renderer: Void = rendererCleanup.value
       async let coordinator: Void = coordinatorCleanup.value
       async let operations: Void = operationCleanup.value
+      async let exactReveal: Void = exactRevealCleanup.value
       async let rendererDelivery: Void = rendererDeliveryCleanup.value
       async let exportDestination: Void = exportDestinationCleanup.value
       async let storeRematerialization: Void = storeRematerializationCleanup.value
       _ = await (
-        renderer, coordinator, operations, rendererDelivery, exportDestination,
+        renderer, coordinator, operations, exactReveal, rendererDelivery, exportDestination,
         storeRematerialization
       )
       _ = revision
@@ -1757,6 +1915,7 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
 
   var pendingCleanupWorkCount: Int {
     rendererService.pendingWorkCount + coordinator.pendingWorkCount + operationTracker.activeCount
+      + exactRevealTracker.activeCount
       + rendererDeliveryPump.pendingWorkCount + exportDestinationSelectionTracker.activeCount
       + storeRematerializationTracker.activeCount
   }
@@ -2483,23 +2642,26 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
     publish()
   }
 
+  @discardableResult
   private func loadTransientDetail(
     key: ViewerEventJournalKey,
     identity: ViewerExplorerEventIdentity
-  ) {
+  ) -> Bool {
     let snapshot = live.snapshot()
     guard snapshot.runtimeLogicalID == model.runtimeLogicalID,
       let event = snapshot.events.first(where: { $0.observation.key == key })
     else {
       inspectorState = .failed(.invalidRequest)
       publish()
-      return
+      return false
     }
     do {
       submitRenderer(try inspector.select(liveEvent: event, identity: identity))
       causalityState = .recordedDataRequired
+      return true
     } catch {
       inspectorState = .failed(.invalidRequest)
+      return false
     }
   }
 
@@ -2543,6 +2705,7 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
   }
 
   private func clearInspector() {
+    cancelExactRevealPreflight()
     cancel(.detail)
     cancel(.causality)
     cancelRendererDelivery()
@@ -2553,6 +2716,21 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
     inspectorTreeState = nil
     inspectorState = .empty
     causalityState = .none
+  }
+
+  private func cancelExactRevealPreflight() {
+    guard let id = activeExactRevealPreflightID,
+      let active = exactRevealPreflights[id]
+    else { return }
+    activeExactRevealPreflightID = nil
+    active.isCancelled = true
+    if let storeToken = active.storeToken { content.cancel(storeToken) }
+    active.completeAcceptance(false)
+  }
+
+  func cancelExactRevealAndWait() -> Task<Void, Never> {
+    cancelExactRevealPreflight()
+    return exactRevealTracker.waitTask()
   }
 
   private func handleChangeSnapshot(

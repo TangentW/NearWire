@@ -3,30 +3,6 @@
 ## Purpose
 TBD - created by archiving change viewer-application-foundation. Update Purpose after archive.
 ## Requirements
-### Requirement: Viewer is a native single-window macOS application
-
-The repository SHALL contain a manually maintained `Viewer/NearWireViewer.xcodeproj` with a native SwiftUI application named `NearWire`, module name `NearWireViewer`, one unit-test target, macOS 13 deployment, and Swift 5 language mode. It SHALL use the repository-local `NearWireCore` product and Apple frameworks only. It SHALL NOT add a nested package manifest, podspec, project generator, menu-bar agent, daemon, or root Swift Package dependency.
-
-The application SHALL expose one main window, one process-scoped working Session, and no supported second-listener window or historical Source browser. Opening the window SHALL start one runtime generation without a Start button. Closing the last window or terminating the application SHALL synchronously close admission, stop publication/listening, cancel pending attempts, close the working Store, and await one idempotent cleanup receipt for at most one second without leaving a hidden listener. Expiry of that wait SHALL NOT reopen admission. The retained cleanup owner MAY continue finite removal retries while the process remains alive, and termination SHALL NOT wait without a bound. The working Session SHALL NOT be reopened as Viewer history on a later process launch.
-
-#### Scenario: Main window opens and closes
-
-- **WHEN** the NearWire main window opens and its runtime dependencies succeed
-- **THEN** exactly one Viewer runtime generation and one working Session start automatically
-- **AND** closing the last window stops that exact generation without a menu-bar, daemon, or retained historical Source lifetime
-
-#### Scenario: Application is built from the repository
-
-- **WHEN** the committed Viewer scheme is built and tested on macOS 13 compatibility settings
-- **THEN** it compiles in Swift 5 language mode from the manual Xcode project
-- **AND** no Viewer dependency appears in root `Package.swift` or `NearWire.podspec`
-
-#### Scenario: Shutdown cleanup does not complete promptly
-
-- **WHEN** application termination or identity reset closes a runtime whose owned handoff or working-Store cleanup does not complete within one second
-- **THEN** the bounded wait returns without reopening listener admission
-- **AND** the retained cleanup owner uses finite retries while the process remains alive, while an interrupted marked workspace is never reopened as history
-
 ### Requirement: Viewer installation and TLS identities persist separately
 
 Viewer SHALL store one random installation identifier and one self-signed TLS `SecIdentity` under separate versioned selectors in the standard per-user macOS login Keychain, using `SecItem`, synchronization false, `kSecUseDataProtectionKeychain=false`, and no Keychain-sharing entitlement. Maintained Viewer builds SHALL use one stable Apple Development signing identity for internal updates or one stable Developer ID identity for distributed updates; an ad-hoc build SHALL NOT be treated as proof of cross-update Keychain persistence. Keychain reads, existence checks, exact identity queries, and deletes SHALL use an authentication context with interaction disabled and SHALL fail closed rather than prompting or broadening the Keychain search during automatic startup or recovery. Both identities SHALL be created or loaded before a listener or pairing code exists. The installation identifier and valid TLS identity SHALL remain stable across window/runtime, pairing-code refreshes, and updates signed by the same supported signer. An unrelated signer SHALL NOT gain non-interactive read, signing, or deletion access. Private-key creation SHALL request permanent and sensitive P-256 storage. Reload SHALL select only the exact Viewer application tag and key class/type, validate P-256 size, and prove actual nonexportability and signing use; it SHALL NOT require login-Keychain `SecKey` reference attributes that are not reliably readable. Generic-password installation and TLS-metadata items SHALL use exact service/account selectors. The certificate SHALL be selected by the metadata-owned persistent reference through `kSecMatchItemList` and cross-checked by fixed profile, self-signature, serial, certificate hash, public-key hash, and exact private-key correspondence. The TLS private key and certificate material SHALL NOT appear in logs, errors, reflection, clipboard, exported data, or UI.
@@ -260,3 +236,28 @@ smaller value.
 - **WHEN** a valid peer advertises less than the Viewer production Event-record capacity
 - **THEN** negotiation selects the smaller peer offer
 - **AND** Viewer does not widen the resulting active session
+
+### Requirement: Viewer is a native multi-window macOS application
+
+The repository SHALL contain a manually maintained `Viewer/NearWireViewer.xcodeproj` with a native SwiftUI application named `NearWire`, module name `NearWireViewer`, one unit-test target, macOS 13 deployment, and Swift 5 language mode. It SHALL use the repository-local `NearWireCore` product and Apple frameworks only. It SHALL NOT add a nested package manifest, podspec, project generator, menu-bar agent, daemon, or root Swift Package dependency.
+
+The application SHALL expose one singleton main Event window, one singleton auxiliary Performance window, one process-scoped working Session, and no supported second-listener window or historical Source browser. Opening the application SHALL start one runtime generation without a Start button. Either supported window MAY remain open or reopen while reusing that exact runtime generation. Closing the last window or terminating the application SHALL synchronously close admission, stop publication/listening, cancel pending attempts, close the working Store, and await one idempotent cleanup receipt for at most one second without leaving a hidden listener. Expiry of that wait SHALL NOT reopen admission. The retained cleanup owner MAY continue finite removal retries while the process remains alive, and termination SHALL NOT wait without a bound. The working Session SHALL NOT be reopened as Viewer history on a later process launch.
+
+#### Scenario: Main and Performance windows open and close
+
+- **WHEN** the NearWire main window starts one successful runtime and the operator opens Performance
+- **THEN** exactly one Viewer runtime generation and one working Session serve both singleton windows
+- **AND** closing only one window preserves that generation while the other remains open
+- **AND** closing the last window stops that exact generation without a menu-bar, daemon, or retained historical Source lifetime
+
+#### Scenario: Application is built from the repository
+
+- **WHEN** the committed Viewer scheme is built and tested on macOS 13 compatibility settings
+- **THEN** it compiles in Swift 5 language mode from the manual Xcode project
+- **AND** no Viewer dependency appears in root `Package.swift` or `NearWire.podspec`
+
+#### Scenario: Shutdown cleanup does not complete promptly
+
+- **WHEN** application termination or identity reset closes a runtime whose owned handoff or working-Store cleanup does not complete within one second
+- **THEN** the bounded wait returns without reopening listener admission
+- **AND** the retained cleanup owner uses finite retries while the process remains alive, while an interrupted marked workspace is never reopened as history

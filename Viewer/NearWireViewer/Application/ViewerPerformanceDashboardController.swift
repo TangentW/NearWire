@@ -305,7 +305,7 @@ struct ViewerPerformanceProjectionDriver: @unchecked Sendable {
       },
       endTraversal: { completion in
         ViewerPerformanceProjectionOperationToken(
-          gatewayToken: storeGateway.endTraversal(completion: completion)
+          gatewayToken: storeGateway.endPerformanceTraversal(completion: completion)
         )
       },
       cancel: { token in
@@ -981,6 +981,7 @@ final class ViewerPerformanceDashboardController: CustomReflectable, CustomStrin
   private var analysisDeactivationTask: Task<Void, Never>?
   private var analysisActive: Bool
   private var paused = false
+  private var rawRevealSuspended = false
   private var sealed = false
 
   init(
@@ -1048,6 +1049,7 @@ final class ViewerPerformanceDashboardController: CustomReflectable, CustomStrin
       return Task {}
     }
 
+    cancelRawRevealSuspensionForTransition()
     let targetChanged = target != nextTarget
     target = nextTarget
     rangeKind = nextRangeKind
@@ -1092,6 +1094,7 @@ final class ViewerPerformanceDashboardController: CustomReflectable, CustomStrin
   @discardableResult
   func replaceStoreGenerationAndWait() -> Task<Void, Never> {
     guard !sealed else { return Task {} }
+    cancelRawRevealSuspensionForTransition()
     transitionRevision = Self.increment(transitionRevision)
     let transition = transitionRevision
     sourceGeneration = Self.increment(sourceGeneration)
@@ -1123,6 +1126,7 @@ final class ViewerPerformanceDashboardController: CustomReflectable, CustomStrin
   @discardableResult
   func invalidateStoreGenerationAndWait() -> Task<Void, Never> {
     guard !sealed else { return Task {} }
+    cancelRawRevealSuspensionForTransition()
     transitionRevision = Self.increment(transitionRevision)
     sourceGeneration = Self.increment(sourceGeneration)
     _ = admission.replaceSourceGeneration(sourceGeneration)
@@ -1161,6 +1165,7 @@ final class ViewerPerformanceDashboardController: CustomReflectable, CustomStrin
   func deactivateAndWait() -> Task<Void, Never> {
     if let analysisDeactivationTask, !analysisActive { return analysisDeactivationTask }
     guard !sealed, analysisActive else { return Task {} }
+    cancelRawRevealSuspensionForTransition()
     analysisActive = false
     transitionRevision = Self.increment(transitionRevision)
     sourceGeneration = Self.increment(sourceGeneration)
@@ -1190,6 +1195,50 @@ final class ViewerPerformanceDashboardController: CustomReflectable, CustomStrin
     finishReplacement()
   }
 
+  @discardableResult
+  func suspendForRawRevealAndWait() -> Task<Void, Never> {
+    guard !sealed, analysisActive else { return Task {} }
+    guard !rawRevealSuspended else {
+      let runWait = activeRun?.cancelAndWait() ?? Task {}
+      let deliveryWait = deliveryPump.waitForIdle()
+      return Task {
+        await runWait.value
+        await deliveryWait.value
+      }
+    }
+    rawRevealSuspended = true
+    admission.pause()
+    deadlineOwner.setPaused(true)
+    deliveryGate.invalidate()
+    deliveryPump.cancelPending()
+    let runWait = activeRun?.cancelAndWait() ?? Task {}
+    activeRun = nil
+    liveOnlyToken = nil
+    let deliveryWait = deliveryPump.waitForIdle()
+    return Task {
+      await runWait.value
+      await deliveryWait.value
+    }
+  }
+
+  func resumeAfterRawReveal() {
+    guard !sealed, rawRevealSuspended else { return }
+    rawRevealSuspended = false
+    guard !paused else { return }
+    _ = deadlineOwner.resumeConsumesDirtyExpiry()
+    guard analysisActive, let scope = model.scope else {
+      _ = admission.resume()
+      return
+    }
+    if let freshToken = makeToken(scope: scope) {
+      _ = admission.submit(freshToken)
+      liveOnlyToken = nil
+    }
+    if let successor = admission.resume() {
+      startRun(successor, preparationMode: .storeBacked)
+    }
+  }
+
   func pause() {
     guard !sealed, !paused else { return }
     paused = true
@@ -1202,6 +1251,7 @@ final class ViewerPerformanceDashboardController: CustomReflectable, CustomStrin
   func resume() {
     guard !sealed, paused, let scope = model.scope else { return }
     paused = false
+    guard !rawRevealSuspended else { return }
     _ = deadlineOwner.resumeConsumesDirtyExpiry()
     guard analysisActive else {
       _ = admission.resume()
@@ -1214,6 +1264,13 @@ final class ViewerPerformanceDashboardController: CustomReflectable, CustomStrin
     if let successor = admission.resume() {
       startRun(successor, preparationMode: .storeBacked)
     }
+  }
+
+  func resetPauseForWindowClose() {
+    guard !sealed, !analysisActive, paused else { return }
+    paused = false
+    _ = deadlineOwner.resumeConsumesDirtyExpiry()
+    _ = admission.resume()
   }
 
   @discardableResult
@@ -1303,6 +1360,7 @@ final class ViewerPerformanceDashboardController: CustomReflectable, CustomStrin
 
   func sealAndWait() -> Task<Void, Never> {
     guard !sealed else { return Task {} }
+    cancelRawRevealSuspensionForTransition()
     sealed = true
     transitionRevision = Self.increment(transitionRevision)
     sourceGeneration = Self.increment(sourceGeneration)
@@ -1668,6 +1726,16 @@ final class ViewerPerformanceDashboardController: CustomReflectable, CustomStrin
     release(&presentationReservation)
     release(&crosshairReservation)
     release(&tooltipReservation)
+  }
+
+  private func cancelRawRevealSuspensionForTransition() {
+    guard rawRevealSuspended else { return }
+    rawRevealSuspended = false
+    deadlineOwner.setPaused(paused)
+    if !paused {
+      _ = deadlineOwner.resumeConsumesDirtyExpiry()
+      _ = admission.resume()
+    }
   }
 
   private func release(

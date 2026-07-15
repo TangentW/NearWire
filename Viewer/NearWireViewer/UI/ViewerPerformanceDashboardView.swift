@@ -1,7 +1,15 @@
 import Charts
+import Combine
 import Foundation
 @_spi(NearWireInternal) import NearWireCore
 import SwiftUI
+
+enum ViewerPerformanceWindowLayout {
+  static let minimumWidth: CGFloat = 800
+  static let minimumHeight: CGFloat = 600
+  static let defaultWidth: CGFloat = 1_100
+  static let defaultHeight: CGFloat = 760
+}
 
 struct ViewerPerformanceMetricPresentation: Equatable, Sendable {
   let key: PerformanceMetricKey
@@ -362,13 +370,256 @@ enum ViewerPerformanceAccessibilityFormatting {
   }
 }
 
+private struct ViewerPerformanceWindowSignature: Equatable {
+  let status: ViewerApplicationModel.Status
+  let coordinatorIdentity: ObjectIdentifier?
+}
+
+@MainActor
+private final class ViewerPerformanceWindowObserver: ObservableObject {
+  @Published private(set) var revision: UInt64 = 0
+  private var cancellables: Set<AnyCancellable> = []
+
+  init(model: ViewerApplicationModel) {
+    Publishers.CombineLatest(
+      model.$status,
+      model.$analysisCoordinator.map { $0.map(ObjectIdentifier.init) }
+    )
+    .map(ViewerPerformanceWindowSignature.init)
+    .removeDuplicates()
+    .dropFirst()
+    .sink { [weak self] _ in self?.revision &+= 1 }
+    .store(in: &cancellables)
+  }
+}
+
+struct ViewerPerformanceWindowRootView: View {
+  @Environment(\.openWindow) private var openWindow
+  let model: ViewerApplicationModel
+  @StateObject private var observer: ViewerPerformanceWindowObserver
+
+  init(model: ViewerApplicationModel) {
+    self.model = model
+    _observer = StateObject(wrappedValue: ViewerPerformanceWindowObserver(model: model))
+  }
+
+  var body: some View {
+    let _ = observer.revision
+    Group {
+      if let coordinator = model.analysisCoordinator {
+        ViewerPerformanceWindowContent(
+          coordinator: coordinator,
+          showViewer: { openWindow(id: "main") }
+        )
+      } else {
+        ViewerPerformanceUnavailableView(
+          title: performanceUnavailableTitle,
+          description: performanceUnavailableDescription,
+          showViewer: { openWindow(id: "main") }
+        )
+      }
+    }
+    .background(Color(nsColor: .windowBackgroundColor))
+    .accessibilityIdentifier("nearwire.performance.window")
+    .onAppear { model.analysisCoordinator?.showPerformance() }
+    .onChange(of: observer.revision) { _ in
+      model.analysisCoordinator?.showPerformance()
+    }
+    .onDisappear { model.analysisCoordinator?.showEvents() }
+  }
+
+  private var performanceUnavailableTitle: String {
+    switch model.status {
+    case .starting: return "Preparing Performance"
+    case .failed: return "Performance Unavailable"
+    case .stopped, .stopping: return "Viewer Runtime Not Running"
+    case .listening: return "Preparing Performance"
+    }
+  }
+
+  private var performanceUnavailableDescription: String {
+    switch model.status {
+    case .starting, .listening:
+      return "The Performance workspace will appear when the Viewer runtime is ready."
+    case .failed:
+      return "Show the main Viewer window to retry the runtime. Performance will update automatically when it is ready."
+    case .stopped, .stopping:
+      return "Preparing the shared Viewer runtime."
+    }
+  }
+}
+
+struct ViewerPerformanceUnavailableView: View {
+  static let showViewerAccessibilityIdentifier = "nearwire.performance.show-viewer"
+
+  let title: String
+  let description: String
+  let showViewer: () -> Void
+
+  func performShowViewer() {
+    showViewer()
+  }
+
+  var body: some View {
+    VStack(spacing: 0) {
+      HStack(spacing: 14) {
+        Label("Performance", systemImage: "chart.xyaxis.line")
+          .font(.headline)
+        Spacer()
+        Button {
+          performShowViewer()
+        } label: {
+          Label("Show Viewer", systemImage: "macwindow")
+        }
+        .help("Show the main Event window")
+        .accessibilityLabel("Show main Viewer window")
+        .accessibilityIdentifier(Self.showViewerAccessibilityIdentifier)
+      }
+      .padding(.horizontal, 18)
+      .padding(.vertical, 12)
+      Divider()
+      ViewerEmptyState(
+        title: title,
+        systemImage: "chart.xyaxis.line",
+        description: description
+      )
+    }
+    .frame(maxWidth: .infinity, maxHeight: .infinity)
+    .background(Color(nsColor: .windowBackgroundColor))
+  }
+}
+
+struct ViewerPerformanceWindowContent: View {
+  @ObservedObject var coordinator: ViewerAnalysisModeCoordinator
+  let showViewer: () -> Void
+
+  var body: some View {
+    VStack(spacing: 0) {
+      header
+      Divider()
+      if coordinator.performanceDeviceID == nil {
+        ViewerEmptyState(
+          title: emptyStateTitle,
+          systemImage: "iphone.gen3",
+          description: emptyStateDescription
+        )
+        .accessibilityIdentifier("nearwire.performance.device-empty-state")
+      } else {
+        ViewerPerformanceDashboardView(
+          coordinator: coordinator,
+          openRawEvent: { bucketIndex, metric in
+            coordinator.openRawEvent(bucketIndex: bucketIndex, metric: metric)
+          }
+        )
+      }
+    }
+    .onChange(of: coordinator.eventRevealRevision) { _ in showViewer() }
+  }
+
+  private var header: some View {
+    HStack(spacing: 14) {
+      Label("Performance", systemImage: "chart.xyaxis.line")
+        .font(.headline)
+      Divider().frame(height: 24)
+      VStack(alignment: .leading, spacing: 2) {
+        Picker("Device", selection: deviceBinding) {
+          Text(emptyDeviceTitle).tag(Optional<UUID>.none)
+          ForEach(coordinator.performanceDeviceOptions) { device in
+            Text(deviceMenuTitle(device))
+              .tag(Optional(device.id))
+              .disabled(!device.isEligible)
+              .accessibilityLabel(deviceAccessibilityLabel(device))
+          }
+        }
+        .frame(width: 300)
+        .disabled(coordinator.performanceDeviceOptions.isEmpty)
+        .accessibilityLabel("Performance Device")
+        .accessibilityIdentifier("nearwire.performance.device-picker")
+        if let selectedDevice {
+          Text("\(selectedDevice.subtitle) · \(selectedDevice.state.capitalized)")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+        } else {
+          Text(deviceGuidance)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .lineLimit(2)
+        }
+      }
+      Spacer()
+      Button {
+        showViewer()
+      } label: {
+        Label("Show Viewer", systemImage: "macwindow")
+      }
+      .help("Show the main Event window")
+      .accessibilityLabel("Show main Viewer window")
+      .accessibilityIdentifier("nearwire.performance.show-viewer")
+    }
+    .padding(.horizontal, 18)
+    .padding(.vertical, 12)
+  }
+
+  private var deviceBinding: Binding<UUID?> {
+    Binding(
+      get: { coordinator.performanceDeviceID },
+      set: { coordinator.setPerformanceDevice($0) }
+    )
+  }
+
+  private var selectedDevice: ViewerPerformanceDeviceOption? {
+    guard let selectedID = coordinator.performanceDeviceID else { return nil }
+    return coordinator.performanceDeviceOptions.first { $0.id == selectedID }
+  }
+
+  private var emptyDeviceTitle: String {
+    eligibleDevices.isEmpty ? "No Available Devices" : "Choose a Device"
+  }
+
+  private var deviceGuidance: String {
+    eligibleDevices.isEmpty
+      ? "Connect an App with an active performance target."
+      : "Choose one Device for this window."
+  }
+
+  private var eligibleDevices: [ViewerPerformanceDeviceOption] {
+    coordinator.performanceDeviceOptions.filter(\.isEligible)
+  }
+
+  private var emptyStateTitle: String {
+    eligibleDevices.isEmpty ? "No Available Devices" : "Choose a Device"
+  }
+
+  private var emptyStateDescription: String {
+    eligibleDevices.isEmpty
+      ? "Connect an App that can provide performance data."
+      : "Use the Device menu above to choose one exact App connection."
+  }
+
+  private func deviceMenuTitle(_ device: ViewerPerformanceDeviceOption) -> String {
+    "\(device.title) — \(device.subtitle)"
+  }
+
+  private func deviceAccessibilityLabel(_ device: ViewerPerformanceDeviceOption) -> String {
+    "\(device.title), \(device.subtitle), \(device.state)"
+  }
+}
+
 struct ViewerPerformanceDashboardView: View {
   @ObservedObject var coordinator: ViewerAnalysisModeCoordinator
   @ObservedObject private var dashboard: ViewerPerformanceDashboardModel
+  private let openRawEvent: (Int, ViewerPerformanceNumericMetric) -> Void
 
-  init(coordinator: ViewerAnalysisModeCoordinator) {
+  init(
+    coordinator: ViewerAnalysisModeCoordinator,
+    openRawEvent: ((Int, ViewerPerformanceNumericMetric) -> Void)? = nil
+  ) {
     self.coordinator = coordinator
     _dashboard = ObservedObject(wrappedValue: coordinator.performanceController.model)
+    self.openRawEvent = openRawEvent ?? { [weak coordinator] bucketIndex, metric in
+      coordinator?.openRawEvent(bucketIndex: bucketIndex, metric: metric)
+    }
   }
 
   var body: some View {
@@ -387,7 +638,7 @@ struct ViewerPerformanceDashboardView: View {
         )
       },
       clearCrosshair: { coordinator.performanceController.clearCrosshair() },
-      openRawEvent: { coordinator.openRawEvent(bucketIndex: $0, metric: $1) }
+      openRawEvent: openRawEvent
     )
   }
 }
@@ -480,6 +731,7 @@ struct ViewerPerformanceDashboardContent: View {
     .pickerStyle(.segmented)
     .frame(maxWidth: 440)
     .accessibilityLabel("Performance range")
+    .accessibilityIdentifier("nearwire.performance.range-picker")
   }
 
   private var pauseButton: some View {
@@ -497,6 +749,7 @@ struct ViewerPerformanceDashboardContent: View {
         ? "Resumes bounded performance refreshes."
         : "Freezes the current complete performance presentation."
     )
+    .accessibilityIdentifier("nearwire.performance.pause")
   }
 
   @ViewBuilder
@@ -605,7 +858,7 @@ struct ViewerPerformanceDashboardContent: View {
     if let guidance {
       performanceStatus(
         title: guidance.message,
-        detail: "Choose one exact App session in the Devices strip.",
+        detail: "Choose one Device in the Performance window toolbar.",
         systemImage: "iphone.gen3"
       )
     } else {
@@ -1069,6 +1322,7 @@ struct ViewerPerformanceDashboardContent: View {
               bucket.numeric.accumulator(for: $0).representative
             } == nil
           )
+          .accessibilityIdentifier("nearwire.performance.open-raw-event")
         }
       }
       .padding(12)

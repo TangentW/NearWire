@@ -28,7 +28,7 @@ final class ViewerExplorerQueryArbiter: @unchecked Sendable {
   ) throws -> ViewerQuerySnapshot {
     try queue.sync {
       guard !closed else { throw ViewerStoreExplorerFailure.storeReplaced }
-      endTraversalLocked()
+      endEventTraversalLocked()
       let next = try queryService.begin(query: query, operationID: operationID)
       traversal = next
       return next.snapshot
@@ -72,7 +72,7 @@ final class ViewerExplorerQueryArbiter: @unchecked Sendable {
   ) throws -> ViewerPerformanceStoreScope {
     try queue.sync {
       guard !closed else { throw ViewerStoreExplorerFailure.storeReplaced }
-      endTraversalLocked()
+      endPerformanceTraversalLocked()
       let next = try performanceService.begin(
         storeGeneration: storeGeneration,
         recordingID: recordingID,
@@ -142,7 +142,7 @@ final class ViewerExplorerQueryArbiter: @unchecked Sendable {
   ) throws -> ViewerPerformanceEventLocator? {
     try queue.sync {
       guard !closed else { throw ViewerStoreExplorerFailure.storeReplaced }
-      guard traversal == nil, performanceTraversal == nil else {
+      guard performanceTraversal == nil else {
         throw ViewerStoreExplorerFailure.busy
       }
       return try performanceService.resolveEventLocator(
@@ -326,7 +326,11 @@ final class ViewerExplorerQueryArbiter: @unchecked Sendable {
   }
 
   func endTraversal() {
-    queue.sync { endTraversalLocked() }
+    queue.sync { endEventTraversalLocked() }
+  }
+
+  func endPerformanceTraversal() {
+    queue.sync { endPerformanceTraversalLocked() }
   }
 
   func cancel(operationID: UUID) {
@@ -347,15 +351,19 @@ final class ViewerExplorerQueryArbiter: @unchecked Sendable {
     queue.sync {
       guard !closed else { return }
       closed = true
-      endTraversalLocked()
+      endEventTraversalLocked()
+      endPerformanceTraversalLocked()
     }
   }
 
-  private func endTraversalLocked() {
+  private func endEventTraversalLocked() {
     if let traversal {
       self.traversal = nil
       queryService.end(traversal)
     }
+  }
+
+  private func endPerformanceTraversalLocked() {
     if let performanceTraversal {
       self.performanceTraversal = nil
       performanceService.end(performanceTraversal)

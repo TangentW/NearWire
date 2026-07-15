@@ -23,6 +23,7 @@ enum ViewerExplorerTraversalReason: Equatable, Sendable {
   case resume
   case jumpToLatest
   case refresh
+  case exactReveal
   case analysisModeSwitch
 }
 
@@ -373,6 +374,39 @@ final class ViewerEventExplorerCoordinator: CustomReflectable, CustomStringConve
   }
 
   @discardableResult
+  func refreshAndWait() -> Task<Void, Never> {
+    _ = refresh()
+    return waitForIdle()
+  }
+
+  func prepareExactReveal() -> Task<Bool, Never> {
+    guard isAnalysisActive else { return Task { false } }
+    guard model.isPaused else {
+      let token = refresh()
+      let wait = waitForIdle()
+      return Task { @MainActor [weak self] in
+        await wait.value
+        guard let self else { return false }
+        return self.isAnalysisActive && self.model.currentToken == token
+          && self.state.ownsQueryableTraversal
+      }
+    }
+    guard let durableQuery = model.compiledInputs?.durableQuery else {
+      return Task { true }
+    }
+
+    let token = model.currentToken
+    requestPausedExactRevealSnapshot(durableQuery, token: token)
+    let wait = waitForIdle()
+    return Task { @MainActor [weak self] in
+      await wait.value
+      guard let self else { return false }
+      return self.isAnalysisActive && self.model.isPaused && self.model.currentToken == token
+        && self.state == .ready(.exactReveal)
+    }
+  }
+
+  @discardableResult
   func replaceScope(
     _ scope: ViewerExplorerScope,
     materialization: ViewerExplorerMaterializationSnapshot
@@ -438,6 +472,81 @@ final class ViewerEventExplorerCoordinator: CustomReflectable, CustomStringConve
       }
     }
     delivery.attach(storeToken)
+  }
+
+  private func requestPausedExactRevealSnapshot(
+    _ query: ViewerEventQuery,
+    token: ViewerExplorerPresentationToken
+  ) {
+    guard isAnalysisActive, model.isPaused, token == model.currentToken else { return }
+    cancelLiveEvaluation()
+    requestCount = Self.saturatingIncrement(requestCount)
+    releaseRequestCount = Self.saturatingIncrement(releaseRequestCount)
+    state = .releasing(.exactReveal)
+    presentationHandler()
+    let workID = workTracker.begin()
+    let delivery = ViewerExplorerStoreDelivery()
+    let storeToken = store.endTraversal { [weak self, workTracker, delivery] result in
+      Task { @MainActor in
+        self?.handlePausedExactRevealRelease(
+          result,
+          query: query,
+          token: token,
+          delivery: delivery
+        )
+        workTracker.complete(workID)
+      }
+    }
+    delivery.attach(storeToken)
+  }
+
+  private func handlePausedExactRevealRelease(
+    _ result: Result<Void, ViewerStoreExplorerFailure>,
+    query: ViewerEventQuery,
+    token: ViewerExplorerPresentationToken,
+    delivery: ViewerExplorerStoreDelivery
+  ) {
+    releaseCompletionCount = Self.saturatingIncrement(releaseCompletionCount)
+    guard let storeToken = delivery.validToken else { return }
+    guard isAnalysisActive, model.isPaused, token == model.currentToken else { return }
+    guard case .success = result else {
+      if case .failure(let failure) = result { failFreshTraversal(failure, token: token) }
+      return
+    }
+
+    state = .loading(.exactReveal)
+    presentationHandler()
+    durableQueryCount = Self.saturatingIncrement(durableQueryCount)
+    let workID = workTracker.begin()
+    let replacementDelivery = ViewerExplorerStoreDelivery()
+    let replacementToken = store.replaceQuery(query, storeToken) {
+      [weak self, workTracker, replacementDelivery] result in
+      Task { @MainActor in
+        self?.handlePausedExactRevealReplacement(
+          result,
+          token: token,
+          delivery: replacementDelivery
+        )
+        workTracker.complete(workID)
+      }
+    }
+    replacementDelivery.attach(replacementToken)
+  }
+
+  private func handlePausedExactRevealReplacement(
+    _ result: Result<ViewerQuerySnapshot, ViewerStoreExplorerFailure>,
+    token: ViewerExplorerPresentationToken,
+    delivery: ViewerExplorerStoreDelivery
+  ) {
+    guard delivery.validToken != nil else { return }
+    guard isAnalysisActive, model.isPaused, token == model.currentToken else { return }
+    switch result {
+    case .success:
+      state = .ready(.exactReveal)
+    case .failure(let failure):
+      state = .failed(failure)
+    }
+    presentationHandler()
   }
 
   private func handleRelease(

@@ -76,7 +76,7 @@ Implemented: the optional monitor exposes only configuration, safe errors, lifec
 
 Create the manually maintained NearWireViewer Xcode project and native SwiftUI application, automatic listener startup, TLS identity lifecycle, pairing-code display, default automatic admission, optional confirmation, and clean window shutdown.
 
-Implemented: the single-window macOS 13 application automatically prepares separate persistent installation and TLS identities, publishes an exact memory-only pairing service, handles bounded collision-safe listener replacement, admits at most 32 peers through one continuous connection core and 10-second deadline, supports optional approval and pause, fails closed with fixed recovery, and packages the exact sandbox, local-network, and privacy metadata.
+Implemented: the native macOS 13 application provides one main Event window and one singleton auxiliary Performance window over the same runtime. It automatically prepares separate persistent installation and TLS identities, publishes an exact memory-only pairing service, handles bounded collision-safe listener replacement, admits at most 32 peers through one continuous connection core and 10-second deadline, supports optional approval and pause, fails closed with fixed recovery, and packages the exact sandbox, local-network, and privacy metadata.
 
 ### 17. `viewer-multidevice-flow-control`
 

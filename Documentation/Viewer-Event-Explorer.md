@@ -18,16 +18,19 @@ Viewer -> App composer (optional)
 
 The top toolbar has independent Timeline, Inspector, and Composer visibility controls. Each control
 uses an icon, a visible selected state, an accessibility value, and a tooltip. Hiding one region
-does not destroy the current filter, selection, composer draft, or Device scope. The Event and
-Performance tabs update immediately when selected; they do not wait for another Event.
+does not destroy the current filter, selection, composer draft, or Device scope. These controls
+remain meaningful because the main window is always the Event workspace. The labeled
+**Performance** button opens or focuses a separate singleton Performance window.
 
 ## Devices and scope
 
 The horizontal Devices strip begins with `All Devices` and then shows the bounded set of connected
 or materialized Apps for the current Session. Selecting a Device updates the Event scope and the
 target used by Device details. The Viewer can merge one through sixteen selected Device lanes.
-Performance analysis requires one selected Device and explains that constraint when the current
-scope is broader.
+Performance analysis uses its own exact-Device picker. On first open it adopts the Event Device only
+when exactly one valid Device is selected; later Event filter changes do not retarget a valid
+Performance choice. Recently disconnected or otherwise non-analyzable rows remain truthful in the
+Device inventory but are not valid Performance choices or fallback candidates.
 
 Pending approvals appear in the same top region so accepting or rejecting an App does not require
 a separate source browser. Import, Export, and Device Settings are also available there. Import is

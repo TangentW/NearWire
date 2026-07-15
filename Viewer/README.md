@@ -8,7 +8,7 @@ The user-visible application name is `NearWire`. The manually maintained Xcode p
 
 Select the team's stable Apple Development identity before running the maintained app. Keep that signer across internal updates so the macOS login-Keychain identity remains accessible without prompts. Developer ID is the distribution alternative; ad-hoc signing is used only by isolated test and inspection commands.
 
-Opening the single main window automatically prepares the persistent Viewer identities, creates an ephemeral pairing code, and publishes the mandatory-TLS peer-to-peer Bonjour listener. Closing the last window stops the runtime. The application does not install a menu-bar agent or daemon.
+Opening either the singleton main Event window or the singleton auxiliary Performance window automatically prepares the persistent Viewer identities, creates an ephemeral pairing code, and publishes one mandatory-TLS peer-to-peer Bonjour listener. The main window's **Performance** button opens or focuses that auxiliary window, and both windows reuse the same runtime and process Session. Closing only one window leaves the other usable; closing the last window stops the runtime. The application does not install a menu-bar agent or daemon.
 
 After admission, the Viewer owns up to 16 independent App sessions. It completes flow-policy negotiation, exchanges bounded bidirectional Events, retains requested policy and nicknames in bounded `UserDefaults` records, and presents per-device rate, queue, throughput, and drop telemetry. Peer-declared installation and Bundle identifiers remain unauthenticated hints.
 

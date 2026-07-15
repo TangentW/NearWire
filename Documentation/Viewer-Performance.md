@@ -2,11 +2,27 @@
 
 ## Scope
 
-The Performance dashboard is a native macOS analysis view for the built-in
-`nearwire.performance.snapshot` Events received from one exact App session. Select one source and
-one device in the top **Devices** strip, then choose **Performance**. A merged multi-device selection is
-not accepted because device clocks, lifecycle boundaries, and metric capabilities are not
-interchangeable.
+The Performance dashboard is a singleton native macOS window for the built-in
+`nearwire.performance.snapshot` Events received from one exact App session. Open it with the
+**Performance** button in the main Viewer header, then choose one Device in the Performance window.
+The Performance Device is independent from the main Event filters, so changing either selection
+does not silently retarget the other. A merged multi-device selection is not accepted because
+device clocks, lifecycle boundaries, and metric capabilities are not interchangeable.
+
+The main Viewer remains an Event workspace while Performance is open. Closing either window leaves
+the other usable, and reopening Performance reuses the same process Session and Viewer runtime.
+If macOS restores Performance without the main window, that window idempotently starts the same
+single runtime; showing Main later does not start another listener or Session.
+The Performance window opens at 1100 by 760 points and remains usable at its 800 by 600 point
+minimum. **Show Viewer** returns focus to the main Event window without closing Performance.
+The same action remains available while the runtime is starting or unavailable, so recovery does
+not require closing the Performance window first.
+
+The Device menu includes the App title plus installation/connection alias so same-name Apps remain
+distinguishable. Rows that still exist for recent-disconnect presentation but cannot compile an
+exact analysis target are disabled and do not count as available fallback choices. With no eligible
+Device, the window shows a compact Device empty state instead of empty cards, charts, and
+availability rows.
 
 The dashboard is a projection of ordinary Events. It does not add another network protocol,
 database, sampler, acknowledgement path, or persistence format. Raw recorded Events and the bounded
@@ -110,10 +126,14 @@ additional evidence increments bounded loss accounting and cannot reconnect a li
 ## Open the raw Event
 
 **Open Raw Event** uses the selected metric's representative journal key at action time. It
-switches through the shared Events/Performance traversal coordinator, then asks Event Explorer for
-that exact row. A durable locator is preferred; the exact still-live row is the fallback. Deleted,
-evicted, stale, or unavailable content produces fixed guidance. NearWire never opens a neighboring
-Event, passes copied JSON between controllers, or exports a derived bucket.
+temporarily releases only the Performance traversal, refreshes Event Explorer's retained snapshot,
+asks Event Explorer for that exact row, opens or focuses the main Viewer with Inspector visible,
+and then safely resumes Performance. A durable locator is preferred; the exact still-live row is
+the fallback. Main-window focus changes only after a successful reveal. Deleted, evicted, stale, or
+unavailable content leaves focus in Performance and produces fixed guidance there. NearWire never
+opens a neighboring Event, passes copied JSON between controllers, or exports a derived bucket.
+If the Event Timeline is paused, NearWire replaces only its bounded query snapshot for the exact
+detail request. The visible Timeline rows and Event Pause state remain frozen.
 
 ## Refresh, pause, and cleanup
 
@@ -121,12 +141,17 @@ At most one projection scan runs, with at most one dirty successor. Repeated cha
 do not create one task per Event or continuously cancel useful work. Current refresh is capped at
 ten publications per second and one per main run-loop turn.
 
-**Pause** freezes the complete presentation. It does not pause network receive, live admission,
+**Pause** freezes the complete Performance presentation. It does not pause network receive, live admission,
 durable storage, retention, or session flow control. While paused, NearWire keeps only bounded dirty
-state. **Resume** performs one fresh projection. Changing source, device, runtime, or analysis mode
-invalidates and joins prior work before the successor owns the shared traversal. Cleanup clears
+state. **Resume** performs one fresh projection. Changing the Performance Device or range, replacing
+the runtime or Store, or closing Performance invalidates and joins prior Performance work before a
+successor can own its logical traversal.
+Event and Performance operations remain serialized through one Store gateway and SQLite reader;
+separate windows do not create concurrent Store owners. Performance cleanup clears
 projection work, deadline receipts, cache, cards, buckets, gaps, invalid details, crosshair,
-tooltip, and raw-resolution work. Late results from an old generation are rejected.
+tooltip, and raw-resolution work. Closing the Performance window also clears Pause so reopening
+starts one fresh projection while preserving the valid Device and range controls. Late results from
+an old generation are rejected.
 
 When durable storage is unavailable, a historical selection shows **Storage unavailable** and no
 partial or cached chart is presented as current evidence. A current selection may instead rebuild

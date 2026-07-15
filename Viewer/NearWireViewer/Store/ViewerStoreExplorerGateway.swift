@@ -297,6 +297,15 @@ final class ViewerStoreExplorerGateway: @unchecked Sendable {
   }
 
   @discardableResult
+  func endPerformanceTraversal(
+    completion: @escaping @Sendable (Result<Void, ViewerStoreExplorerFailure>) -> Void
+  ) -> ViewerStoreExplorerOperationToken {
+    withGeneration(completion: completion) { generation in
+      generation.endPerformanceTraversal(completion: completion)
+    }
+  }
+
+  @discardableResult
   func beginPerformanceTraversal(
     recordingID: Int64,
     deviceSessionID: Int64,
@@ -783,7 +792,7 @@ private final class ViewerStoreExplorerCoordinatorGeneration: @unchecked Sendabl
       ) -> Void
   ) -> ViewerStoreExplorerOperationToken {
     submitIdentified(
-      discardedSuccessfulCandidate: { [arbiter] in arbiter.endTraversal() },
+      discardedSuccessfulCandidate: { [arbiter] in arbiter.endPerformanceTraversal() },
       completion: completion,
       operation: { [arbiter, generation] operationID in
         try arbiter.replacePerformanceTraversal(
@@ -806,7 +815,7 @@ private final class ViewerStoreExplorerCoordinatorGeneration: @unchecked Sendabl
       ) -> Void
   ) -> ViewerStoreExplorerOperationToken {
     submitIdentified(
-      discardedSuccessfulCandidate: { [arbiter] in arbiter.endTraversal() },
+      discardedSuccessfulCandidate: { [arbiter] in arbiter.endPerformanceTraversal() },
       completion: completion,
       operation: { [arbiter] operationID in
         try arbiter.performanceEventPage(
@@ -824,7 +833,7 @@ private final class ViewerStoreExplorerCoordinatorGeneration: @unchecked Sendabl
       ) -> Void
   ) -> ViewerStoreExplorerOperationToken {
     submitIdentified(
-      discardedSuccessfulCandidate: { [arbiter] in arbiter.endTraversal() },
+      discardedSuccessfulCandidate: { [arbiter] in arbiter.endPerformanceTraversal() },
       completion: completion,
       operation: { [arbiter] operationID in
         try arbiter.performanceGapPage(operationID: operationID)
@@ -879,6 +888,14 @@ private final class ViewerStoreExplorerCoordinatorGeneration: @unchecked Sendabl
   ) -> ViewerStoreExplorerOperationToken {
     submit(completion: completion) { [arbiter] in
       arbiter.endTraversal()
+    }
+  }
+
+  func endPerformanceTraversal(
+    completion: @escaping @Sendable (Result<Void, ViewerStoreExplorerFailure>) -> Void
+  ) -> ViewerStoreExplorerOperationToken {
+    submit(completion: completion) { [arbiter] in
+      arbiter.endPerformanceTraversal()
     }
   }
 

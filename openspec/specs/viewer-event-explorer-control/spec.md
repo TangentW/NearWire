@@ -224,142 +224,6 @@ Timeline rows and controls SHALL be keyboard reachable and expose combined acces
 - **THEN** a pre-commit cancellation preserves the prior destination and reports cancelled or store-replaced
 - **AND** a gateway success after atomic replacement reports completed while the controller remains live, without reading from or launching work on a successor Store generation
 
-### Requirement: Events and Performance share source identity and one traversal owner
-
-The single Viewer workspace SHALL expose Events and Performance over one authoritative source/device
-selection without a second session manager, Store owner, query arbiter, Explorer controller, live
-projection, or raw Event cache. Performance requires one exact current connection or historical
-device session. Runtime/source/device replacement SHALL invalidate and join both presentation owners,
-clear old content/cache/delivery state, and only then admit successor work even while Pause is active.
-Store replacement SHALL synchronously clear predecessor Store-derived catalog rows and operation
-targets, revoke prepared delete/export and destination-selection authority, and deactivate Event
-traversal. A Store-committed export SHALL retain its execution slot until authoritative completion.
-Explorer SHALL hold one rematerialization receipt until the replacement change snapshot, first
-catalog pages, and bounded exact logical-ID lookups for the selected recording and up to 16 selected
-devices have committed, or until a terminal Store failure has committed an empty/failed catalog
-state. The first device page SHALL revalidate the recording page's frozen global catalog bounds in
-the same read transaction that mints its device snapshot. Any mismatch SHALL report catalog change
-and restart the entire bounded catalog phase. A Store-change signal during that phase SHALL remain
-one dirty bit and start exactly one successor snapshot after the receipt completes. Events SHALL
-remain inactive until the analysis coordinator joins that receipt. Numeric row-ID reuse alone SHALL
-never preserve a selection or target across Store generations. A historical source absent by a
-successful exact logical recording-ID lookup SHALL reset to Live. Terminal Store failure SHALL keep
-the operator's historical source and explicit device selection, clear all partial catalog rows,
-operation targets, and device mappings, and compile no successor query or performance target.
-Unresolved historical authority SHALL remain non-executable across later filter, device, paging,
-refresh, presentation, and management actions; numeric row-ID reuse SHALL NOT restore it or expose a
-selected recording row. A source change during an active rematerialization receipt SHALL NOT strand
-catalog work: selecting another historical source SHALL restart the bounded catalog phase for its
-logical identity, while an explicit switch to Live SHALL cancel the active catalog phase, complete
-the receipt and dirty-successor bookkeeping, and establish only a live scope with no durable Store
-recording identity or device mapping. If ordinary refresh later presents a historical source while
-authority remains unresolved, selecting it SHALL immediately clear the prior live scope and start a
-new logical-ID rematerialization receipt owned by the analysis coordinator; the historical label
-SHALL NOT retain or display live content. Events SHALL reactivate only after that joined receipt
-commits, and Performance SHALL rebuild guidance or target only after the same barrier. Failure SHALL
-NOT be reinterpreted as confirmed absence, Live, or all devices. A selected logical device absent
-from the replacement catalog SHALL remain an explicit no-match selection that compiles no durable
-query or performance target; it SHALL NOT collapse to the empty-selection meaning of all devices.
-
-One analysis-mode coordinator SHALL serialize the query arbiter. Events-to-Performance SHALL cancel/
-join active Explorer query/detail work and release the exact traversal before Performance submits.
-Performance-to-Events SHALL cancel/join the active scan and release its traversal before Event query
-or reveal. At most one mode SHALL own an active traversal; inactive immutable presentation/cache owns
-no lease. Mode switch SHALL clear crosshair/tooltip and active work.
-
-Performance raw reveal SHALL pass only source generation and a metric-contributing journal key. The
-coordinator SHALL validate source, perform Performance-to-Events release ordering, switch mode, then
-ask Explorer to resolve exact durable or still-live identity and perform its ordinary bounded reload.
-Deleted, evicted, stale, or unavailable identity SHALL show fixed guidance and SHALL not choose a
-nearby row. No JSON, metric, bucket, tooltip, availability text, or renderer object SHALL cross.
-
-Presentation Pause SHALL freeze refresh only for an unchanged source/device/range. A paused range
-change clears crosshair/tooltip, records desired range, starts no traversal, and Resume starts one
-fresh projection. Reveal while paused is allowed only for the unchanged frozen scope. The dashboard
-SHALL remain separate from Renderer Registry; numeric and `chart.*` renderers SHALL not claim its
-multi-Event aggregation/current-card ownership.
-
-#### Scenario: Events traversal is active when Performance opens
-
-- **WHEN** the operator changes from Events to Performance
-- **THEN** Explorer cancellation, join, and exact traversal release complete before Performance submits
-- **AND** no old result or lease can retarget the shared arbiter
-
-#### Scenario: Metric-specific raw Event is revealed
-
-- **WHEN** a selected CPU accumulator resolves to a still-valid journal key
-- **THEN** Performance releases its traversal, Viewer switches to Events, and Explorer opens exactly that Event
-- **AND** no synthesized bucket or different metric contributor is selected
-
-#### Scenario: Source changes while presentation is paused
-
-- **WHEN** another device/source is selected while old charts are frozen
-- **THEN** old Events/Performance content and raw identities clear immediately before successor admission
-- **AND** Pause cannot show prior-device values under the new source
-
-#### Scenario: Replacement Store reuses numeric row IDs
-
-- **WHEN** a replacement Store assigns predecessor recording and device row IDs to different logical identities
-- **THEN** Explorer clears the predecessor catalogs before replacement I/O begins
-- **AND** the analysis coordinator admits no successor until exact replacement catalogs commit
-- **AND** the reused rows cannot become the prior performance target
-
-#### Scenario: Selected device is absent from the replacement Store
-
-- **WHEN** the selected recording logical ID survives but a selected device logical ID does not
-- **THEN** bounded exact lookup completes before the rematerialization receipt
-- **AND** the missing selection remains explicit with no durable Event query or performance target
-- **AND** Viewer does not reinterpret it as all devices
-
-#### Scenario: Recording catalog changes before the first device page
-
-- **WHEN** a recording mutation occurs after exact recording resolution and before device loading
-- **THEN** the first device read rejects the predecessor recording snapshot as a catalog change
-- **AND** Explorer restarts recording and device rematerialization from one new frozen generation
-
-#### Scenario: Replacement Store lookup fails before identity is resolved
-
-- **WHEN** a terminal Store failure prevents successful exact recording resolution
-- **THEN** Explorer publishes empty or failed catalog state with no materialized Store identity
-- **AND** the historical source and explicit device selection remain selected but compile no query or target
-- **AND** later filter, paging, device, refresh, and management actions cannot restore numeric row-ID authority
-- **AND** a deliberate switch to Live creates only a live scope until Store identity is resolved again
-- **AND** Viewer does not switch the failed scope to Live or all devices
-
-#### Scenario: Device phase fails after recording rows commit
-
-- **WHEN** recording identity commits but the first device page or exact-device lookup fails terminally
-- **THEN** Explorer clears the partial recording rows, device rows, operation targets, and device mapping
-- **AND** it retains only the logical source/device selection in unresolved non-executable state
-
-#### Scenario: Source changes while the device phase is pending
-
-- **WHEN** the operator deliberately selects Live while a first-page or exact-device request is active
-- **THEN** Explorer cancels the catalog request and completes the rematerialization receipt exactly once
-- **AND** the analysis coordinator can finish its replacement transition without retained work
-- **AND** the resulting scope has a live request but no durable query, recording ID, or device mapping
-
-#### Scenario: Historical source is selected after live-only recovery
-
-- **WHEN** a successor refresh presents historical rows after an explicit unresolved-to-Live switch
-- **AND** the operator selects one of those historical logical identities
-- **THEN** Explorer clears the live materialization and starts a fresh rematerialization receipt
-- **AND** no live request or Event traversal remains authoritative under the historical label
-- **AND** Events resumes historical traversal only after the receipt completes
-
-#### Scenario: Ordinary actions follow terminal rematerialization failure
-
-- **WHEN** paging or ordinary refresh later exposes the same logical row or a reused numeric row
-- **THEN** selected recording presentation, operation targets, durable query, and performance target remain absent
-- **AND** a recording management attempt is rejected without reaching the Store
-
-#### Scenario: Prepared operation crosses Store replacement
-
-- **WHEN** delete confirmation, export disclosure, or destination selection was prepared by the predecessor Store
-- **THEN** replacement revokes that authority before replacement rows are exposed
-- **AND** an already Store-committed export retains its execution slot across generation invalidation
-- **AND** it publishes its deferred authoritative completion exactly once and retires all work
-
 ### Requirement: Ordinary refresh preserves a stable bounded presentation
 
 The cadence-driven refresh of an unchanged active scope and filter SHALL retain the current bounded Event, gap, selection, and scroll presentation while it releases predecessor traversal and loads successor data. Successor durable and live lanes SHALL replace their corresponding lanes atomically. If a successor input has no durable query or no live request, Viewer SHALL explicitly replace that absent lane with an empty lane. Scope, filter, materialization, Store, Pause/Resume, and Jump-to-Latest transitions MAY still clear or replace presentation according to their existing generation rules.
@@ -440,9 +304,9 @@ The Event Explorer filter editor SHALL present every existing filter dimension i
 
 ### Requirement: Viewer presents one current-Session Event workspace
 
-The Viewer SHALL present one native current-Session workspace with a top Devices strip, a central Analysis region, and an optional bottom Viewer-to-App composer. It SHALL NOT expose a Sources or historical recording sidebar. Events SHALL default to All Devices and MAY select up to 16 Device logical IDs; Performance SHALL retain its existing exactly-one-Device requirement. Device selection SHALL remain logical when durable storage is temporarily unavailable and SHALL rematerialize only exact current-Session identities.
+The main Viewer window SHALL present one native current-Session Event workspace with a top Devices strip, a stable Event Timeline/Inspector region, and an optional bottom Viewer-to-App composer. It SHALL NOT expose a Sources sidebar, historical recording browser, Analysis mode picker, or embedded Performance dashboard. Events SHALL default to All Devices and MAY select up to 16 Device logical IDs. Device selection SHALL remain logical when durable storage is temporarily unavailable and SHALL rematerialize only exact current-Session identities.
 
-The Devices strip SHALL expose bounded horizontally scrollable Device rows, All Devices, selected state, connection state, Device settings, and pending approvals without Event content. A Device row action SHALL update Event scope and the Device-details target without treating that row as a Source.
+The Devices strip SHALL expose bounded horizontally scrollable Device rows, All Devices, selected state, connection state, Device settings, and pending approvals without Event content. A Device row action SHALL update Event scope and the Device-details target without treating that row as a Source or mutating the independent Performance Device selection.
 
 #### Scenario: Current runtime has no durable recording
 
@@ -450,11 +314,11 @@ The Devices strip SHALL expose bounded horizontally scrollable Device rows, All 
 - **THEN** the current Session remains selected and bounded live rows remain filterable
 - **AND** no historical Source or invented durable identity appears
 
-#### Scenario: Operator selects several Devices
+#### Scenario: Operator selects several Event Devices
 
-- **WHEN** the operator selects two current-Session Device logical IDs
+- **WHEN** the operator selects two current-Session Device logical IDs in the main window
 - **THEN** Events show the merged bounded lanes for exactly those Devices
-- **AND** Performance continues to request one exact Device before scanning
+- **AND** an existing valid Performance Device selection remains unchanged
 
 ### Requirement: Current Session actions preserve one authoritative workspace
 
@@ -481,36 +345,91 @@ No action SHALL create a second Source, recording-history row, or hidden Session
 
 ### Requirement: Workspace panels are independently visible and stable
 
-The top Viewer header SHALL provide independent Timeline, Inspector, and Composer visibility buttons. Each SHALL expose icon, selected state, tooltip, accessibility label/value, keyboard focus, and enabled state without relying only on color. Timeline and Inspector buttons SHALL be disabled while Performance mode is active without losing their in-process choices; Composer SHALL remain available in both modes.
+The top Viewer header SHALL provide a labeled Performance-window button followed by independent Timeline, Inspector, and Composer visibility buttons. Each SHALL expose icon, selected state where applicable, tooltip, accessibility label/value, keyboard focus, and enabled state without relying only on color. Performance SHALL open or focus exactly one auxiliary window. Timeline, Inspector, and Composer buttons SHALL remain enabled whenever the main workspace is ready because Performance no longer replaces those regions.
 
-In Events mode the Viewer SHALL render Timeline-only, Inspector-only, both through one stable native horizontal split, or a bounded empty explanation when neither is visible. Composer visibility SHALL add or remove the bottom region through one stable native vertical split. Hiding a panel SHALL NOT clear capture, filters, selection, inspector state, composer draft, traversal, or Performance state. Panel preferences SHALL NOT persist beyond the process.
+The main Viewer SHALL render Timeline-only, Inspector-only, both through one stable native horizontal split, or a bounded empty explanation when neither is visible. Composer visibility SHALL add or remove the bottom region through one stable native vertical split. Hiding a panel or opening Performance SHALL NOT clear capture, filters, selection, Inspector state, composer draft, Event traversal, or Performance state. Panel preferences SHALL NOT persist beyond the process.
 
-#### Scenario: Operator hides Inspector during Event arrival
+#### Scenario: Operator opens Performance and hides Inspector
 
-- **WHEN** Inspector is hidden while new Events continue
-- **THEN** Timeline updates within its normal cadence and Inspector state remains bounded but unrendered
-- **AND** showing Inspector restores the exact still-resident selection without restarting capture
+- **WHEN** Performance is open and the operator toggles Inspector in the main window
+- **THEN** both windows remain responsive and only the main Inspector region changes visibility
+- **AND** Performance Device, range, pause, cards, and charts remain unchanged
+
+#### Scenario: Raw reveal targets a hidden Inspector
+
+- **WHEN** Performance resolves an exact raw Event while Inspector is hidden
+- **THEN** the main window is focused or reopened and Inspector becomes visible for that exact Event
+- **AND** the Performance window stays open
 
 #### Scenario: Both Event panels are hidden
 
-- **WHEN** Timeline and Inspector are both hidden in Events mode
-- **THEN** Analysis presents compact guidance and the top visibility controls remain reachable
-- **AND** no Event capture or query ownership is transferred to the placeholder
+- **WHEN** Timeline and Inspector are both hidden
+- **THEN** the main Event region presents compact guidance and top visibility controls remain reachable
+- **AND** Event capture and both bounded traversal owners remain unaffected
 
 ### Requirement: SwiftUI publication is region scoped and animation safe
 
-Header, Devices, Timeline, Inspector, Performance, and composer/layout presentation SHALL use stable region identity and region-specific Equatable publication signatures. A source publication SHALL invalidate only regions whose visible signature changed. Timeline Event arrival SHALL NOT publish Inspector or composer/layout changes when their visible values are unchanged. Equivalent session snapshots SHALL be coalesced.
+Main header, Devices, Timeline, Inspector, composer/layout, Performance window shell, and Performance dashboard SHALL use stable region identity and region-specific Equatable publication signatures. A source publication SHALL invalidate only regions whose visible signature changed. Timeline Event arrival SHALL NOT publish Inspector, composer/layout, or Performance-window shell changes when their visible values are unchanged. Performance refresh SHALL NOT reconstruct the main split container. Equivalent session snapshots SHALL be coalesced.
 
-Data-only Timeline refresh SHALL preserve stable Event row identities, scroll ownership, split positions, and selection and SHALL disable implicit insertion/removal/layout animation. UI refresh SHALL remain capped by the existing ten-per-second cadence, keep bounded Timeline rows, and perform no Event-proportional work in the root header or Devices strip. Semantic state transitions such as explicit panel visibility or mode changes MAY animate only through short reduced-motion-aware transitions.
+Data-only Timeline and Performance refresh SHALL preserve stable row/card/chart identities, scroll ownership, split positions, selection, and completed presentation and SHALL disable implicit insertion/removal/layout animation. UI refresh SHALL remain capped by existing bounded cadences and perform no Event-proportional work in either window root.
 
-#### Scenario: High-frequency Events arrive with one selected Event
+#### Scenario: High-frequency Events arrive with both windows open
 
-- **WHEN** Events arrive faster than the UI cadence and selection/detail do not change
-- **THEN** Timeline publishes at most the bounded cadence while Inspector and workspace-layout publication counts do not increase
-- **AND** rows, divider positions, and selected detail do not flash through empty or animated intermediate states
+- **WHEN** Events arrive faster than the UI cadence and selection/detail and Performance target do not change
+- **THEN** Timeline publishes at most the bounded cadence while Inspector, main layout, and Performance-window shell publication counts do not increase
+- **AND** rows, dividers, selected detail, cards, and charts do not flash through empty or animated intermediate states
 
-#### Scenario: Equivalent Device snapshot arrives
+#### Scenario: Performance refresh completes
 
-- **WHEN** only non-visible counters change for a Device chip
-- **THEN** the Devices strip does not republish or reconstruct its scroll position
-- **AND** Device details may still observe their separately scoped telemetry state
+- **WHEN** a new bounded Performance projection replaces the prior complete result
+- **THEN** only dashboard presentation regions with changed semantic values update
+- **AND** the main header, Devices strip, Timeline split, Inspector, and composer layout are not reconstructed
+
+### Requirement: Events and Performance share one Session with coordinated traversal access
+
+The Viewer SHALL expose Events and Performance over one authoritative Session without a second session manager, Store owner, query execution queue, Explorer controller, live projection, or raw Event cache. Event scope MAY contain up to 16 logical Devices; Performance SHALL own an independent exact logical Device selection. Runtime or Store replacement SHALL invalidate and join both presentation owners, clear predecessor content/cache/delivery state, and only then admit successor work even while either presentation is paused.
+
+Store replacement SHALL synchronously clear predecessor Store-derived catalog rows and operation targets, revoke prepared delete/export and destination-selection authority, and deactivate both Store traversals. A Store-committed export SHALL retain its execution slot until authoritative completion. Explorer SHALL hold one rematerialization receipt until replacement change snapshot, first catalog pages, and bounded exact logical-ID lookup commit or a terminal Store failure commits an empty/failed catalog state. Catalog mismatch SHALL restart the bounded phase. Numeric row-ID reuse SHALL never preserve Event or Performance authority. Terminal failure SHALL retain logical selection only, compile no executable query/target, and SHALL NOT become Live, all Devices, or a nearby Device.
+
+One coordinator and gateway generation SHALL retain at most one Event traversal and one Performance traversal. The generation's existing bounded operation queue and SQLite reader SHALL serialize all actual work. Event replace/end SHALL affect only Event traversal; Performance replace/end SHALL affect only Performance traversal. Discarded completion, refresh, range change, pause, reveal, or window close from one surface SHALL NOT end or retarget the other surface's traversal. Store replacement and shutdown SHALL cancel and join both.
+
+Performance raw reveal SHALL pass only source generation and a metric-contributing journal key. The coordinator SHALL validate source, release only the Performance traversal while retaining the completed Performance presentation and its memory reservations, refresh the retained Event traversal snapshot, resolve exact durable or still-live identity through the serialized gateway, and ask the active Explorer to preflight and atomically perform its ordinary bounded reveal. Durable acceptance SHALL asynchronously load and validate the exact detail before mutating selection or Inspector; transient acceptance SHALL validate one live snapshot before mutation. A paused Event presentation SHALL retain its frozen Timeline rows and Pause state while a bounded snapshot-only replacement admits the exact detail request. Snapshot preparation and exact reveal acceptance SHALL return explicit success authority, and Main SHALL focus only after both authorities succeed and the coordinator revalidates its transition revision and target. Deleted, evicted, stale, unavailable, missing-detail, superseded, or finally rejected identity SHALL preserve the prior Event selection and Inspector, show fixed guidance in Performance without focusing Main, and SHALL not choose a nearby row. Superseding window, Device, range, Store, raw-request, or shutdown transitions SHALL cancel and join the pending exact-detail preflight. No JSON, metric, bucket, tooltip, availability text, or renderer object SHALL cross. Performance MAY resume exactly one fresh projection for the unchanged scope after reveal while the main Event presentation remains intact; if Performance is paused, it SHALL retain its completed presentation and defer that successor until Resume.
+
+Presentation Pause SHALL freeze refresh only for an unchanged Performance Device/range. A paused range change clears crosshair/tooltip, records desired range, starts no traversal, and Resume starts one fresh projection. Reveal while paused is allowed only for the unchanged frozen scope. The dashboard SHALL remain separate from Renderer Registry; numeric and `chart.*` renderers SHALL not claim its multi-Event aggregation/current-card ownership.
+
+#### Scenario: Performance opens while Events is active
+
+- **WHEN** Event traversal and Inspector state are active and the operator opens Performance
+- **THEN** Performance acquires only its bounded traversal through the shared serialized queue
+- **AND** Event filtering, selection, paging, detail, and visible presentation remain active and intact
+
+#### Scenario: Metric-specific raw Event is revealed
+
+- **WHEN** a selected CPU accumulator resolves to a still-valid journal key
+- **THEN** Performance releases only its traversal and Explorer opens exactly that Event in the main window
+- **AND** Performance remains open and may resume without selecting a synthesized bucket or different contributor
+
+#### Scenario: Performance Device changes while presentation is paused
+
+- **WHEN** another exact Performance Device is selected while old charts are frozen
+- **THEN** old Performance content and raw identities clear before successor admission
+- **AND** the Event Device filter, Timeline, selection, and Inspector do not change
+
+#### Scenario: Replacement Store reuses numeric row IDs
+
+- **WHEN** a replacement Store assigns predecessor recording and device row IDs to different logical identities
+- **THEN** Explorer clears predecessor catalogs before replacement I/O begins
+- **AND** neither Event nor Performance admits successor work until exact replacement catalogs commit
+- **AND** reused rows cannot become prior targets
+
+#### Scenario: Selected Performance Device is absent from the replacement Store
+
+- **WHEN** the selected Performance logical Device does not exist after rematerialization
+- **THEN** bounded exact lookup completes before replacement admission
+- **AND** Performance clears the invalid choice, applies the documented sole-Event or sole-available fallback when exact, and otherwise requests an explicit Device without changing Event scope
+
+#### Scenario: Prepared operation crosses Store replacement
+
+- **WHEN** delete confirmation, export disclosure, destination selection, or either traversal belongs to the predecessor Store
+- **THEN** replacement revokes that authority before replacement rows are exposed
+- **AND** an already Store-committed export retains its execution slot and publishes authoritative completion exactly once

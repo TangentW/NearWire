@@ -8,18 +8,18 @@ struct NearWireViewerApp: App {
 
   var body: some Scene {
     Window("NearWire", id: "main") {
-      ViewerRootView(model: model)
+      ViewerMainWindowContent(model: model)
         .frame(
           minWidth: ViewerWorkspaceLayout.minimumWindowWidth,
           minHeight: ViewerWorkspaceLayout.minimumWindowHeight
         )
         .onAppear {
           appDelegate.configure(model: model)
-          if !ViewerLaunchContext.isRunningUnitTests {
-            model.openWindow()
-          }
+          ViewerWindowRuntimeLifecycle.ensureRuntime(
+            for: model,
+            isRunningUnitTests: ViewerLaunchContext.isRunningUnitTests
+          )
         }
-        .onDisappear { model.closeWindow() }
         .alert("Reset All Viewer Identity?", isPresented: $model.showsFullIdentityResetConfirmation)
       {
         Button("Cancel", role: .cancel) { model.cancelFullIdentityReset() }
@@ -31,6 +31,48 @@ struct NearWireViewerApp: App {
     .commands {
       CommandGroup(replacing: .newItem) {}
     }
+
+    Window("Performance", id: "performance") {
+      ViewerPerformanceWindowRootView(model: model)
+        .frame(
+          minWidth: ViewerPerformanceWindowLayout.minimumWidth,
+          minHeight: ViewerPerformanceWindowLayout.minimumHeight
+        )
+        .onAppear {
+          appDelegate.configure(model: model)
+          ViewerWindowRuntimeLifecycle.ensureRuntime(
+            for: model,
+            isRunningUnitTests: ViewerLaunchContext.isRunningUnitTests
+          )
+        }
+    }
+    .defaultSize(
+      width: ViewerPerformanceWindowLayout.defaultWidth,
+      height: ViewerPerformanceWindowLayout.defaultHeight
+    )
+  }
+}
+
+@MainActor
+enum ViewerWindowRuntimeLifecycle {
+  static func ensureRuntime(
+    for model: ViewerApplicationModel,
+    isRunningUnitTests: Bool
+  ) {
+    guard !isRunningUnitTests else { return }
+    model.openWindow()
+  }
+}
+
+private struct ViewerMainWindowContent: View {
+  @Environment(\.openWindow) private var openWindow
+  let model: ViewerApplicationModel
+
+  var body: some View {
+    ViewerRootView(
+      model: model,
+      openPerformanceWindow: { openWindow(id: "performance") }
+    )
   }
 }
 

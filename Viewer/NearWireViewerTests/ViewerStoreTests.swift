@@ -142,7 +142,241 @@ final class ViewerStoreTests: XCTestCase {
     coordinator.closeStorage()
   }
 
-  func testPerformanceRawEventLocatorRequiresExactSourceKeyAndReleasedTraversal() throws {
+  @MainActor
+  func testExactPerformanceRevealRefreshesActiveAndPausedSnapshotsWithoutChangingFrozenTimeline()
+    async throws
+  {
+    let runtimeLogicalID = UUID()
+    let coordinator = try ViewerStoreCoordinator(paths: makePaths())
+    let store = coordinator.services.eventStore
+    let recording = try store.beginRecording(
+      logicalID: runtimeLogicalID,
+      wallMilliseconds: 1,
+      monotonicNanoseconds: 1,
+      reason: "performance-reveal-event-snapshot-test"
+    )
+    let device = try store.beginDeviceSession(
+      recording: recording,
+      installationID: "performance-reveal-event-snapshot-test",
+      logicalID: UUID(),
+      wallMilliseconds: 1,
+      monotonicNanoseconds: 1,
+      partialHistory: false,
+      displayName: "Performance Reveal Test"
+    )
+    let predecessorRowID = try store.appendEvent(
+      makeObservation(recording: recording, device: device, sequence: 1, value: "before")
+    )
+    let gateway = ViewerStoreExplorerGateway()
+    gateway.install(coordinator)
+    let controller = ViewerEventExplorerController(
+      inputs: ViewerRuntimeExplorerInputs(
+        runtimeLogicalID: runtimeLogicalID,
+        storeGateway: gateway,
+        liveObservations: ViewerLiveEventWindow(runtimeLogicalID: runtimeLogicalID)
+      )
+    )
+    controller.start()
+    await waitUntilExplorerController {
+      controller.traversalState.ownsQueryableTraversal
+        && controller.timelineRows.contains { $0.id == .durable(rowID: predecessorRowID) }
+    }
+
+    let activeRevealRowID = try store.appendEvent(
+      makeObservation(recording: recording, device: device, sequence: 2, value: "active-reveal")
+    )
+    XCTAssertFalse(
+      controller.timelineRows.contains { $0.id == .durable(rowID: activeRevealRowID) }
+    )
+    let activeRevealPrepared = await controller.refreshTraversalForExactReveal().value
+    XCTAssertTrue(activeRevealPrepared)
+    controller.revealExactEvent(.durable(rowID: activeRevealRowID))
+    await waitUntilExplorerController {
+      controller.selectedEventID == .durable(rowID: activeRevealRowID)
+        && controller.inspectorContentByteCount > 0
+    }
+
+    let frozenRows = controller.timelineRows
+    controller.pauseOrResume()
+    XCTAssertTrue(controller.isPaused)
+
+    let residentRevealPrepared = await controller.refreshTraversalForExactReveal().value
+    XCTAssertTrue(residentRevealPrepared)
+    controller.revealExactEvent(.durable(rowID: activeRevealRowID))
+    await waitUntilExplorerController {
+      controller.selectedEventID == .durable(rowID: activeRevealRowID)
+        && controller.inspectorContentByteCount > 0
+    }
+    XCTAssertTrue(controller.isPaused)
+    XCTAssertEqual(controller.timelineRows, frozenRows)
+
+    let revealedRowID = try store.appendEvent(
+      makeObservation(recording: recording, device: device, sequence: 3, value: "paused-reveal")
+    )
+    XCTAssertFalse(
+      controller.timelineRows.contains { $0.id == .durable(rowID: revealedRowID) }
+    )
+
+    let newerRevealPrepared = await controller.refreshTraversalForExactReveal().value
+    XCTAssertTrue(newerRevealPrepared)
+    XCTAssertTrue(controller.isPaused)
+    XCTAssertEqual(controller.timelineRows, frozenRows)
+    controller.revealExactEvent(.durable(rowID: revealedRowID))
+    await waitUntilExplorerController {
+      controller.selectedEventID == .durable(rowID: revealedRowID)
+        && controller.inspectorContentByteCount > 0
+    }
+
+    XCTAssertEqual(controller.selectedEventID, .durable(rowID: revealedRowID))
+    XCTAssertGreaterThan(controller.inspectorContentByteCount, 0)
+    XCTAssertTrue(controller.isPaused)
+    XCTAssertEqual(controller.timelineRows, frozenRows)
+    await controller.sealAndClear().value
+    gateway.sealAndWait(originatingFrom: coordinator)
+    coordinator.closeStorage()
+  }
+
+  @MainActor
+  func testRejectedExactRevealPreservesCurrentEventInspector() async throws {
+    let runtimeLogicalID = UUID()
+    let coordinator = try ViewerStoreCoordinator(paths: makePaths())
+    let store = coordinator.services.eventStore
+    let recording = try store.beginRecording(
+      logicalID: runtimeLogicalID,
+      wallMilliseconds: 1,
+      monotonicNanoseconds: 1,
+      reason: "rejected-transient-reveal-test"
+    )
+    let device = try store.beginDeviceSession(
+      recording: recording,
+      installationID: "rejected-transient-reveal-test",
+      logicalID: UUID(),
+      wallMilliseconds: 1,
+      monotonicNanoseconds: 1,
+      partialHistory: false,
+      displayName: "Rejected Reveal Test"
+    )
+    let rowID = try store.appendEvent(
+      makeObservation(recording: recording, device: device, sequence: 1, value: "selected")
+    )
+    let gateway = ViewerStoreExplorerGateway()
+    gateway.install(coordinator)
+    let controller = ViewerEventExplorerController(
+      inputs: ViewerRuntimeExplorerInputs(
+        runtimeLogicalID: runtimeLogicalID,
+        storeGateway: gateway,
+        liveObservations: ViewerLiveEventWindow(runtimeLogicalID: runtimeLogicalID)
+      )
+    )
+    controller.start()
+    await waitUntilExplorerController {
+      controller.traversalState.ownsQueryableTraversal
+        && controller.timelineRows.contains { $0.id == .durable(rowID: rowID) }
+    }
+    controller.selectEvent(.durable(rowID: rowID))
+    await waitUntilExplorerController {
+      controller.selectedEventID == .durable(rowID: rowID)
+        && controller.inspectorContentByteCount > 0
+    }
+    let selectedIdentity = controller.selectedEventID
+    let inspectorContentByteCount = controller.inspectorContentByteCount
+    let missingKey = ViewerEventJournalKey(
+      runtimeLogicalID: runtimeLogicalID,
+      connectionID: UUID(),
+      direction: .appToViewer,
+      wireSequence: 999
+    )
+
+    let acceptedMissingTransient = await controller.acceptExactReveal(.transient(missingKey))
+    XCTAssertFalse(acceptedMissingTransient)
+    XCTAssertEqual(controller.selectedEventID, selectedIdentity)
+    XCTAssertEqual(controller.inspectorContentByteCount, inspectorContentByteCount)
+
+    let acceptedMissingDurable =
+      await controller.acceptExactReveal(.durable(rowID: Int64.max))
+    XCTAssertFalse(acceptedMissingDurable)
+    XCTAssertEqual(controller.selectedEventID, selectedIdentity)
+    XCTAssertEqual(controller.inspectorContentByteCount, inspectorContentByteCount)
+
+    await controller.sealAndClear().value
+    gateway.sealAndWait(originatingFrom: coordinator)
+    coordinator.closeStorage()
+  }
+
+  @MainActor
+  func testCancellingBlockedDurableExactRevealPreservesInspectorAndJoinsStoreWork()
+    async throws
+  {
+    let runtimeLogicalID = UUID()
+    let coordinator = try ViewerStoreCoordinator(paths: makePaths())
+    let store = coordinator.services.eventStore
+    let recording = try store.beginRecording(
+      logicalID: runtimeLogicalID,
+      wallMilliseconds: 1,
+      monotonicNanoseconds: 1,
+      reason: "cancelled-exact-reveal-test"
+    )
+    let device = try store.beginDeviceSession(
+      recording: recording,
+      installationID: "cancelled-exact-reveal-test",
+      logicalID: UUID(),
+      wallMilliseconds: 1,
+      monotonicNanoseconds: 1,
+      partialHistory: false,
+      displayName: "Cancelled Reveal Test"
+    )
+    let rowID = try store.appendEvent(
+      makeObservation(recording: recording, device: device, sequence: 1, value: "selected")
+    )
+    let executionGate = ArmableViewerExecutionGate()
+    let gateway = ViewerStoreExplorerGateway(operationExecutionGate: { executionGate.run() })
+    gateway.install(coordinator)
+    let controller = ViewerEventExplorerController(
+      inputs: ViewerRuntimeExplorerInputs(
+        runtimeLogicalID: runtimeLogicalID,
+        storeGateway: gateway,
+        liveObservations: ViewerLiveEventWindow(runtimeLogicalID: runtimeLogicalID)
+      )
+    )
+    controller.start()
+    await waitUntilExplorerController {
+      controller.traversalState.ownsQueryableTraversal
+        && controller.timelineRows.contains { $0.id == .durable(rowID: rowID) }
+    }
+    controller.selectEvent(.durable(rowID: rowID))
+    await waitUntilExplorerController {
+      controller.selectedEventID == .durable(rowID: rowID)
+        && controller.inspectorContentByteCount > 0
+    }
+    let selectedIdentity = controller.selectedEventID
+    let inspectorContentByteCount = controller.inspectorContentByteCount
+
+    executionGate.arm()
+    let acceptance = Task { @MainActor in
+      await controller.acceptExactReveal(.durable(rowID: rowID))
+    }
+    let blocked = await executionGate.waitUntilBlockedAsync()
+    XCTAssertEqual(blocked, .success)
+    let cancellation = controller.cancelExactRevealAndWait()
+    let accepted = await acceptance.value
+    XCTAssertFalse(accepted)
+    XCTAssertEqual(controller.selectedEventID, selectedIdentity)
+    XCTAssertEqual(controller.inspectorContentByteCount, inspectorContentByteCount)
+
+    executionGate.release()
+    await cancellation.value
+    await waitUntilExplorerController {
+      controller.pendingCleanupWorkCount == 0 && gateway.operationCountForTesting == 0
+    }
+
+    await controller.sealAndClear().value
+    gateway.sealAndWait(originatingFrom: coordinator)
+    coordinator.closeStorage()
+  }
+
+  func testPerformanceRawEventLocatorRequiresExactSourceKeyAndReleasedPerformanceTraversal()
+    throws
+  {
     let coordinator = try ViewerStoreCoordinator(paths: makePaths())
     defer { coordinator.closeStorage() }
     let services = coordinator.services
@@ -255,8 +489,8 @@ final class ViewerStoreTests: XCTestCase {
         )
       }
     XCTAssertEqual(busy, .failure(.busy))
-    let _: Void = try explorerValue("Release traversal before raw Event resolution") {
-      gateway.endTraversal(completion: $0)
+    let _: Void = try explorerValue("Release Performance traversal before raw Event resolution") {
+      gateway.endPerformanceTraversal(completion: $0)
     }
     let resolvedAfterRelease: ViewerPerformanceEventLocator? = try explorerValue(
       "Resolve raw Event after traversal release"
@@ -646,7 +880,7 @@ final class ViewerStoreTests: XCTestCase {
     XCTAssertFalse(String(reflecting: gapPage).contains("appToViewer"))
 
     let _: Void = try explorerValue("End performance traversal") { completion in
-      gateway.endTraversal(completion: completion)
+      gateway.endPerformanceTraversal(completion: completion)
     }
     gateway.sealAndWait(originatingFrom: coordinator)
     coordinator.closeStorage()
@@ -919,7 +1153,7 @@ final class ViewerStoreTests: XCTestCase {
     )
 
     let _: Void = try explorerValue("End commit-permutation traversal") { completion in
-      gateway.endTraversal(completion: completion)
+      gateway.endPerformanceTraversal(completion: completion)
     }
     gateway.sealAndWait(originatingFrom: coordinator)
   }
@@ -5305,6 +5539,63 @@ final class ViewerStoreTests: XCTestCase {
     XCTAssertThrowsError(try arbiter.replaceQuery(query)) { error in
       XCTAssertEqual(error as? ViewerStoreExplorerFailure, .storeReplaced)
     }
+  }
+
+  func testExplorerAndPerformanceTraversalsCoexistWithinOneSerializedArbiter() throws {
+    let paths = try makePaths()
+    let pool = try ViewerSQLitePool(migrating: paths)
+    defer { pool.close() }
+    let store = ViewerEventStore(pool: pool, configuration: { .default })
+    let recording = try store.beginRecording(
+      wallMilliseconds: 1_000,
+      monotonicNanoseconds: 2_000,
+      reason: "dual-surface-test"
+    )
+    let device = try store.beginDeviceSession(
+      recording: recording,
+      installationID: "dual-surface-device",
+      wallMilliseconds: 1_000,
+      monotonicNanoseconds: 2_000,
+      partialHistory: false,
+      displayName: "Dual Surface App"
+    )
+    let eventID = try store.appendEvent(
+      makeObservation(recording: recording, device: device, sequence: 1, value: "alpha")
+    )
+    let leases = ViewerStoreLeaseRegistry()
+    let arbiter = ViewerExplorerQueryArbiter(
+      queryService: ViewerStoreQueryService(pool: pool, leases: leases),
+      diagnosticService: ViewerStoreDiagnosticService(pool: pool, leases: leases),
+      performanceService: ViewerPerformanceStoreService(pool: pool, leases: leases),
+      exportService: ViewerStoreExportService(pool: pool, leases: leases)
+    )
+    let query = try ViewerEventQuery(recordingID: recording.rowID, predicates: [])
+
+    _ = try arbiter.replaceQuery(query)
+    _ = try arbiter.replacePerformanceTraversal(
+      storeGeneration: 1,
+      recordingID: recording.rowID,
+      deviceSessionID: device.rowID,
+      lowerMonotonicNanoseconds: 0,
+      upperMonotonicNanoseconds: 10_000
+    )
+    XCTAssertEqual(
+      try arbiter.page(cursor: nil, direction: .forward, limit: 10).rows.map(\.rowID),
+      [eventID]
+    )
+    XCTAssertTrue(try arbiter.performanceEventPage(continuation: nil).isComplete)
+
+    arbiter.endTraversal()
+    XCTAssertTrue(leases.protects(recordingID: recording.rowID))
+    _ = try arbiter.replaceQuery(query)
+    _ = try arbiter.performanceGapPage()
+
+    arbiter.endPerformanceTraversal()
+    XCTAssertTrue(leases.protects(recordingID: recording.rowID))
+    XCTAssertEqual(try arbiter.detail(rowID: eventID)?.summary.rowID, eventID)
+    arbiter.endTraversal()
+    XCTAssertFalse(leases.protects(recordingID: recording.rowID))
+    arbiter.close()
   }
 
   func testRecordingCatalogUsesFrozenDescendingKeysetsAndRelevantChangeRestart() throws {

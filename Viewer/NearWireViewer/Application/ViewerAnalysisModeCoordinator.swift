@@ -31,6 +31,11 @@ enum ViewerAnalysisGuidance: Equatable, Sendable {
 enum ViewerPerformanceTargetSelection: Equatable, Sendable {
   case target(ViewerPerformanceDashboardTarget)
   case guidance(ViewerAnalysisGuidance)
+
+  var isExactTarget: Bool {
+    if case .target = self { return true }
+    return false
+  }
 }
 
 enum ViewerPerformanceTargetCompiler {
@@ -138,6 +143,14 @@ struct ViewerAnalysisModeDiagnostics: Equatable, Sendable {
   let isSealed: Bool
 }
 
+struct ViewerPerformanceDeviceOption: Identifiable, Equatable, Sendable {
+  let id: UUID
+  let title: String
+  let subtitle: String
+  let state: String
+  let isEligible: Bool
+}
+
 @MainActor
 struct ViewerAnalysisEventDriver {
   typealias Handler = @MainActor @Sendable () -> Void
@@ -146,27 +159,57 @@ struct ViewerAnalysisEventDriver {
   typealias RematerializationHandlerInstaller =
     @MainActor @Sendable (@escaping RematerializationHandler) -> Void
 
-  let targetSelection: @MainActor @Sendable () -> ViewerPerformanceTargetSelection
+  let targetSelection: @MainActor @Sendable (UUID?) -> ViewerPerformanceTargetSelection
+  let performanceDevices: @MainActor @Sendable () -> [ViewerPerformanceDeviceOption]
+  let selectedEventDeviceIDs: @MainActor @Sendable () -> Set<UUID>
+  let usesIndependentPerformanceDeviceSelection: Bool
   let deactivate: @MainActor @Sendable () -> Task<Void, Never>
   let activate: @MainActor @Sendable () -> Task<Void, Never>
-  let reveal: @MainActor @Sendable (ViewerExplorerEventIdentity) -> Void
+  let prepareExactReveal: @MainActor @Sendable () -> Task<Bool, Never>
+  let acceptExactReveal:
+    @MainActor @Sendable (ViewerExplorerEventIdentity) async -> Bool
+  let cancelExactReveal: @MainActor @Sendable () -> Task<Void, Never>
   let rematerializeStore: @MainActor @Sendable () -> Task<Void, Never>
   let setSelectionHandler: HandlerInstaller
   let setRefreshHandler: HandlerInstaller
   let setRematerializationHandler: RematerializationHandlerInstaller
 
   init(controller: ViewerEventExplorerController) {
-    targetSelection = { [weak controller] in
-      controller?.performanceTargetSelection() ?? .guidance(.sourceUnavailable)
+    targetSelection = { [weak controller] deviceID in
+      controller?.performanceTargetSelection(deviceID: deviceID)
+        ?? .guidance(.sourceUnavailable)
     }
+    performanceDevices = { [weak controller] in
+      controller?.deviceRows.map {
+        let selection = controller?.performanceTargetSelection(deviceID: $0.id)
+        return ViewerPerformanceDeviceOption(
+          id: $0.id,
+          title: $0.title,
+          subtitle: $0.subtitle,
+          state: $0.state,
+          isEligible: selection?.isExactTarget == true
+        )
+      } ?? []
+    }
+    selectedEventDeviceIDs = { [weak controller] in
+      controller?.selectedDeviceIDs ?? []
+    }
+    usesIndependentPerformanceDeviceSelection = true
     deactivate = { [weak controller] in
       controller?.deactivateForAnalysisSwitch() ?? Task {}
     }
     activate = { [weak controller] in
       controller?.activateAfterAnalysisSwitch() ?? Task {}
     }
-    reveal = { [weak controller] identity in
-      controller?.revealExactEvent(identity)
+    prepareExactReveal = { [weak controller] in
+      controller?.refreshTraversalForExactReveal() ?? Task { false }
+    }
+    acceptExactReveal = { [weak controller] identity in
+      guard let controller else { return false }
+      return await controller.acceptExactReveal(identity)
+    }
+    cancelExactReveal = { [weak controller] in
+      controller?.cancelExactRevealAndWait() ?? Task {}
     }
     rematerializeStore = { [weak controller] in
       controller?.rematerializeAfterStoreReplacement() ?? Task {}
@@ -185,18 +228,35 @@ struct ViewerAnalysisEventDriver {
   init(
     targetSelection:
       @escaping @MainActor @Sendable () -> ViewerPerformanceTargetSelection,
+    targetSelectionForDevice:
+      (@MainActor @Sendable (UUID?) -> ViewerPerformanceTargetSelection)? = nil,
+    performanceDevices:
+      @escaping @MainActor @Sendable () -> [ViewerPerformanceDeviceOption] = { [] },
+    selectedEventDeviceIDs:
+      @escaping @MainActor @Sendable () -> Set<UUID> = { [] },
+    usesIndependentPerformanceDeviceSelection: Bool = false,
     deactivate: @escaping @MainActor @Sendable () -> Task<Void, Never>,
     activate: @escaping @MainActor @Sendable () -> Task<Void, Never>,
-    reveal: @escaping @MainActor @Sendable (ViewerExplorerEventIdentity) -> Void,
+    prepareExactReveal: @escaping @MainActor @Sendable () -> Task<Bool, Never> = { Task { true } },
+    reveal: @escaping @MainActor @Sendable (ViewerExplorerEventIdentity) -> Bool,
+    acceptExactReveal:
+      (@MainActor @Sendable (ViewerExplorerEventIdentity) async -> Bool)? = nil,
+    cancelExactReveal: @escaping @MainActor @Sendable () -> Task<Void, Never> = { Task {} },
     rematerializeStore: @escaping @MainActor @Sendable () -> Task<Void, Never> = { Task {} },
     setSelectionHandler: @escaping HandlerInstaller = { _ in },
     setRefreshHandler: @escaping HandlerInstaller = { _ in },
     setRematerializationHandler: @escaping RematerializationHandlerInstaller = { _ in }
   ) {
-    self.targetSelection = targetSelection
+    self.targetSelection = targetSelectionForDevice ?? { _ in targetSelection() }
+    self.performanceDevices = performanceDevices
+    self.selectedEventDeviceIDs = selectedEventDeviceIDs
+    self.usesIndependentPerformanceDeviceSelection = usesIndependentPerformanceDeviceSelection
     self.deactivate = deactivate
     self.activate = activate
-    self.reveal = reveal
+    self.prepareExactReveal = prepareExactReveal
+    self.acceptExactReveal =
+      acceptExactReveal ?? { identity in reveal(identity) }
+    self.cancelExactReveal = cancelExactReveal
     self.rematerializeStore = rematerializeStore
     self.setSelectionHandler = setSelectionHandler
     self.setRefreshHandler = setRefreshHandler
@@ -211,6 +271,9 @@ final class ViewerAnalysisModeCoordinator: ObservableObject, CustomReflectable,
   @Published private(set) var mode: ViewerAnalysisMode = .events
   @Published private(set) var guidance: ViewerAnalysisGuidance?
   @Published private(set) var revision: UInt64 = 0
+  @Published private(set) var performanceDeviceID: UUID?
+  @Published private(set) var eventRevealRevision: UInt64 = 0
+  private(set) var performanceDeviceOptions: [ViewerPerformanceDeviceOption] = []
 
   let performanceController: ViewerPerformanceDashboardController
 
@@ -230,6 +293,7 @@ final class ViewerAnalysisModeCoordinator: ObservableObject, CustomReflectable,
     event = ViewerAnalysisEventDriver(controller: eventController)
     self.performanceController = performanceController
     self.rawResolver = rawResolver
+    performanceDeviceOptions = event.performanceDevices()
     installEventHandlers()
   }
 
@@ -241,6 +305,7 @@ final class ViewerAnalysisModeCoordinator: ObservableObject, CustomReflectable,
     self.event = event
     self.performanceController = performanceController
     self.rawResolver = rawResolver
+    performanceDeviceOptions = event.performanceDevices()
     installEventHandlers()
   }
 
@@ -259,26 +324,48 @@ final class ViewerAnalysisModeCoordinator: ObservableObject, CustomReflectable,
   func showEvents() {
     guard !sealed, mode != .events else { return }
     transitionRevision = Self.increment(transitionRevision)
-    let requestedRevision = transitionRevision
     let prior = transitionTask
     let performanceWait = performanceController.deactivateAndWait()
+    performanceController.resetPauseForWindowClose()
+    let clearWait = performanceController.replace(target: nil, rangeKind: rangeKind)
     let resolverWait = rawResolver.cancelActiveAndWait()
+    let exactRevealWait = event.cancelExactReveal()
     mode = .events
     guidance = nil
     publish()
-    transitionTask = trackTransition { [weak self] in
+    transitionTask = trackTransition {
       await prior?.value
       await performanceWait.value
+      await clearWait.value
       await resolverWait.value
-      guard let self, self.accepts(requestedRevision, mode: .events) else { return }
-      await self.event.activate().value
+      await exactRevealWait.value
     }
   }
 
   func showPerformance(rangeKind nextRangeKind: ViewerPerformanceRangeKind? = nil) {
     guard !sealed else { return }
+    let rangeChanged = nextRangeKind.map { $0 != rangeKind } ?? false
     if let nextRangeKind { rangeKind = nextRangeKind }
+    refreshPerformanceDeviceOptions()
+    let nextDeviceID = reconciledPerformanceDeviceID()
+    let deviceChanged = performanceDeviceID != nextDeviceID
+    if deviceChanged { performanceDeviceID = nextDeviceID }
+    guard mode != .performance || rangeChanged || deviceChanged else { return }
     beginPerformanceTransition(clearsCurrentSelection: false)
+  }
+
+  func setPerformanceDevice(_ deviceID: UUID?) {
+    guard !sealed else { return }
+    refreshPerformanceDeviceOptions()
+    let availableIDs = Set(performanceDeviceOptions.filter(\.isEligible).map(\.id))
+    let acceptedID = deviceID.flatMap { availableIDs.contains($0) ? $0 : nil }
+    guard acceptedID != performanceDeviceID else { return }
+    performanceDeviceID = acceptedID
+    guard mode == .performance else {
+      publish()
+      return
+    }
+    beginPerformanceTransition(clearsCurrentSelection: true)
   }
 
   func setPerformanceRange(_ nextRangeKind: ViewerPerformanceRangeKind) {
@@ -314,19 +401,28 @@ final class ViewerAnalysisModeCoordinator: ObservableObject, CustomReflectable,
     let eventRematerializationWait = event.rematerializeStore()
     let performanceWait = performanceController.invalidateStoreGenerationAndWait()
     let resolverWait = rawResolver.cancelActiveAndWait()
+    let exactRevealWait = event.cancelExactReveal()
     guidance = nil
     publish()
     transitionTask = trackTransition { [weak self] in
       await prior?.value
       await performanceWait.value
       await resolverWait.value
+      await exactRevealWait.value
       await eventRematerializationWait.value
       guard let self, self.accepts(requestedRevision, mode: expectedMode) else { return }
+      await self.event.activate().value
+      guard self.accepts(requestedRevision, mode: expectedMode) else { return }
       switch expectedMode {
       case .events:
-        await self.event.activate().value
+        self.performanceController.rebuildAfterStoreGenerationReplacement(
+          target: nil,
+          rangeKind: self.rangeKind
+        )
       case .performance:
-        switch self.event.targetSelection() {
+        self.refreshPerformanceDeviceOptions()
+        self.performanceDeviceID = self.reconciledPerformanceDeviceID()
+        switch self.currentPerformanceTargetSelection() {
         case .guidance(let guidance):
           self.performanceController.rebuildAfterStoreGenerationReplacement(
             target: nil,
@@ -341,7 +437,7 @@ final class ViewerAnalysisModeCoordinator: ObservableObject, CustomReflectable,
             rangeKind: self.rangeKind
           )
           guard self.accepts(requestedRevision, mode: .performance),
-            self.event.targetSelection() == .target(target)
+            self.currentPerformanceTargetSelection() == .target(target)
           else { return }
           self.performanceController.activate()
           self.guidance = nil
@@ -371,17 +467,17 @@ final class ViewerAnalysisModeCoordinator: ObservableObject, CustomReflectable,
     transitionRevision = Self.increment(transitionRevision)
     let requestedRevision = transitionRevision
     let prior = transitionTask
-    let performanceWait = performanceController.deactivateAndWait()
+    let performanceWait = performanceController.suspendForRawRevealAndWait()
     let resolverWait = rawResolver.cancelActiveAndWait()
+    let exactRevealWait = event.cancelExactReveal()
     guidance = nil
     publish()
     transitionTask = trackTransition { [weak self] in
       await prior?.value
       await performanceWait.value
       await resolverWait.value
+      await exactRevealWait.value
       guard let self, self.accepts(requestedRevision, mode: .performance) else { return }
-      self.mode = .events
-      self.publish()
       await self.resolveAndReveal(
         request: request,
         scope: scope,
@@ -400,14 +496,16 @@ final class ViewerAnalysisModeCoordinator: ObservableObject, CustomReflectable,
     event.setRematerializationHandler { _ in }
     let transitionWait = transitionTask ?? Task {}
     let eventWait = event.deactivate()
+    let exactRevealWait = event.cancelExactReveal()
     let performanceWait = performanceController.sealAndWait()
     let resolverWait = rawResolver.sealAndWait()
     return Task {
       async let transition: Void = transitionWait.value
       async let event: Void = eventWait.value
+      async let exactReveal: Void = exactRevealWait.value
       async let performance: Void = performanceWait.value
       async let resolver: Void = resolverWait.value
-      _ = await (transition, event, performance, resolver)
+      _ = await (transition, event, exactReveal, performance, resolver)
     }
   }
 
@@ -431,6 +529,16 @@ final class ViewerAnalysisModeCoordinator: ObservableObject, CustomReflectable,
 
   private func sharedSelectionDidChange() {
     guard !sealed, mode == .performance else { return }
+    let optionsChanged = refreshPerformanceDeviceOptions()
+    let nextDeviceID = reconciledPerformanceDeviceID()
+    let deviceChanged = performanceDeviceID != nextDeviceID
+    if deviceChanged { performanceDeviceID = nextDeviceID }
+    if case .target(let target) = currentPerformanceTargetSelection(),
+      performanceController.currentTarget == target
+    {
+      if optionsChanged || deviceChanged { publish() }
+      return
+    }
     beginPerformanceTransition(clearsCurrentSelection: true)
   }
 
@@ -453,6 +561,7 @@ final class ViewerAnalysisModeCoordinator: ObservableObject, CustomReflectable,
       clearWait = performanceController.replace(target: nil, rangeKind: rangeKind)
     }
     let resolverWait = rawResolver.cancelActiveAndWait()
+    let exactRevealWait = event.cancelExactReveal()
     guidance = nil
     publish()
     transitionTask = trackTransition { [weak self] in
@@ -460,13 +569,18 @@ final class ViewerAnalysisModeCoordinator: ObservableObject, CustomReflectable,
       await performanceWait.value
       await clearWait.value
       await resolverWait.value
+      await exactRevealWait.value
       await rematerialization.value
       guard let self, self.accepts(requestedRevision, mode: expectedMode) else { return }
+      await self.event.activate().value
+      guard self.accepts(requestedRevision, mode: expectedMode) else { return }
       switch expectedMode {
       case .events:
-        await self.event.activate().value
+        break
       case .performance:
-        switch self.event.targetSelection() {
+        self.refreshPerformanceDeviceOptions()
+        self.performanceDeviceID = self.reconciledPerformanceDeviceID()
+        switch self.currentPerformanceTargetSelection() {
         case .guidance(let guidance):
           await self.performanceController.replace(
             target: nil,
@@ -481,7 +595,7 @@ final class ViewerAnalysisModeCoordinator: ObservableObject, CustomReflectable,
             rangeKind: self.rangeKind
           ).value
           guard self.accepts(requestedRevision, mode: .performance),
-            self.event.targetSelection() == .target(target)
+            self.currentPerformanceTargetSelection() == .target(target)
           else { return }
           self.performanceController.activate()
           self.guidance = nil
@@ -501,10 +615,11 @@ final class ViewerAnalysisModeCoordinator: ObservableObject, CustomReflectable,
     let requestedRevision = transitionRevision
     let prior = transitionTask
     let resolverWait = rawResolver.cancelActiveAndWait()
+    let exactRevealWait = event.cancelExactReveal()
     let ownerWait: Task<Void, Never>
     let clearWait: Task<Void, Never>
     if mode == .events {
-      ownerWait = event.deactivate()
+      ownerWait = Task {}
       clearWait = Task {}
     } else {
       ownerWait = performanceController.deactivateAndWait()
@@ -521,8 +636,9 @@ final class ViewerAnalysisModeCoordinator: ObservableObject, CustomReflectable,
       await ownerWait.value
       await clearWait.value
       await resolverWait.value
+      await exactRevealWait.value
       guard let self, self.accepts(requestedRevision, mode: .performance) else { return }
-      switch self.event.targetSelection() {
+      switch self.currentPerformanceTargetSelection() {
       case .guidance(let guidance):
         await self.performanceController.replace(
           target: nil,
@@ -537,7 +653,7 @@ final class ViewerAnalysisModeCoordinator: ObservableObject, CustomReflectable,
           rangeKind: self.rangeKind
         ).value
         guard self.accepts(requestedRevision, mode: .performance),
-          self.event.targetSelection() == .target(target)
+          self.currentPerformanceTargetSelection() == .target(target)
         else { return }
         self.performanceController.activate()
         self.guidance = nil
@@ -552,12 +668,55 @@ final class ViewerAnalysisModeCoordinator: ObservableObject, CustomReflectable,
     target: ViewerPerformanceDashboardTarget,
     revision requestedRevision: UInt64
   ) async {
-    guard event.targetSelection() == .target(target) else {
-      await activateEvents(with: .rawEvent(.sourceChanged), revision: requestedRevision)
+    guard currentPerformanceTargetSelection() == .target(target) else {
+      finishRawReveal(
+        guidance: .rawEvent(.sourceChanged),
+        target: target,
+        revision: requestedRevision
+      )
       return
     }
-    let outcome = await resolve(request: request, scope: scope, target: target)
-    guard accepts(requestedRevision, mode: .events) else { return }
+    var outcome = await resolve(request: request, scope: scope, target: target)
+    guard accepts(requestedRevision, mode: .performance) else { return }
+    if case .resolved(let resolved) = outcome,
+      rawResolver.revalidate(
+        resolved,
+        request: request,
+        scope: scope,
+        target: target
+      ) == .requiresResolution
+    {
+      outcome = await resolve(request: request, scope: scope, target: target)
+      guard accepts(requestedRevision, mode: .performance) else { return }
+    }
+
+    if case .resolved = outcome {
+      guard await event.prepareExactReveal().value else {
+        finishRawReveal(
+          guidance: .rawEventResolutionFailed,
+          target: target,
+          revision: requestedRevision
+        )
+        return
+      }
+      guard accepts(requestedRevision, mode: .performance),
+        currentPerformanceTargetSelection() == .target(target)
+      else { return }
+      if case .resolved(let refreshed) = outcome,
+        rawResolver.revalidate(
+          refreshed,
+          request: request,
+          scope: scope,
+          target: target
+        ) == .requiresResolution
+      {
+        outcome = await resolve(request: request, scope: scope, target: target)
+        guard accepts(requestedRevision, mode: .performance) else { return }
+      }
+    }
+
+    let resolvedIdentity: ViewerExplorerEventIdentity?
+    let resolvedGuidance: ViewerAnalysisGuidance?
     switch outcome {
     case .resolved(let resolved):
       switch rawResolver.revalidate(
@@ -567,111 +726,68 @@ final class ViewerAnalysisModeCoordinator: ObservableObject, CustomReflectable,
         target: target
       ) {
       case .explorerIdentity(let identity):
-        await reveal(
-          identity,
-          resolved: resolved,
-          request: request,
-          scope: scope,
-          target: target,
-          revision: requestedRevision
-        )
+        resolvedIdentity = identity
+        resolvedGuidance = nil
       case .requiresResolution:
-        await activateEvents(
-          with: .rawEvent(.eventNoLongerAvailable),
-          revision: requestedRevision
-        )
+        resolvedIdentity = nil
+        resolvedGuidance = .rawEvent(.eventNoLongerAvailable)
       case .guidance(let guidance):
-        await activateEvents(with: .rawEvent(guidance), revision: requestedRevision)
+        resolvedIdentity = nil
+        resolvedGuidance = .rawEvent(guidance)
       }
     case .guidance(let guidance):
-      await activateEvents(with: .rawEvent(guidance), revision: requestedRevision)
+      resolvedIdentity = nil
+      resolvedGuidance = .rawEvent(guidance)
     case .failed:
-      await activateEvents(with: .rawEventResolutionFailed, revision: requestedRevision)
+      resolvedIdentity = nil
+      resolvedGuidance = .rawEventResolutionFailed
     case .cancelled:
-      break
+      return
     }
-  }
 
-  private func reveal(
-    _ identity: ViewerExplorerEventIdentity,
-    resolved: ViewerPerformanceResolvedRawEvent,
-    request: ViewerPerformanceRawEventRequest,
-    scope: ViewerPerformanceDashboardScope,
-    target: ViewerPerformanceDashboardTarget,
-    revision requestedRevision: UInt64
-  ) async {
-    await event.activate().value
-    guard accepts(requestedRevision, mode: .events),
-      event.targetSelection() == .target(target)
-    else { return }
-    switch rawResolver.revalidate(
-      resolved,
-      request: request,
-      scope: scope,
-      target: target
-    ) {
-    case .explorerIdentity(let currentIdentity):
-      guard currentIdentity == identity else { return }
-      event.reveal(currentIdentity)
-      guidance = nil
-      publish()
-    case .requiresResolution:
-      await retryRevealAfterTransientRace(
-        request: request,
-        scope: scope,
+    guard currentPerformanceTargetSelection() == .target(target) else {
+      finishRawReveal(
+        guidance: .rawEvent(.sourceChanged),
         target: target,
         revision: requestedRevision
       )
-    case .guidance(let guidance):
-      self.guidance = .rawEvent(guidance)
-      publish()
+      return
+    }
+    if let identity = resolvedIdentity {
+      let accepted = await event.acceptExactReveal(identity)
+      guard accepts(requestedRevision, mode: .performance),
+        currentPerformanceTargetSelection() == .target(target)
+      else { return }
+      if accepted {
+        eventRevealRevision = Self.increment(eventRevealRevision)
+        finishRawReveal(guidance: nil, target: target, revision: requestedRevision)
+      } else {
+        finishRawReveal(
+          guidance: .rawEvent(.eventNoLongerAvailable),
+          target: target,
+          revision: requestedRevision
+        )
+      }
+    } else {
+      finishRawReveal(
+        guidance: resolvedGuidance ?? .rawEventResolutionFailed,
+        target: target,
+        revision: requestedRevision
+      )
     }
   }
 
-  private func retryRevealAfterTransientRace(
-    request: ViewerPerformanceRawEventRequest,
-    scope: ViewerPerformanceDashboardScope,
+  private func finishRawReveal(
+    guidance nextGuidance: ViewerAnalysisGuidance?,
     target: ViewerPerformanceDashboardTarget,
     revision requestedRevision: UInt64
-  ) async {
-    await event.deactivate().value
-    guard accepts(requestedRevision, mode: .events) else { return }
-    let outcome = await resolve(request: request, scope: scope, target: target)
-    guard accepts(requestedRevision, mode: .events) else { return }
-    let identity: ViewerExplorerEventIdentity?
-    switch outcome {
-    case .resolved(let resolved):
-      if case .explorerIdentity(let value) = rawResolver.revalidate(
-        resolved,
-        request: request,
-        scope: scope,
-        target: target
-      ) {
-        identity = value
-      } else {
-        identity = nil
-      }
-    default:
-      identity = nil
-    }
-    await event.activate().value
-    guard accepts(requestedRevision, mode: .events) else { return }
-    if let identity {
-      event.reveal(identity)
-      guidance = nil
-    } else {
-      guidance = .rawEvent(.eventNoLongerAvailable)
-    }
-    publish()
-  }
-
-  private func activateEvents(
-    with nextGuidance: ViewerAnalysisGuidance,
-    revision requestedRevision: UInt64
-  ) async {
-    await event.activate().value
-    guard accepts(requestedRevision, mode: .events) else { return }
+  ) {
+    guard accepts(requestedRevision, mode: .performance) else { return }
     guidance = nextGuidance
+    performanceController.resumeAfterRawReveal()
+    if currentPerformanceTargetSelection() == .target(target) {
+      performanceController.activate()
+    }
     publish()
   }
 
@@ -685,6 +801,38 @@ final class ViewerAnalysisModeCoordinator: ObservableObject, CustomReflectable,
         continuation.resume(returning: outcome)
       }
     }
+  }
+
+  private func currentPerformanceTargetSelection() -> ViewerPerformanceTargetSelection {
+    if event.usesIndependentPerformanceDeviceSelection {
+      guard let performanceDeviceID else { return .guidance(.selectOneDevice) }
+      return event.targetSelection(performanceDeviceID)
+    }
+    return event.targetSelection(nil)
+  }
+
+  private func reconciledPerformanceDeviceID() -> UUID? {
+    guard event.usesIndependentPerformanceDeviceSelection else { return performanceDeviceID }
+    let options = performanceDeviceOptions.filter(\.isEligible)
+    let availableIDs = Set(options.map(\.id))
+    if let performanceDeviceID, availableIDs.contains(performanceDeviceID) {
+      return performanceDeviceID
+    }
+    let eventSelection = event.selectedEventDeviceIDs()
+    if eventSelection.count == 1, let selected = eventSelection.first,
+      availableIDs.contains(selected)
+    {
+      return selected
+    }
+    return options.count == 1 ? options[0].id : nil
+  }
+
+  @discardableResult
+  private func refreshPerformanceDeviceOptions() -> Bool {
+    let next = event.performanceDevices()
+    guard next != performanceDeviceOptions else { return false }
+    performanceDeviceOptions = next
+    return true
   }
 
   private func trackTransition(

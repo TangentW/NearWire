@@ -6,7 +6,6 @@ enum ViewerWorkspaceRegion: String, CaseIterable, Equatable, Sendable {
   case devices
   case eventTimeline
   case eventInspector
-  case performanceDashboard
   case controlComposer
 }
 
@@ -137,13 +136,18 @@ private final class ViewerRootPresentationObserver: ObservableObject {
 
 struct ViewerRootView: View {
   let model: ViewerApplicationModel
+  let openPerformanceWindow: () -> Void
   @StateObject private var presentationObserver: ViewerRootPresentationObserver
   @State private var showsDeviceDetails = false
   @State private var focusedDeviceID: UUID?
   @State private var workspaceVisibility = ViewerWorkspaceVisibility()
 
-  init(model: ViewerApplicationModel) {
+  init(
+    model: ViewerApplicationModel,
+    openPerformanceWindow: @escaping () -> Void = {}
+  ) {
     self.model = model
+    self.openPerformanceWindow = openPerformanceWindow
     _presentationObserver = StateObject(
       wrappedValue: ViewerRootPresentationObserver(model: model)
     )
@@ -158,6 +162,7 @@ struct ViewerRootView: View {
       Divider()
       analysisWorkspace
     }
+    .background(Color(nsColor: .windowBackgroundColor))
     .sheet(isPresented: $showsDeviceDetails) {
       deviceDetailsSheet
     }
@@ -171,6 +176,7 @@ struct ViewerRootView: View {
           statusContent
         }
         Spacer()
+        performanceWindowButton
         workspaceVisibilityControls
         Divider().frame(height: 24)
         Button("Copy") { model.copyPairingCode() }
@@ -203,12 +209,29 @@ struct ViewerRootView: View {
   }
 
   @ViewBuilder
+  private var performanceWindowButton: some View {
+    Button {
+      model.analysisCoordinator?.showPerformance()
+      openPerformanceWindow()
+    } label: {
+      Label("Performance", systemImage: "chart.xyaxis.line")
+    }
+    .disabled(model.analysisCoordinator == nil)
+    .help("Open the Performance window")
+    .accessibilityLabel("Open Performance window")
+    .accessibilityIdentifier("nearwire.workspace.open-performance")
+  }
+
+  @ViewBuilder
   private var workspaceVisibilityControls: some View {
     if let analysis = model.analysisCoordinator {
       ViewerWorkspaceVisibilityControls(
         analysis: analysis,
         visibility: $workspaceVisibility
       )
+      .onChange(of: analysis.eventRevealRevision) { _ in
+        workspaceVisibility.inspector = true
+      }
     } else {
       ViewerWorkspaceVisibilityControlsPlaceholder(visibility: $workspaceVisibility)
     }
@@ -287,16 +310,11 @@ struct ViewerRootView: View {
 
   @ViewBuilder
   private var analysisContent: some View {
-    if let analysis = model.analysisCoordinator {
-      ViewerAnalysisWorkspacePane(
-        analysis: analysis,
-        explorer: model.explorerController,
-        showsTimeline: workspaceVisibility.timeline,
-        showsInspector: workspaceVisibility.inspector
-      )
-    } else {
-      ViewerAnalysisWorkspacePlaceholder()
-    }
+    ViewerAnalysisWorkspacePane(
+      explorer: model.explorerController,
+      showsTimeline: workspaceVisibility.timeline,
+      showsInspector: workspaceVisibility.inspector
+    )
   }
 
   private var controlComposer: some View {
@@ -373,20 +391,17 @@ private struct ViewerWorkspaceVisibilityControls: View {
       visibilityButton(
         title: "Event Timeline",
         systemImage: "rectangle.leadinghalf.inset.filled",
-        isVisible: $visibility.timeline,
-        enabled: analysis.mode == .events
+        isVisible: $visibility.timeline
       )
       visibilityButton(
         title: "Event Inspector",
         systemImage: "rectangle.trailinghalf.inset.filled",
-        isVisible: $visibility.inspector,
-        enabled: analysis.mode == .events
+        isVisible: $visibility.inspector
       )
       visibilityButton(
         title: "Viewer to App Composer",
         systemImage: "rectangle.bottomhalf.inset.filled",
-        isVisible: $visibility.composer,
-        enabled: true
+        isVisible: $visibility.composer
       )
     }
     .controlSize(.small)
@@ -397,8 +412,7 @@ private struct ViewerWorkspaceVisibilityControls: View {
   private func visibilityButton(
     title: String,
     systemImage: String,
-    isVisible: Binding<Bool>,
-    enabled: Bool
+    isVisible: Binding<Bool>
   ) -> some View {
     Button {
       isVisible.wrappedValue.toggle()
@@ -423,7 +437,6 @@ private struct ViewerWorkspaceVisibilityControls: View {
         )
     }
     .buttonStyle(.bordered)
-    .disabled(!enabled)
     .help("\(isVisible.wrappedValue ? "Hide" : "Show") \(title)")
     .accessibilityLabel("\(isVisible.wrappedValue ? "Hide" : "Show") \(title)")
     .accessibilityValue(isVisible.wrappedValue ? "Expanded" : "Collapsed")
@@ -1039,93 +1052,52 @@ private struct ViewerOfflineDeviceDetail: View {
 }
 
 struct ViewerAnalysisWorkspacePane: View {
-  @ObservedObject var analysis: ViewerAnalysisModeCoordinator
   let explorer: ViewerEventExplorerController?
   let showsTimeline: Bool
   let showsInspector: Bool
   @State private var inspectorTab = ViewerExplorerInspectorTab.metadata
 
   init(
-    analysis: ViewerAnalysisModeCoordinator,
     explorer: ViewerEventExplorerController?,
     showsTimeline: Bool = true,
     showsInspector: Bool = true
   ) {
-    self.analysis = analysis
     self.explorer = explorer
     self.showsTimeline = showsTimeline
     self.showsInspector = showsInspector
   }
 
   var body: some View {
-    VStack(spacing: 0) {
-      HStack {
-        Text("Analysis").font(.headline)
-        Picker("Analysis Mode", selection: modeBinding) {
-          Text("Events").tag(ViewerAnalysisMode.events)
-          Text("Performance").tag(ViewerAnalysisMode.performance)
+    ZStack {
+      HSplitView {
+        if showsTimeline {
+          eventTimeline
+            .frame(
+              minWidth: ViewerWorkspaceLayout.timelineMinimumWidth,
+              idealWidth: ViewerWorkspaceLayout.timelineIdealWidth,
+              maxWidth: .infinity
+            )
+            .accessibilityIdentifier("nearwire.workspace.event-timeline")
         }
-        .labelsHidden()
-        .pickerStyle(.segmented)
-        .frame(width: 240)
-        Spacer()
+        if showsInspector {
+          eventInspector
+            .frame(
+              minWidth: ViewerWorkspaceLayout.inspectorMinimumWidth,
+              idealWidth: ViewerWorkspaceLayout.inspectorIdealWidth,
+              maxWidth: .infinity
+            )
+            .accessibilityIdentifier("nearwire.workspace.event-inspector")
+        }
       }
-      .padding(.horizontal, 14)
-      .padding(.vertical, 10)
-      Divider()
-      analysisContent
-    }
-  }
-
-  @ViewBuilder
-  private var analysisContent: some View {
-    if analysis.mode == .performance {
-      ViewerPerformanceDashboardView(coordinator: analysis)
-        .accessibilityIdentifier("nearwire.workspace.performance-dashboard")
-    } else {
-      ZStack {
-        HSplitView {
-          if showsTimeline {
-            eventTimeline
-              .frame(
-                minWidth: ViewerWorkspaceLayout.timelineMinimumWidth,
-                idealWidth: ViewerWorkspaceLayout.timelineIdealWidth,
-                maxWidth: .infinity
-              )
-              .accessibilityIdentifier("nearwire.workspace.event-timeline")
-          }
-          if showsInspector {
-            eventInspector
-              .frame(
-                minWidth: ViewerWorkspaceLayout.inspectorMinimumWidth,
-                idealWidth: ViewerWorkspaceLayout.inspectorIdealWidth,
-                maxWidth: .infinity
-              )
-              .accessibilityIdentifier("nearwire.workspace.event-inspector")
-          }
-        }
-        if !showsTimeline && !showsInspector {
-          ViewerEmptyState(
-            title: "Event Panels Hidden",
-            systemImage: "rectangle.dashed",
-            description: "Use the Timeline or Inspector buttons at the top to restore a panel. Event capture continues."
-          )
-          .accessibilityIdentifier("nearwire.workspace.events-hidden")
-        }
+      if !showsTimeline && !showsInspector {
+        ViewerEmptyState(
+          title: "Event Panels Hidden",
+          systemImage: "rectangle.dashed",
+          description: "Use the Timeline or Inspector buttons at the top to restore a panel. Event capture continues."
+        )
+        .accessibilityIdentifier("nearwire.workspace.events-hidden")
       }
     }
-  }
-
-  private var modeBinding: Binding<ViewerAnalysisMode> {
-    Binding(
-      get: { analysis.mode },
-      set: { mode in
-        switch mode {
-        case .events: analysis.showEvents()
-        case .performance: analysis.showPerformance()
-        }
-      }
-    )
   }
 
   @ViewBuilder
@@ -1172,34 +1144,7 @@ struct ViewerAnalysisWorkspacePane: View {
   }
 }
 
-private struct ViewerAnalysisWorkspacePlaceholder: View {
-  var body: some View {
-    VStack(spacing: 0) {
-      HStack {
-        Text("Analysis").font(.headline)
-        Picker("Analysis Mode", selection: .constant(ViewerAnalysisMode.events)) {
-          Text("Events").tag(ViewerAnalysisMode.events)
-          Text("Performance").tag(ViewerAnalysisMode.performance)
-        }
-        .labelsHidden()
-        .pickerStyle(.segmented)
-        .frame(width: 240)
-        .disabled(true)
-        Spacer()
-      }
-      .padding(.horizontal, 14)
-      .padding(.vertical, 10)
-      Divider()
-      ViewerEmptyState(
-        title: "Runtime Not Ready",
-        systemImage: "clock.arrow.circlepath",
-        description: "Analysis appears when the Viewer runtime starts."
-      )
-    }
-  }
-}
-
-private struct ViewerEmptyState: View {
+struct ViewerEmptyState: View {
   let title: String
   let systemImage: String
   let description: String

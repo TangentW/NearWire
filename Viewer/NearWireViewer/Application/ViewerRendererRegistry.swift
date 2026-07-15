@@ -700,12 +700,27 @@ final class ViewerEventInspectorModel: CustomReflectable, CustomStringConvertibl
     detail: ViewerStoredEventDetail,
     identity: ViewerExplorerEventIdentity
   ) throws -> ViewerRendererPreparationRequest {
+    let buffer = try prepare(detail: detail, identity: identity)
+    return select(preparedDurableBuffer: buffer, identity: identity)
+  }
+
+  func prepare(
+    detail: ViewerStoredEventDetail,
+    identity: ViewerExplorerEventIdentity
+  ) throws -> ViewerCanonicalEventDetailBuffer {
     guard identity == .durable(rowID: detail.summary.rowID) else {
       throw ViewerJSONInspectionError.invalidRequest
     }
+    return try ViewerCanonicalEventDetailBuffer(detail: detail)
+  }
+
+  @discardableResult
+  func select(
+    preparedDurableBuffer buffer: ViewerCanonicalEventDetailBuffer,
+    identity: ViewerExplorerEventIdentity
+  ) -> ViewerRendererPreparationRequest {
     generation = Self.saturatingIncrement(generation)
     selectedIdentity = identity
-    let buffer = try ViewerCanonicalEventDetailBuffer(detail: detail)
     return select(buffer: buffer, identity: identity)
   }
 
@@ -714,13 +729,28 @@ final class ViewerEventInspectorModel: CustomReflectable, CustomStringConvertibl
     liveEvent: ViewerLiveEventSnapshot,
     identity: ViewerExplorerEventIdentity
   ) throws -> ViewerRendererPreparationRequest {
+    let buffer = try prepare(liveEvent: liveEvent, identity: identity)
+    return select(preparedLiveBuffer: buffer, identity: identity)
+  }
+
+  func prepare(
+    liveEvent: ViewerLiveEventSnapshot,
+    identity: ViewerExplorerEventIdentity
+  ) throws -> ViewerCanonicalEventDetailBuffer {
     guard case .transient(let key) = identity, key == liveEvent.observation.key else {
       throw ViewerJSONInspectionError.invalidRequest
     }
-    return select(
-      buffer: try ViewerCanonicalEventDetailBuffer(liveEvent: liveEvent),
-      identity: identity
-    )
+    return try ViewerCanonicalEventDetailBuffer(liveEvent: liveEvent)
+  }
+
+  @discardableResult
+  func select(
+    preparedLiveBuffer buffer: ViewerCanonicalEventDetailBuffer,
+    identity: ViewerExplorerEventIdentity
+  ) -> ViewerRendererPreparationRequest {
+    generation = Self.saturatingIncrement(generation)
+    selectedIdentity = identity
+    return select(buffer: buffer, identity: identity)
   }
 
   private func select(

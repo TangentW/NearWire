@@ -127,7 +127,7 @@ final class ViewerWorkspacePresentationTests: XCTestCase {
   func testWorkspaceRegionsExposeDevicesAndIndependentPanelsWithoutSources() {
     XCTAssertEqual(
       ViewerWorkspaceLayout.regions,
-      [.devices, .eventTimeline, .eventInspector, .performanceDashboard, .controlComposer]
+      [.devices, .eventTimeline, .eventInspector, .controlComposer]
     )
     XCTAssertEqual(ViewerWorkspaceLayout.regions.count, ViewerWorkspaceRegion.allCases.count)
   }
@@ -6290,9 +6290,180 @@ final class ViewerAnalysisModeCoordinatorTests: XCTestCase {
   }
 
   @MainActor
-  func testEventsReleaseCompletesBeforePerformanceStarts() async throws {
+  func testPerformanceDeviceChoiceIsIndependentFromLaterEventSelectionChanges() async throws {
+    let firstDeviceID = uuid(21)
+    let secondDeviceID = uuid(22)
+    let firstTarget = try makeHistoricalTarget()
+    let secondTarget = try ViewerPerformanceDashboardTarget.historical(
+      source: .makeHistorical(
+        recordingID: 41,
+        deviceSessionID: 42,
+        recordingLogicalID: uuid(23),
+        deviceLogicalID: secondDeviceID
+      ),
+      anchor: .ended(
+        deviceStartMonotonicNanoseconds: 40,
+        deviceEndMonotonicNanoseconds: 400
+      )
+    )
+    let eventSelection = AnalysisDeviceSelectionBox([firstDeviceID])
+    let prepareCount = LockedTestCounter()
+    let performance = ViewerPerformanceDashboardController(
+      driver: immediateFailurePerformanceDriver(prepareCount: prepareCount),
+      analysisActive: false
+    )
+    let coordinator = ViewerAnalysisModeCoordinator(
+      event: ViewerAnalysisEventDriver(
+        targetSelection: { .guidance(.selectOneDevice) },
+        targetSelectionForDevice: { deviceID in
+          switch deviceID {
+          case firstDeviceID: return .target(firstTarget)
+          case secondDeviceID: return .target(secondTarget)
+          default: return .guidance(.selectOneDevice)
+          }
+        },
+        performanceDevices: {
+          [
+            ViewerPerformanceDeviceOption(
+              id: firstDeviceID,
+              title: "First App",
+              subtitle: "Connected",
+              state: "active",
+              isEligible: true
+            ),
+            ViewerPerformanceDeviceOption(
+              id: secondDeviceID,
+              title: "Second App",
+              subtitle: "Connected",
+              state: "active",
+              isEligible: true
+            ),
+          ]
+        },
+        selectedEventDeviceIDs: { eventSelection.value },
+        usesIndependentPerformanceDeviceSelection: true,
+        deactivate: { Task {} },
+        activate: { Task {} },
+        reveal: { _ in true }
+      ),
+      performanceController: performance,
+      rawResolver: makeRawResolver(runtimeLogicalID: UUID())
+    )
+
+    coordinator.showPerformance()
+    await waitUntil { performance.currentTarget == firstTarget }
+    XCTAssertEqual(coordinator.performanceDeviceID, firstDeviceID)
+    XCTAssertEqual(coordinator.performanceDeviceOptions.map(\.id), [firstDeviceID, secondDeviceID])
+
+    coordinator.setPerformanceDevice(secondDeviceID)
+    await waitUntil { performance.currentTarget == secondTarget }
+    eventSelection.value = [firstDeviceID]
+    coordinator.showPerformance()
+    XCTAssertEqual(coordinator.performanceDeviceID, secondDeviceID)
+    XCTAssertEqual(performance.currentTarget, secondTarget)
+    await coordinator.sealAndWait().value
+  }
+
+  @MainActor
+  func testDisconnectedPerformanceDeviceClearsWithSeveralChoicesThenUsesSoleEligibleFallback()
+    async throws
+  {
+    let firstID = uuid(31)
+    let secondID = uuid(32)
+    let thirdID = uuid(33)
+    let firstTarget = try makeHistoricalTarget()
+    let secondTarget = try ViewerPerformanceDashboardTarget.historical(
+      source: .makeHistorical(
+        recordingID: 51,
+        deviceSessionID: 52,
+        recordingLogicalID: uuid(34),
+        deviceLogicalID: secondID
+      ),
+      anchor: .ended(
+        deviceStartMonotonicNanoseconds: 50,
+        deviceEndMonotonicNanoseconds: 500
+      )
+    )
+    let thirdTarget = try ViewerPerformanceDashboardTarget.historical(
+      source: .makeHistorical(
+        recordingID: 61,
+        deviceSessionID: 62,
+        recordingLogicalID: uuid(35),
+        deviceLogicalID: thirdID
+      ),
+      anchor: .ended(
+        deviceStartMonotonicNanoseconds: 60,
+        deviceEndMonotonicNanoseconds: 600
+      )
+    )
+    let options = AnalysisPerformanceDeviceOptionsBox([
+      performanceOption(id: firstID, subtitle: "connection-1", isEligible: true),
+      performanceOption(id: secondID, subtitle: "connection-2", isEligible: true),
+      performanceOption(id: thirdID, subtitle: "connection-3", isEligible: true),
+    ])
+    let selectionHandler = AnalysisSelectionHandlerBox()
+    let prepareCount = LockedTestCounter()
+    let performance = ViewerPerformanceDashboardController(
+      driver: immediateFailurePerformanceDriver(prepareCount: prepareCount),
+      analysisActive: false
+    )
+    let coordinator = ViewerAnalysisModeCoordinator(
+      event: ViewerAnalysisEventDriver(
+        targetSelection: { .guidance(.selectOneDevice) },
+        targetSelectionForDevice: { deviceID in
+          guard
+            let deviceID,
+            options.value.first(where: { $0.id == deviceID })?.isEligible == true
+          else { return .guidance(.deviceNotReady) }
+          switch deviceID {
+          case firstID: return .target(firstTarget)
+          case secondID: return .target(secondTarget)
+          case thirdID: return .target(thirdTarget)
+          default: return .guidance(.deviceNotReady)
+          }
+        },
+        performanceDevices: { options.value },
+        selectedEventDeviceIDs: { [firstID] },
+        usesIndependentPerformanceDeviceSelection: true,
+        deactivate: { Task {} },
+        activate: { Task {} },
+        reveal: { _ in true },
+        setSelectionHandler: { selectionHandler.handler = $0 }
+      ),
+      performanceController: performance,
+      rawResolver: makeRawResolver(runtimeLogicalID: UUID())
+    )
+
+    coordinator.showPerformance()
+    await waitUntil { performance.currentTarget == firstTarget }
+    XCTAssertEqual(coordinator.performanceDeviceID, firstID)
+
+    options.value = [
+      performanceOption(id: firstID, subtitle: "connection-1", isEligible: false),
+      performanceOption(id: secondID, subtitle: "connection-2", isEligible: true),
+      performanceOption(id: thirdID, subtitle: "connection-3", isEligible: true),
+    ]
+    selectionHandler.handler?()
+    await waitUntil { coordinator.diagnostics.pendingTransitionCount == 0 }
+    XCTAssertNil(coordinator.performanceDeviceID)
+    XCTAssertNil(performance.currentTarget)
+    XCTAssertEqual(coordinator.guidance, .selectOneDevice)
+
+    options.value = [
+      performanceOption(id: firstID, subtitle: "connection-1", isEligible: false),
+      performanceOption(id: secondID, subtitle: "connection-2", isEligible: true),
+      performanceOption(id: thirdID, subtitle: "connection-3", isEligible: false),
+    ]
+    selectionHandler.handler?()
+    await waitUntil { performance.currentTarget == secondTarget }
+    XCTAssertEqual(coordinator.performanceDeviceID, secondID)
+    await coordinator.sealAndWait().value
+  }
+
+  @MainActor
+  func testEquivalentEventSelectionPublicationDoesNotRepublishPerformance() async throws {
     let target = try makeHistoricalTarget()
-    let eventRelease = AsyncTestGate()
+    let selectionHandler = AnalysisSelectionHandlerBox()
     let prepareCount = LockedTestCounter()
     let performance = ViewerPerformanceDashboardController(
       driver: immediateFailurePerformanceDriver(prepareCount: prepareCount),
@@ -6301,25 +6472,55 @@ final class ViewerAnalysisModeCoordinatorTests: XCTestCase {
     let coordinator = ViewerAnalysisModeCoordinator(
       event: ViewerAnalysisEventDriver(
         targetSelection: { .target(target) },
-        deactivate: { Task { await eventRelease.wait() } },
+        deactivate: { Task {} },
         activate: { Task {} },
-        reveal: { _ in }
+        reveal: { _ in true },
+        setSelectionHandler: { selectionHandler.handler = $0 }
       ),
       performanceController: performance,
       rawResolver: makeRawResolver(runtimeLogicalID: UUID())
     )
 
     coordinator.showPerformance()
+    await waitUntil { coordinator.diagnostics.pendingTransitionCount == 0 }
+    let revision = coordinator.revision
+    selectionHandler.handler?()
     await Task.yield()
-    eventRelease.waitUntilEntered()
-    XCTAssertEqual(coordinator.mode, .performance)
-    XCTAssertEqual(prepareCount.value, 0)
-    XCTAssertFalse(performance.isAnalysisActive)
 
-    eventRelease.open()
+    XCTAssertEqual(coordinator.revision, revision)
+    XCTAssertEqual(prepareCount.value, 1)
+    await coordinator.sealAndWait().value
+  }
+
+  @MainActor
+  func testOpeningPerformanceKeepsEventTraversalActive() async throws {
+    let target = try makeHistoricalTarget()
+    let eventDeactivationCount = LockedTestCounter()
+    let prepareCount = LockedTestCounter()
+    let performance = ViewerPerformanceDashboardController(
+      driver: immediateFailurePerformanceDriver(prepareCount: prepareCount),
+      analysisActive: false
+    )
+    let coordinator = ViewerAnalysisModeCoordinator(
+      event: ViewerAnalysisEventDriver(
+        targetSelection: { .target(target) },
+        deactivate: {
+          eventDeactivationCount.increment()
+          return Task {}
+        },
+        activate: { Task {} },
+        reveal: { _ in true }
+      ),
+      performanceController: performance,
+      rawResolver: makeRawResolver(runtimeLogicalID: UUID())
+    )
+
+    coordinator.showPerformance()
     await waitUntil { prepareCount.value == 1 }
     await waitUntil { coordinator.diagnostics.pendingTransitionCount == 0 }
+    XCTAssertEqual(coordinator.mode, .performance)
     XCTAssertEqual(prepareCount.value, 1)
+    XCTAssertEqual(eventDeactivationCount.value, 0)
     XCTAssertTrue(performance.isAnalysisActive)
     await coordinator.sealAndWait().value
   }
@@ -6329,7 +6530,7 @@ final class ViewerAnalysisModeCoordinatorTests: XCTestCase {
     async throws
   {
     let target = try makeHistoricalTarget()
-    let eventRelease = AsyncTestGate()
+    let eventActivationCount = LockedTestCounter()
     let prepareCount = LockedTestCounter()
     let performance = ViewerPerformanceDashboardController(
       driver: immediateFailurePerformanceDriver(prepareCount: prepareCount),
@@ -6338,35 +6539,38 @@ final class ViewerAnalysisModeCoordinatorTests: XCTestCase {
     let coordinator = ViewerAnalysisModeCoordinator(
       event: ViewerAnalysisEventDriver(
         targetSelection: { .target(target) },
-        deactivate: { Task { await eventRelease.wait() } },
-        activate: { Task {} },
-        reveal: { _ in }
+        deactivate: { Task {} },
+        activate: {
+          eventActivationCount.increment()
+          return Task {}
+        },
+        reveal: { _ in true }
       ),
       performanceController: performance,
       rawResolver: makeRawResolver(runtimeLogicalID: UUID())
     )
 
     coordinator.showPerformance()
-    await Task.yield()
-    eventRelease.waitUntilEntered()
+    await waitUntil { prepareCount.value == 1 }
+    await waitUntil { coordinator.diagnostics.pendingTransitionCount == 0 }
     coordinator.noteStoreReplaced()
-    XCTAssertEqual(prepareCount.value, 0)
     XCTAssertNil(performance.model.scope)
 
-    eventRelease.open()
     await waitUntil { coordinator.diagnostics.pendingTransitionCount == 0 }
-    await waitUntil { prepareCount.value == 1 }
+    await waitUntil { prepareCount.value == 2 }
     XCTAssertEqual(coordinator.mode, .performance)
-    XCTAssertEqual(prepareCount.value, 1)
+    XCTAssertEqual(prepareCount.value, 2)
+    XCTAssertEqual(eventActivationCount.value, 1)
     XCTAssertEqual(performance.currentTarget, target)
     XCTAssertTrue(performance.isAnalysisActive)
     await coordinator.sealAndWait().value
   }
 
   @MainActor
-  func testRapidReturnToEventsCannotStartSupersededPerformanceTransition() async throws {
+  func testClosingPerformanceCancelsAQueuedPerformanceTransitionWithoutReactivatingEvents()
+    async throws
+  {
     let target = try makeHistoricalTarget()
-    let eventRelease = AsyncTestGate()
     let prepareCount = LockedTestCounter()
     let eventActivationCount = LockedTestCounter()
     let performance = ViewerPerformanceDashboardController(
@@ -6376,35 +6580,31 @@ final class ViewerAnalysisModeCoordinatorTests: XCTestCase {
     let coordinator = ViewerAnalysisModeCoordinator(
       event: ViewerAnalysisEventDriver(
         targetSelection: { .target(target) },
-        deactivate: { Task { await eventRelease.wait() } },
+        deactivate: { Task {} },
         activate: {
           eventActivationCount.increment()
           return Task {}
         },
-        reveal: { _ in }
+        reveal: { _ in true }
       ),
       performanceController: performance,
       rawResolver: makeRawResolver(runtimeLogicalID: UUID())
     )
 
     coordinator.showPerformance()
-    await Task.yield()
-    eventRelease.waitUntilEntered()
     coordinator.showEvents()
     XCTAssertEqual(coordinator.mode, .events)
-    XCTAssertEqual(prepareCount.value, 0)
     XCTAssertEqual(eventActivationCount.value, 0)
 
-    eventRelease.open()
     await waitUntil { coordinator.diagnostics.pendingTransitionCount == 0 }
     XCTAssertEqual(prepareCount.value, 0)
-    XCTAssertEqual(eventActivationCount.value, 1)
+    XCTAssertEqual(eventActivationCount.value, 0)
     XCTAssertFalse(performance.isAnalysisActive)
     await coordinator.sealAndWait().value
   }
 
   @MainActor
-  func testPerformanceTraversalReleaseCompletesBeforeEventsReactivate() async throws {
+  func testClosingPerformanceReleasesItsTraversalWithoutReactivatingEvents() async throws {
     let target = try makeHistoricalTarget()
     let probe = try AnalysisPerformanceDriverProbe(target: target)
     let eventActivationCount = LockedTestCounter()
@@ -6420,7 +6620,7 @@ final class ViewerAnalysisModeCoordinatorTests: XCTestCase {
           eventActivationCount.increment()
           return Task {}
         },
-        reveal: { _ in }
+        reveal: { _ in true }
       ),
       performanceController: performance,
       rawResolver: makeRawResolver(runtimeLogicalID: UUID())
@@ -6437,8 +6637,81 @@ final class ViewerAnalysisModeCoordinatorTests: XCTestCase {
 
     probe.releaseTraversal()
     await waitUntil { coordinator.diagnostics.pendingTransitionCount == 0 }
-    XCTAssertEqual(eventActivationCount.value, 1)
+    XCTAssertEqual(eventActivationCount.value, 0)
     XCTAssertEqual(coordinator.mode, .events)
+    XCTAssertNil(performance.model.scope)
+    await coordinator.sealAndWait().value
+  }
+
+  @MainActor
+  func testClosingPerformanceClearsPauseButPreservesRangeForFreshReopen() async throws {
+    let target = try makeHistoricalTarget()
+    let prepareCount = LockedTestCounter()
+    let performance = ViewerPerformanceDashboardController(
+      driver: immediateFailurePerformanceDriver(prepareCount: prepareCount),
+      analysisActive: false
+    )
+    let coordinator = ViewerAnalysisModeCoordinator(
+      event: ViewerAnalysisEventDriver(
+        targetSelection: { .target(target) },
+        deactivate: { Task {} },
+        activate: { Task {} },
+        reveal: { _ in true }
+      ),
+      performanceController: performance,
+      rawResolver: makeRawResolver(runtimeLogicalID: UUID())
+    )
+
+    coordinator.showPerformance(rangeKind: .oneMinute)
+    await waitUntil { prepareCount.value == 1 }
+    coordinator.setPerformancePaused(true)
+    coordinator.showEvents()
+    await waitUntil { coordinator.diagnostics.pendingTransitionCount == 0 }
+    XCTAssertFalse(coordinator.isPerformancePaused)
+    XCTAssertEqual(coordinator.performanceRangeKind, .oneMinute)
+
+    coordinator.showPerformance()
+    await waitUntil { prepareCount.value == 2 }
+    XCTAssertEqual(performance.currentRangeKind, .oneMinute)
+    XCTAssertTrue(performance.isAnalysisActive)
+    await coordinator.sealAndWait().value
+  }
+
+  @MainActor
+  func testImmediateCloseAndReopenNeverPresentsPredecessorPerformanceValues() async throws {
+    let target = try makeCurrentTarget()
+    let prepareCount = LockedTestCounter()
+    let performance = ViewerPerformanceDashboardController(
+      driver: try immediateCurrentSuccessPerformanceDriver(
+        target: target,
+        prepareCount: prepareCount
+      ),
+      analysisActive: false
+    )
+    let coordinator = ViewerAnalysisModeCoordinator(
+      event: ViewerAnalysisEventDriver(
+        targetSelection: { .target(target) },
+        deactivate: { Task {} },
+        activate: { Task {} },
+        reveal: { _ in true }
+      ),
+      performanceController: performance,
+      rawResolver: makeRawResolver(runtimeLogicalID: uuid(1))
+    )
+
+    coordinator.showPerformance()
+    await waitUntil { performance.model.diagnostics.phase == .ready }
+    XCTAssertNotNil(performance.model.cards)
+
+    coordinator.showEvents()
+    XCTAssertNil(performance.model.scope)
+    XCTAssertNil(performance.model.cards)
+    XCTAssertTrue(performance.model.buckets.isEmpty)
+
+    coordinator.showPerformance()
+    XCTAssertNil(performance.model.cards)
+    await waitUntil { performance.model.diagnostics.phase == .ready }
+    XCTAssertEqual(prepareCount.value, 2)
     await coordinator.sealAndWait().value
   }
 
@@ -6454,7 +6727,7 @@ final class ViewerAnalysisModeCoordinatorTests: XCTestCase {
         targetSelection: { .guidance(.selectOneDevice) },
         deactivate: { Task {} },
         activate: { Task {} },
-        reveal: { _ in }
+        reveal: { _ in true }
       ),
       performanceController: performance,
       rawResolver: makeRawResolver(runtimeLogicalID: UUID())
@@ -6481,7 +6754,7 @@ final class ViewerAnalysisModeCoordinatorTests: XCTestCase {
         targetSelection: { .target(target) },
         deactivate: { Task {} },
         activate: { Task {} },
-        reveal: { _ in }
+        reveal: { _ in true }
       ),
       performanceController: performance,
       rawResolver: makeRawResolver(runtimeLogicalID: UUID())
@@ -6524,7 +6797,7 @@ final class ViewerAnalysisModeCoordinatorTests: XCTestCase {
         targetSelection: { .target(target) },
         deactivate: { Task {} },
         activate: { Task {} },
-        reveal: { _ in }
+        reveal: { _ in true }
       ),
       performanceController: performance,
       rawResolver: makeRawResolver(runtimeLogicalID: UUID())
@@ -6553,7 +6826,7 @@ final class ViewerAnalysisModeCoordinatorTests: XCTestCase {
   }
 
   @MainActor
-  func testStoreReplacementDuringBlockedRawRevealCancelsResolutionBeforeEventsReactivate()
+  func testStoreReplacementDuringBlockedRawRevealCancelsResolutionAndRebuildsPerformance()
     async throws
   {
     let target = try makeCurrentTarget()
@@ -6576,7 +6849,10 @@ final class ViewerAnalysisModeCoordinatorTests: XCTestCase {
           eventActivationCount.increment()
           return Task {}
         },
-        reveal: { _ in revealCount.increment() }
+        reveal: { _ in
+          revealCount.increment()
+          return true
+        }
       ),
       performanceController: performance,
       rawResolver: rawProbe.makeResolver(runtimeLogicalID: uuid(1))
@@ -6596,7 +6872,7 @@ final class ViewerAnalysisModeCoordinatorTests: XCTestCase {
 
     coordinator.openRawEvent(bucketIndex: bucketIndex, metric: .cpuPercent)
     await waitUntil { rawProbe.resolveRequestCount == 1 }
-    XCTAssertEqual(coordinator.mode, .events)
+    XCTAssertEqual(coordinator.mode, .performance)
     XCTAssertEqual(rawProbe.cancelCount, 0)
     coordinator.noteStoreReplaced()
 
@@ -6605,10 +6881,591 @@ final class ViewerAnalysisModeCoordinatorTests: XCTestCase {
     XCTAssertEqual(coordinator.diagnostics.rawResolutionWorkCount, 0)
     XCTAssertEqual(eventActivationCount.value, 1)
     XCTAssertEqual(revealCount.value, 0)
-    XCTAssertEqual(prepareCount.value, 1)
-    XCTAssertEqual(coordinator.mode, .events)
-    XCTAssertNil(performance.model.scope)
+    XCTAssertEqual(prepareCount.value, 2)
+    XCTAssertEqual(coordinator.mode, .performance)
+    XCTAssertNotNil(performance.model.scope)
     await coordinator.sealAndWait().value
+  }
+
+  @MainActor
+  func testRawPerformanceEventRevealKeepsPerformanceWindowActive() async throws {
+    let target = try makeCurrentTarget()
+    let prepareCount = LockedTestCounter()
+    let reveal = AnalysisEventIdentityBox()
+    let revealPreparation = AsyncTestGate()
+    let performance = ViewerPerformanceDashboardController(
+      driver: try immediateCurrentSuccessPerformanceDriver(
+        target: target,
+        prepareCount: prepareCount
+      ),
+      analysisActive: false
+    )
+    let rawResolver = ViewerPerformanceRawEventResolver(
+      store: ViewerPerformanceRawEventStoreDriver(
+        resolve: { _, _, _, completion in
+          completion(
+            .success(
+              .durable(
+                rowID: 99,
+                deviceSessionID: target.storeIdentity.deviceSessionID
+              )
+            )
+          )
+          return ViewerPerformanceRawEventStoreOperation()
+        },
+        cancel: { _ in }
+      ),
+      live: ViewerLiveEventWindow(runtimeLogicalID: uuid(1))
+    )
+    let coordinator = ViewerAnalysisModeCoordinator(
+      event: ViewerAnalysisEventDriver(
+        targetSelection: { .target(target) },
+        deactivate: { Task {} },
+        activate: { Task {} },
+        prepareExactReveal: {
+          Task { @MainActor in
+            await revealPreparation.wait()
+            return true
+          }
+        },
+        reveal: {
+          reveal.value = $0
+          return true
+        }
+      ),
+      performanceController: performance,
+      rawResolver: rawResolver
+    )
+
+    coordinator.showPerformance()
+    await waitUntil { performance.model.diagnostics.phase == .ready }
+    let initialScope = performance.model.scope
+    let initialCards = performance.model.cards
+    let initialBuckets = performance.model.buckets
+    let initialLedgerBytes = performance.diagnostics.ledgerBytes
+    let initialReservationCount = performance.diagnostics.ledgerReservationCount
+    let bucketIndex = try XCTUnwrap(
+      performance.model.buckets.firstIndex {
+        $0.numeric.accumulator(for: .cpuPercent).representative != nil
+      }
+    )
+    coordinator.openRawEvent(bucketIndex: bucketIndex, metric: .cpuPercent)
+    await waitUntil { revealPreparation.hasEntered }
+    XCTAssertNil(reveal.value)
+    XCTAssertEqual(coordinator.eventRevealRevision, 0)
+    XCTAssertEqual(performance.model.scope, initialScope)
+    XCTAssertEqual(performance.model.cards, initialCards)
+    XCTAssertEqual(performance.model.buckets, initialBuckets)
+    XCTAssertEqual(performance.diagnostics.ledgerBytes, initialLedgerBytes)
+    XCTAssertEqual(performance.diagnostics.ledgerReservationCount, initialReservationCount)
+    XCTAssertEqual(prepareCount.value, 1)
+    revealPreparation.open()
+    await waitUntil { reveal.value == .durable(rowID: 99) }
+    await waitUntil {
+      prepareCount.value == 2 && performance.model.diagnostics.phase == .ready
+        && coordinator.diagnostics.pendingTransitionCount == 0
+    }
+
+    XCTAssertEqual(coordinator.mode, .performance)
+    XCTAssertEqual(coordinator.eventRevealRevision, 1)
+    XCTAssertTrue(performance.isAnalysisActive)
+    XCTAssertEqual(performance.model.scope, initialScope)
+    XCTAssertEqual(performance.model.cards, initialCards)
+    XCTAssertEqual(performance.model.buckets, initialBuckets)
+    XCTAssertEqual(prepareCount.value, 2)
+    await coordinator.sealAndWait().value
+  }
+
+  @MainActor
+  func testPausedRawPerformanceRevealPreservesPresentationUntilOneResumeSuccessor() async throws {
+    let target = try makeCurrentTarget()
+    let prepareCount = LockedTestCounter()
+    let revealPreparation = AsyncTestGate()
+    let performance = ViewerPerformanceDashboardController(
+      driver: try immediateCurrentSuccessPerformanceDriver(
+        target: target,
+        prepareCount: prepareCount
+      ),
+      analysisActive: false
+    )
+    let rawResolver = ViewerPerformanceRawEventResolver(
+      store: ViewerPerformanceRawEventStoreDriver(
+        resolve: { _, _, _, completion in
+          completion(
+            .success(
+              .durable(
+                rowID: 99,
+                deviceSessionID: target.storeIdentity.deviceSessionID
+              )
+            )
+          )
+          return ViewerPerformanceRawEventStoreOperation()
+        },
+        cancel: { _ in }
+      ),
+      live: ViewerLiveEventWindow(runtimeLogicalID: uuid(1))
+    )
+    let coordinator = ViewerAnalysisModeCoordinator(
+      event: ViewerAnalysisEventDriver(
+        targetSelection: { .target(target) },
+        deactivate: { Task {} },
+        activate: { Task {} },
+        prepareExactReveal: {
+          Task { @MainActor in
+            await revealPreparation.wait()
+            return true
+          }
+        },
+        reveal: { _ in true }
+      ),
+      performanceController: performance,
+      rawResolver: rawResolver
+    )
+
+    coordinator.showPerformance()
+    await waitUntil { performance.model.diagnostics.phase == .ready }
+    coordinator.setPerformancePaused(true)
+    let initialScope = performance.model.scope
+    let initialCards = performance.model.cards
+    let initialBuckets = performance.model.buckets
+    let initialLedgerBytes = performance.diagnostics.ledgerBytes
+    let initialReservationCount = performance.diagnostics.ledgerReservationCount
+    let bucketIndex = try XCTUnwrap(
+      performance.model.buckets.firstIndex {
+        $0.numeric.accumulator(for: .cpuPercent).representative != nil
+      }
+    )
+
+    coordinator.openRawEvent(bucketIndex: bucketIndex, metric: .cpuPercent)
+    await waitUntil { revealPreparation.hasEntered }
+    XCTAssertTrue(coordinator.isPerformancePaused)
+    XCTAssertEqual(performance.model.scope, initialScope)
+    XCTAssertEqual(performance.model.cards, initialCards)
+    XCTAssertEqual(performance.model.buckets, initialBuckets)
+    XCTAssertEqual(performance.diagnostics.ledgerBytes, initialLedgerBytes)
+    XCTAssertEqual(performance.diagnostics.ledgerReservationCount, initialReservationCount)
+    XCTAssertEqual(prepareCount.value, 1)
+
+    revealPreparation.open()
+    await waitUntil {
+      coordinator.eventRevealRevision == 1
+        && coordinator.diagnostics.pendingTransitionCount == 0
+    }
+    XCTAssertTrue(coordinator.isPerformancePaused)
+    XCTAssertEqual(performance.model.scope, initialScope)
+    XCTAssertEqual(performance.model.cards, initialCards)
+    XCTAssertEqual(performance.model.buckets, initialBuckets)
+    XCTAssertEqual(performance.diagnostics.ledgerBytes, initialLedgerBytes)
+    XCTAssertEqual(performance.diagnostics.ledgerReservationCount, initialReservationCount)
+    XCTAssertEqual(prepareCount.value, 1)
+
+    coordinator.setPerformancePaused(false)
+    await waitUntil {
+      prepareCount.value == 2 && performance.model.diagnostics.phase == .ready
+    }
+    XCTAssertFalse(coordinator.isPerformancePaused)
+    XCTAssertEqual(prepareCount.value, 2)
+    await coordinator.sealAndWait().value
+  }
+
+  @MainActor
+  func testFailedRawRevealPreparationDoesNotPublishMainWindowFocus() async throws {
+    let target = try makeCurrentTarget()
+    let prepareCount = LockedTestCounter()
+    let reveal = AnalysisEventIdentityBox()
+    let performance = ViewerPerformanceDashboardController(
+      driver: try immediateCurrentSuccessPerformanceDriver(
+        target: target,
+        prepareCount: prepareCount
+      ),
+      analysisActive: false
+    )
+    let rawResolver = ViewerPerformanceRawEventResolver(
+      store: ViewerPerformanceRawEventStoreDriver(
+        resolve: { _, _, _, completion in
+          completion(
+            .success(
+              .durable(
+                rowID: 99,
+                deviceSessionID: target.storeIdentity.deviceSessionID
+              )
+            )
+          )
+          return ViewerPerformanceRawEventStoreOperation()
+        },
+        cancel: { _ in }
+      ),
+      live: ViewerLiveEventWindow(runtimeLogicalID: uuid(1))
+    )
+    let coordinator = ViewerAnalysisModeCoordinator(
+      event: ViewerAnalysisEventDriver(
+        targetSelection: { .target(target) },
+        deactivate: { Task {} },
+        activate: { Task {} },
+        prepareExactReveal: { Task { false } },
+        reveal: {
+          reveal.value = $0
+          return true
+        }
+      ),
+      performanceController: performance,
+      rawResolver: rawResolver
+    )
+
+    coordinator.showPerformance()
+    await waitUntil { performance.model.diagnostics.phase == .ready }
+    let bucketIndex = try XCTUnwrap(
+      performance.model.buckets.firstIndex {
+        $0.numeric.accumulator(for: .cpuPercent).representative != nil
+      }
+    )
+    coordinator.openRawEvent(bucketIndex: bucketIndex, metric: .cpuPercent)
+    await waitUntil {
+      coordinator.diagnostics.pendingTransitionCount == 0
+        && coordinator.guidance == .rawEventResolutionFailed
+    }
+
+    XCTAssertNil(reveal.value)
+    XCTAssertEqual(coordinator.eventRevealRevision, 0)
+    XCTAssertEqual(coordinator.mode, .performance)
+    XCTAssertTrue(performance.isAnalysisActive)
+    await coordinator.sealAndWait().value
+  }
+
+  @MainActor
+  func testRejectedRawRevealDoesNotPublishMainWindowFocus() async throws {
+    let target = try makeCurrentTarget()
+    let prepareCount = LockedTestCounter()
+    let revealCount = LockedTestCounter()
+    let performance = ViewerPerformanceDashboardController(
+      driver: try immediateCurrentSuccessPerformanceDriver(
+        target: target,
+        prepareCount: prepareCount
+      ),
+      analysisActive: false
+    )
+    let rawResolver = ViewerPerformanceRawEventResolver(
+      store: ViewerPerformanceRawEventStoreDriver(
+        resolve: { _, _, _, completion in
+          completion(
+            .success(
+              .durable(
+                rowID: 99,
+                deviceSessionID: target.storeIdentity.deviceSessionID
+              )
+            )
+          )
+          return ViewerPerformanceRawEventStoreOperation()
+        },
+        cancel: { _ in }
+      ),
+      live: ViewerLiveEventWindow(runtimeLogicalID: uuid(1))
+    )
+    let coordinator = ViewerAnalysisModeCoordinator(
+      event: ViewerAnalysisEventDriver(
+        targetSelection: { .target(target) },
+        deactivate: { Task {} },
+        activate: { Task {} },
+        prepareExactReveal: { Task { true } },
+        reveal: { _ in
+          revealCount.increment()
+          return false
+        }
+      ),
+      performanceController: performance,
+      rawResolver: rawResolver
+    )
+
+    coordinator.showPerformance()
+    await waitUntil { performance.model.diagnostics.phase == .ready }
+    let bucketIndex = try XCTUnwrap(
+      performance.model.buckets.firstIndex {
+        $0.numeric.accumulator(for: .cpuPercent).representative != nil
+      }
+    )
+    coordinator.openRawEvent(bucketIndex: bucketIndex, metric: .cpuPercent)
+    await waitUntil {
+      coordinator.diagnostics.pendingTransitionCount == 0
+        && coordinator.guidance == .rawEvent(.eventNoLongerAvailable)
+    }
+
+    XCTAssertEqual(revealCount.value, 1)
+    XCTAssertEqual(coordinator.eventRevealRevision, 0)
+    XCTAssertEqual(coordinator.mode, .performance)
+    XCTAssertTrue(performance.isAnalysisActive)
+    await coordinator.sealAndWait().value
+  }
+
+  @MainActor
+  func testSupersededRawRevealAcceptanceCannotPublishMainWindowFocus() async throws {
+    let target = try makeCurrentTarget()
+    let prepareCount = LockedTestCounter()
+    let acceptanceGate = AsyncTestGate()
+    let performance = ViewerPerformanceDashboardController(
+      driver: try immediateCurrentSuccessPerformanceDriver(
+        target: target,
+        prepareCount: prepareCount
+      ),
+      analysisActive: false
+    )
+    let rawResolver = ViewerPerformanceRawEventResolver(
+      store: ViewerPerformanceRawEventStoreDriver(
+        resolve: { _, _, _, completion in
+          completion(
+            .success(
+              .durable(
+                rowID: 99,
+                deviceSessionID: target.storeIdentity.deviceSessionID
+              )
+            )
+          )
+          return ViewerPerformanceRawEventStoreOperation()
+        },
+        cancel: { _ in }
+      ),
+      live: ViewerLiveEventWindow(runtimeLogicalID: uuid(1))
+    )
+    let coordinator = ViewerAnalysisModeCoordinator(
+      event: ViewerAnalysisEventDriver(
+        targetSelection: { .target(target) },
+        deactivate: { Task {} },
+        activate: { Task {} },
+        reveal: { _ in true },
+        acceptExactReveal: { _ in
+          await acceptanceGate.wait()
+          return true
+        }
+      ),
+      performanceController: performance,
+      rawResolver: rawResolver
+    )
+
+    coordinator.showPerformance()
+    await waitUntil { performance.model.diagnostics.phase == .ready }
+    let bucketIndex = try XCTUnwrap(
+      performance.model.buckets.firstIndex {
+        $0.numeric.accumulator(for: .cpuPercent).representative != nil
+      }
+    )
+    coordinator.openRawEvent(bucketIndex: bucketIndex, metric: .cpuPercent)
+    await waitUntil { acceptanceGate.hasEntered }
+
+    coordinator.showEvents()
+    acceptanceGate.open()
+    await waitUntil {
+      coordinator.mode == .events && coordinator.diagnostics.pendingTransitionCount == 0
+    }
+
+    XCTAssertEqual(coordinator.eventRevealRevision, 0)
+    XCTAssertNil(coordinator.guidance)
+    await coordinator.sealAndWait().value
+  }
+
+  @MainActor
+  func testImmediatePerformanceCloseBeforeRawTaskStartsCannotRevealEvent() async throws {
+    let target = try makeCurrentTarget()
+    let prepareCount = LockedTestCounter()
+    let revealCount = LockedTestCounter()
+    let performance = ViewerPerformanceDashboardController(
+      driver: try immediateCurrentSuccessPerformanceDriver(
+        target: target,
+        prepareCount: prepareCount
+      ),
+      analysisActive: false
+    )
+    let coordinator = ViewerAnalysisModeCoordinator(
+      event: ViewerAnalysisEventDriver(
+        targetSelection: { .target(target) },
+        deactivate: { Task {} },
+        activate: { Task {} },
+        reveal: { _ in
+          revealCount.increment()
+          return true
+        }
+      ),
+      performanceController: performance,
+      rawResolver: ViewerPerformanceRawEventResolver(
+        store: ViewerPerformanceRawEventStoreDriver(
+          resolve: { _, _, _, completion in
+            completion(
+              .success(
+                .durable(
+                  rowID: 99,
+                  deviceSessionID: target.storeIdentity.deviceSessionID
+                )
+              )
+            )
+            return ViewerPerformanceRawEventStoreOperation()
+          },
+          cancel: { _ in }
+        ),
+        live: ViewerLiveEventWindow(runtimeLogicalID: uuid(1))
+      )
+    )
+
+    coordinator.showPerformance()
+    await waitUntil { performance.model.diagnostics.phase == .ready }
+    let bucketIndex = try XCTUnwrap(
+      performance.model.buckets.firstIndex {
+        $0.numeric.accumulator(for: .cpuPercent).representative != nil
+      }
+    )
+
+    coordinator.openRawEvent(bucketIndex: bucketIndex, metric: .cpuPercent)
+    coordinator.showEvents()
+    await waitUntil { coordinator.diagnostics.pendingTransitionCount == 0 }
+
+    XCTAssertEqual(coordinator.mode, .events)
+    XCTAssertEqual(coordinator.eventRevealRevision, 0)
+    XCTAssertEqual(revealCount.value, 0)
+    await coordinator.sealAndWait().value
+  }
+
+  @MainActor
+  func testPopulatedPerformanceWindowDistinguishesSameNameDevicesAtMinimumSize() async throws {
+    let firstID = uuid(2)
+    let secondID = uuid(4)
+    let firstTarget = try makeCurrentTarget()
+    let secondTarget = try ViewerPerformanceDashboardTarget.current(
+      source: .current(runtimeLogicalID: uuid(1), connectionID: secondID),
+      recordingID: 11,
+      deviceSessionID: 18,
+      deviceStartMonotonicNanoseconds: 0
+    )
+    let prepareCount = LockedTestCounter()
+    let performance = ViewerPerformanceDashboardController(
+      driver: try immediateCurrentSuccessPerformanceDriver(
+        target: firstTarget,
+        prepareCount: prepareCount
+      ),
+      analysisActive: false
+    )
+    let coordinator = ViewerAnalysisModeCoordinator(
+      event: ViewerAnalysisEventDriver(
+        targetSelection: { .guidance(.selectOneDevice) },
+        targetSelectionForDevice: { deviceID in
+          switch deviceID {
+          case firstID: return .target(firstTarget)
+          case secondID: return .target(secondTarget)
+          default: return .guidance(.selectOneDevice)
+          }
+        },
+        performanceDevices: {
+          [
+            self.performanceOption(
+              id: firstID,
+              subtitle: "App 00000001 · connection-1",
+              isEligible: true
+            ),
+            self.performanceOption(
+              id: secondID,
+              subtitle: "App 00000002 · connection-1",
+              isEligible: true
+            ),
+          ]
+        },
+        selectedEventDeviceIDs: { [firstID] },
+        usesIndependentPerformanceDeviceSelection: true,
+        deactivate: { Task {} },
+        activate: { Task {} },
+        reveal: { _ in true }
+      ),
+      performanceController: performance,
+      rawResolver: makeRawResolver(runtimeLogicalID: uuid(1))
+    )
+    coordinator.showPerformance()
+    await waitUntil { performance.model.diagnostics.phase == .ready }
+
+    for (appearanceName, appearance) in [
+      ("light", NSAppearance.Name.aqua),
+      ("dark", NSAppearance.Name.darkAqua),
+    ] {
+      let hostingView = NSHostingView(
+        rootView:
+          ViewerPerformanceWindowContent(
+            coordinator: coordinator,
+            showViewer: {}
+          )
+          .frame(maxWidth: .infinity, maxHeight: .infinity)
+          .background(Color(nsColor: .windowBackgroundColor))
+      )
+      hostingView.appearance = NSAppearance(named: appearance)
+      hostingView.frame = NSRect(
+        x: 0,
+        y: 0,
+        width: ViewerPerformanceWindowLayout.minimumWidth,
+        height: ViewerPerformanceWindowLayout.minimumHeight
+      )
+      hostingView.layoutSubtreeIfNeeded()
+      hostingView.displayIfNeeded()
+
+      let popupTitles = descendantViews(of: NSPopUpButton.self, in: hostingView)
+        .flatMap { $0.itemTitles }
+      XCTAssertTrue(
+        popupTitles.contains("NearWire Demo — App 00000001 · connection-1")
+      )
+      XCTAssertTrue(
+        popupTitles.contains("NearWire Demo — App 00000002 · connection-1")
+      )
+      XCTAssertFalse(descendantViews(of: NSButton.self, in: hostingView).isEmpty)
+      let data = try XCTUnwrap(renderedPNGData(of: hostingView))
+      let image = try XCTUnwrap(NSImage(data: data))
+      let attachment = XCTAttachment(image: image)
+      attachment.name = "NearWire Performance populated \(appearanceName) minimum"
+      attachment.lifetime = .keepAlways
+      add(attachment)
+    }
+
+    await coordinator.sealAndWait().value
+  }
+
+  @MainActor
+  func testUnavailablePerformanceWindowKeepsShowViewerActionAtMinimumSize() throws {
+    for (title, description) in [
+      (
+        "Preparing Performance",
+        "The Performance workspace will appear when the Viewer runtime is ready."
+      ),
+      (
+        "Performance Unavailable",
+        "Show the main Viewer window to retry the runtime. Performance will update automatically when it is ready."
+      ),
+    ] {
+      let actionCount = LockedTestCounter()
+      let unavailableView = ViewerPerformanceUnavailableView(
+        title: title,
+        description: description,
+        showViewer: { actionCount.increment() }
+      )
+      let hostingView = NSHostingView(
+        rootView: unavailableView
+      )
+      hostingView.appearance = NSAppearance(named: .aqua)
+      hostingView.frame = NSRect(
+        x: 0,
+        y: 0,
+        width: ViewerPerformanceWindowLayout.minimumWidth,
+        height: ViewerPerformanceWindowLayout.minimumHeight
+      )
+      hostingView.layoutSubtreeIfNeeded()
+      hostingView.displayIfNeeded()
+
+      unavailableView.performShowViewer()
+      XCTAssertEqual(actionCount.value, 1)
+      XCTAssertEqual(
+        ViewerPerformanceUnavailableView.showViewerAccessibilityIdentifier,
+        "nearwire.performance.show-viewer"
+      )
+      let data = try XCTUnwrap(renderedPNGData(of: hostingView))
+      let image = try XCTUnwrap(NSImage(data: data))
+      XCTAssertEqual(
+        image.size,
+        CGSize(
+          width: ViewerPerformanceWindowLayout.minimumWidth,
+          height: ViewerPerformanceWindowLayout.minimumHeight
+        )
+      )
+    }
   }
 
   @MainActor
@@ -6624,7 +7481,7 @@ final class ViewerAnalysisModeCoordinatorTests: XCTestCase {
         targetSelection: { .target(target) },
         deactivate: { Task {} },
         activate: { Task {} },
-        reveal: { _ in }
+        reveal: { _ in true }
       ),
       performanceController: performance,
       rawResolver: makeRawResolver(runtimeLogicalID: UUID())
@@ -6678,7 +7535,7 @@ final class ViewerAnalysisModeCoordinatorTests: XCTestCase {
         targetSelection: { selection.value },
         deactivate: { Task {} },
         activate: { Task {} },
-        reveal: { _ in },
+        reveal: { _ in true },
         rematerializeStore: {
           Task { @MainActor in
             await rematerialization.wait()
@@ -6726,7 +7583,7 @@ final class ViewerAnalysisModeCoordinatorTests: XCTestCase {
           activationCount.increment()
           return Task {}
         },
-        reveal: { _ in },
+        reveal: { _ in true },
         setRematerializationHandler: { handlerBox.handler = $0 }
       ),
       performanceController: performance,
@@ -6781,7 +7638,7 @@ final class ViewerAnalysisModeCoordinatorTests: XCTestCase {
         targetSelection: { selection.value },
         deactivate: { Task {} },
         activate: { Task {} },
-        reveal: { _ in },
+        reveal: { _ in true },
         setRematerializationHandler: { handlerBox.handler = $0 }
       ),
       performanceController: performance,
@@ -6881,6 +7738,20 @@ final class ViewerAnalysisModeCoordinatorTests: XCTestCase {
         deviceStartMonotonicNanoseconds: 10,
         deviceEndMonotonicNanoseconds: 100
       )
+    )
+  }
+
+  private func performanceOption(
+    id: UUID,
+    subtitle: String,
+    isEligible: Bool
+  ) -> ViewerPerformanceDeviceOption {
+    ViewerPerformanceDeviceOption(
+      id: id,
+      title: "NearWire Demo",
+      subtitle: subtitle,
+      state: isEligible ? "active" : "recent",
+      isEligible: isEligible
     )
   }
 
@@ -7031,7 +7902,7 @@ final class ViewerAnalysisModeCoordinatorTests: XCTestCase {
   ) async {
     for _ in 0..<2_000 {
       if condition() { return }
-      await Task.yield()
+      try? await Task.sleep(nanoseconds: 1_000_000)
     }
     XCTFail("Timed out waiting for analysis coordination", file: file, line: line)
   }
@@ -7044,6 +7915,34 @@ private final class AnalysisTargetSelectionBox {
   init(_ value: ViewerPerformanceTargetSelection) {
     self.value = value
   }
+}
+
+@MainActor
+private final class AnalysisDeviceSelectionBox {
+  var value: Set<UUID>
+
+  init(_ value: Set<UUID>) {
+    self.value = value
+  }
+}
+
+@MainActor
+private final class AnalysisPerformanceDeviceOptionsBox {
+  var value: [ViewerPerformanceDeviceOption]
+
+  init(_ value: [ViewerPerformanceDeviceOption]) {
+    self.value = value
+  }
+}
+
+@MainActor
+private final class AnalysisSelectionHandlerBox {
+  var handler: ViewerAnalysisEventDriver.Handler?
+}
+
+@MainActor
+private final class AnalysisEventIdentityBox {
+  var value: ViewerExplorerEventIdentity?
 }
 
 @MainActor
@@ -7221,7 +8120,7 @@ final class ViewerFoundationTests: XCTestCase {
   }
 
   @MainActor
-  func testApplicationModelStartsOnceAndStopsIdempotently() async throws {
+  func testSupportedWindowAppearancesStartOneRuntimeAndStopIdempotently() async throws {
     let generationCount = LockedTestCounter()
     let listener = FakeViewerSecureListener(
       eventsOnStart: [.ready(port: 49_152), .serviceRegistered(exact: true)]
@@ -7245,8 +8144,8 @@ final class ViewerFoundationTests: XCTestCase {
       )
     )
 
-    model.openWindow()
-    model.openWindow()
+    ViewerWindowRuntimeLifecycle.ensureRuntime(for: model, isRunningUnitTests: false)
+    ViewerWindowRuntimeLifecycle.ensureRuntime(for: model, isRunningUnitTests: false)
     await waitForStatus(.listening(code: "ABCDEF", paused: false), in: model)
 
     XCTAssertEqual(model.status, .listening(code: "ABCDEF", paused: false))
@@ -7466,8 +8365,7 @@ final class ViewerFoundationTests: XCTestCase {
     XCTAssertEqual(
       ViewerWorkspaceLayout.regions,
       [
-        .devices, .eventTimeline, .eventInspector, .performanceDashboard,
-        .controlComposer,
+        .devices, .eventTimeline, .eventInspector, .controlComposer,
       ]
     )
     XCTAssertGreaterThanOrEqual(
@@ -7481,6 +8379,13 @@ final class ViewerFoundationTests: XCTestCase {
     XCTAssertGreaterThan(hostingView.fittingSize.width, 0)
     XCTAssertGreaterThan(hostingView.fittingSize.height, 0)
     XCTAssertEqual(model.status, .stopped)
+  }
+
+  @MainActor
+  func testApplicationTerminatesOnlyAfterTheLastViewerWindowCloses() {
+    XCTAssertTrue(
+      ViewerAppDelegate().applicationShouldTerminateAfterLastWindowClosed(NSApplication.shared)
+    )
   }
 
   @MainActor
@@ -7575,7 +8480,66 @@ final class ViewerFoundationTests: XCTestCase {
   }
 
   @MainActor
-  func testAnalysisWorkspaceRedrawsImmediatelyFromCoordinatorModePublication() async throws {
+  func testPerformanceWindowRendersAtSupportedSizesAndAppearances() async throws {
+    let listener = FakeViewerSecureListener(
+      eventsOnStart: [.ready(port: 49_152), .serviceRegistered(exact: true)]
+    )
+    let model = makeApplicationModel(
+      listenerFactory: LockedListenerFactory([listener]),
+      pairingCodes: LockedPairingCodeSequence(["ABCDEF"])
+    )
+    model.openWindow()
+    await waitForStatus(.listening(code: "ABCDEF", paused: false), in: model)
+
+    let sizes: [(String, CGSize)] = [
+      (
+        "minimum",
+        CGSize(
+          width: ViewerPerformanceWindowLayout.minimumWidth,
+          height: ViewerPerformanceWindowLayout.minimumHeight
+        )
+      ),
+      (
+        "default",
+        CGSize(
+          width: ViewerPerformanceWindowLayout.defaultWidth,
+          height: ViewerPerformanceWindowLayout.defaultHeight
+        )
+      ),
+      ("wide", CGSize(width: 1_440, height: 900)),
+    ]
+    let appearances: [(String, NSAppearance.Name)] = [
+      ("light", .aqua),
+      ("dark", .darkAqua),
+    ]
+
+    for (appearanceName, appearance) in appearances {
+      for (sizeName, size) in sizes {
+        let hostingView = NSHostingView(
+          rootView: ViewerPerformanceWindowRootView(model: model)
+        )
+        hostingView.appearance = NSAppearance(named: appearance)
+        hostingView.frame = NSRect(origin: .zero, size: size)
+        hostingView.layoutSubtreeIfNeeded()
+        hostingView.displayIfNeeded()
+
+        let data = try XCTUnwrap(renderedPNGData(of: hostingView))
+        let image = try XCTUnwrap(NSImage(data: data))
+        XCTAssertEqual(image.size, size)
+        XCTAssertGreaterThan(hostingView.fittingSize.width, 0)
+        XCTAssertGreaterThan(hostingView.fittingSize.height, 0)
+        let attachment = XCTAttachment(image: image)
+        attachment.name = "NearWire Performance \(appearanceName) \(sizeName)"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+      }
+    }
+
+    _ = await model.prepareForTermination()
+  }
+
+  @MainActor
+  func testEventWorkspaceDoesNotRedrawFromPerformanceWindowPublication() async throws {
     let runtimeLogicalID = UUID()
     let performanceDriver = ViewerPerformanceProjectionDriver(
       prepare: { _, _, _, completion in
@@ -7616,13 +8580,13 @@ final class ViewerFoundationTests: XCTestCase {
         targetSelection: { .guidance(.selectOneDevice) },
         deactivate: { Task {} },
         activate: { Task {} },
-        reveal: { _ in }
+        reveal: { _ in true }
       ),
       performanceController: performance,
       rawResolver: rawResolver
     )
     let hostingView = NSHostingView(
-      rootView: ViewerAnalysisWorkspacePane(analysis: coordinator, explorer: nil)
+      rootView: ViewerAnalysisWorkspacePane(explorer: nil)
     )
     hostingView.frame = NSRect(x: 0, y: 0, width: 720, height: 500)
     hostingView.layoutSubtreeIfNeeded()
@@ -7637,7 +8601,7 @@ final class ViewerFoundationTests: XCTestCase {
     let performanceImage = try XCTUnwrap(renderedPNGData(of: hostingView))
 
     XCTAssertEqual(coordinator.mode, ViewerAnalysisMode.performance)
-    XCTAssertNotEqual(eventsImage, performanceImage)
+    XCTAssertEqual(eventsImage, performanceImage)
     await coordinator.sealAndWait().value
   }
 
@@ -16857,9 +17821,11 @@ private final class AsyncTestGate: @unchecked Sendable {
   private let lock = NSLock()
   private let entered = DispatchSemaphore(value: 0)
   private var isOpen = false
+  private var enteredCount = 0
   private var continuations: [CheckedContinuation<Void, Never>] = []
 
   func wait() async {
+    markEntered()
     entered.signal()
     await withCheckedContinuation { continuation in
       lock.lock()
@@ -16871,6 +17837,18 @@ private final class AsyncTestGate: @unchecked Sendable {
         lock.unlock()
       }
     }
+  }
+
+  var hasEntered: Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    return enteredCount > 0
+  }
+
+  private func markEntered() {
+    lock.lock()
+    enteredCount += 1
+    lock.unlock()
   }
 
   func waitUntilEntered() {
