@@ -26,7 +26,7 @@ struct ViewerPerformanceCurrentFreshnessReceipt: Equatable, Sendable {
     guard sourceGeneration > 0, deadlineRevision > 0,
       (latestEventKey == nil) == (absoluteDeadlineMonotonicNanoseconds == nil),
       absoluteDeadlineMonotonicNanoseconds.map({ $0 >= 0 }) ?? true
-    else { throw ViewerPerformanceStoreFailure.invalidCarrier }
+    else { throw ViewerPerformanceFailure.invalidCarrier }
     self.sourceGeneration = sourceGeneration
     self.latestEventKey = latestEventKey
     self.absoluteDeadlineMonotonicNanoseconds = absoluteDeadlineMonotonicNanoseconds
@@ -34,33 +34,12 @@ struct ViewerPerformanceCurrentFreshnessReceipt: Equatable, Sendable {
   }
 }
 
-struct ViewerPerformanceHistoricalFreshnessReceipt: Equatable, Sendable {
-  let sourceGeneration: UInt64
-  let source: ViewerPerformanceSource
-  let frozenUpperMonotonicNanoseconds: Int64
-
-  init(
-    sourceGeneration: UInt64,
-    source: ViewerPerformanceSource,
-    frozenUpperMonotonicNanoseconds: Int64
-  ) throws {
-    guard sourceGeneration > 0, frozenUpperMonotonicNanoseconds >= 0,
-      case .historical = source
-    else { throw ViewerPerformanceStoreFailure.invalidCarrier }
-    self.sourceGeneration = sourceGeneration
-    self.source = source
-    self.frozenUpperMonotonicNanoseconds = frozenUpperMonotonicNanoseconds
-  }
-}
-
 enum ViewerPerformanceFreshnessReceipt: Equatable, Sendable {
   case current(ViewerPerformanceCurrentFreshnessReceipt)
-  case historical(ViewerPerformanceHistoricalFreshnessReceipt)
 
   var sourceGeneration: UInt64 {
     switch self {
     case .current(let receipt): return receipt.sourceGeneration
-    case .historical(let receipt): return receipt.sourceGeneration
     }
   }
 }
@@ -79,7 +58,7 @@ struct ViewerPerformanceProjectionPublication: Equatable, Sendable {
   ) throws -> ViewerPerformanceProjectionPublication {
     guard case .current(let receipt) = freshnessReceipt else { return self }
     guard let currentUptimeNanoseconds, currentUptimeNanoseconds >= 0 else {
-      throw ViewerPerformanceStoreFailure.invalidScope
+      throw ViewerPerformanceFailure.invalidScope
     }
     guard let deadline = receipt.absoluteDeadlineMonotonicNanoseconds,
       currentUptimeNanoseconds >= deadline
@@ -94,11 +73,6 @@ struct ViewerPerformanceProjectionPublication: Equatable, Sendable {
       decodeTurnCount: decodeTurnCount
     )
   }
-}
-
-enum ViewerPerformanceProjectionCompletion: Equatable, Sendable {
-  case projected(ViewerPerformanceProjectionPublication)
-  case storageUnavailable(source: ViewerPerformanceSource, sourceGeneration: UInt64)
 }
 
 private struct ViewerPerformanceProjectionReducer: Sendable {
@@ -123,7 +97,7 @@ private struct ViewerPerformanceProjectionReducer: Sendable {
     bounds: ViewerPerformanceRangeBounds,
     deviceStartMonotonicNanoseconds: Int64
   ) throws {
-    guard sourceGeneration > 0 else { throw ViewerPerformanceStoreFailure.invalidScope }
+    guard sourceGeneration > 0 else { throw ViewerPerformanceFailure.invalidScope }
     self.source = source
     self.sourceGeneration = sourceGeneration
     self.bounds = bounds
@@ -138,11 +112,11 @@ private struct ViewerPerformanceProjectionReducer: Sendable {
   mutating func consume(_ event: ViewerPerformanceEventCarrier) throws {
     try validateSource(event)
     guard event.viewerMonotonicNanoseconds <= bounds.upperMonotonicNanoseconds else {
-      throw ViewerPerformanceStoreFailure.invalidCarrier
+      throw ViewerPerformanceFailure.invalidCarrier
     }
     if let previousEvent {
       guard ViewerPerformanceCanonicalOrder.eventPrecedes(previousEvent, event) else {
-        throw ViewerPerformanceStoreFailure.invalidCarrier
+        throw ViewerPerformanceFailure.invalidCarrier
       }
     }
 
@@ -209,13 +183,10 @@ private struct ViewerPerformanceProjectionReducer: Sendable {
     case .current(let runtimeLogicalID, let connectionID):
       expectedRuntime = runtimeLogicalID
       expectedConnection = connectionID
-    case .historical(_, _, let recordingLogicalID, let deviceLogicalID):
-      expectedRuntime = recordingLogicalID
-      expectedConnection = deviceLogicalID
     }
     guard event.key.runtimeLogicalID == expectedRuntime,
       event.key.connectionID == expectedConnection
-    else { throw ViewerPerformanceStoreFailure.invalidCarrier }
+    else { throw ViewerPerformanceFailure.invalidCarrier }
   }
 
   private static func increment(_ value: UInt64) -> UInt64 {
@@ -225,7 +196,6 @@ private struct ViewerPerformanceProjectionReducer: Sendable {
 
 enum ViewerPerformanceDecodeTurnOutcome: Equatable, Sendable {
   case processed(Int)
-  case needsEventPage
   case eventsComplete
 }
 
@@ -237,13 +207,9 @@ struct ViewerPerformanceProjectionSession: Sendable {
   private let sourceGeneration: UInt64
 
   private var reducer: ViewerPerformanceProjectionReducer
-  private var liveEvents: [ViewerPerformanceEventCarrier]
-  private var liveIndex = 0
-  private var pendingEventPage: ViewerPerformanceEventPage?
-  private var storeEventIndex = 0
-  private var storeEventsComplete: Bool
+  private let events: [ViewerPerformanceEventCarrier]
+  private var eventIndex = 0
   private var gapProjection: ViewerPerformanceGapProjection?
-  private var storeGapsComplete: Bool
   private(set) var decodeTurnCount: UInt64 = 0
 
   init(
@@ -255,57 +221,33 @@ struct ViewerPerformanceProjectionSession: Sendable {
   ) throws {
     switch receipt.source {
     case .current(let runtimeLogicalID, let connectionID):
-      guard let liveSlice = receipt.liveSlice,
-        liveSlice.runtimeLogicalID == runtimeLogicalID,
-        liveSlice.connectionID == connectionID,
-        Int64(exactly: liveSlice.anchorMonotonicNanoseconds)
+      guard receipt.liveSlice.runtimeLogicalID == runtimeLogicalID,
+        receipt.liveSlice.connectionID == connectionID,
+        Int64(exactly: receipt.liveSlice.anchorMonotonicNanoseconds)
           == bounds.upperMonotonicNanoseconds
-      else { throw ViewerPerformanceStoreFailure.invalidScope }
-    case .historical(let recordingID, let deviceSessionID, _, _):
-      guard receipt.liveSlice == nil, let scope = receipt.storeScope,
-        scope.recordingID == recordingID,
-        scope.deviceSessionID == deviceSessionID,
-        scope.upperMonotonicNanoseconds == bounds.upperMonotonicNanoseconds
-      else { throw ViewerPerformanceStoreFailure.invalidScope }
-    }
-    if let scope = receipt.storeScope {
-      guard scope.lowerMonotonicNanoseconds <= bounds.lowerMonotonicNanoseconds,
-        scope.upperMonotonicNanoseconds == bounds.upperMonotonicNanoseconds
-      else { throw ViewerPerformanceStoreFailure.invalidScope }
+      else { throw ViewerPerformanceFailure.invalidScope }
     }
     self.receipt = receipt
     self.rangeKind = rangeKind
     self.bounds = bounds
     self.sourceGeneration = sourceGeneration
-    coverage = receipt.storeScope == nil ? .liveWindowOnly : .completeRange
+    coverage = .liveWindowOnly
     reducer = try ViewerPerformanceProjectionReducer(
       source: receipt.source,
       sourceGeneration: sourceGeneration,
       bounds: bounds,
       deviceStartMonotonicNanoseconds: deviceStartMonotonicNanoseconds
     )
-    liveEvents = receipt.liveSlice?.events ?? []
-    storeEventsComplete = receipt.storeScope == nil
-    storeGapsComplete = receipt.storeScope == nil
-  }
-
-  var needsEventPage: Bool {
-    receipt.storeScope != nil && !storeEventsComplete && pendingEventPage == nil
+    events = receipt.liveSlice.events
   }
 
   var eventsAreComplete: Bool {
-    storeEventsComplete && pendingEventPage == nil && liveIndex == liveEvents.count
+    eventIndex == events.count
   }
 
-  var needsGapPage: Bool {
-    eventsAreComplete && receipt.storeScope != nil && !storeGapsComplete
-  }
+  var isReadyToFinalize: Bool { eventsAreComplete }
 
-  var isReadyToFinalize: Bool { eventsAreComplete && storeGapsComplete }
-
-  var retainedRawEventCount: Int {
-    liveEvents.count + (pendingEventPage?.events.count ?? 0)
-  }
+  var retainedRawEventCount: Int { events.count }
 
   var activeAccountedBytes: Int {
     get throws {
@@ -321,44 +263,21 @@ struct ViewerPerformanceProjectionSession: Sendable {
     }
   }
 
-  mutating func accept(eventPage: ViewerPerformanceEventPage) throws {
-    guard let scope = receipt.storeScope, eventPage.scope == scope,
-      pendingEventPage == nil, !storeEventsComplete,
-      eventPage.events.allSatisfy({
-        $0.viewerMonotonicNanoseconds >= scope.lowerMonotonicNanoseconds
-          && $0.viewerMonotonicNanoseconds <= scope.upperMonotonicNanoseconds
-      })
-    else { throw ViewerPerformanceStoreFailure.invalidContinuation }
-    pendingEventPage = eventPage
-    storeEventIndex = 0
-  }
-
   mutating func runDecodeTurn() throws -> ViewerPerformanceDecodeTurnOutcome {
     guard !eventsAreComplete else { return .eventsComplete }
-    if receipt.storeScope != nil, pendingEventPage == nil { return .needsEventPage }
     var processed = 0
     while processed < ViewerPerformancePipelineLimits.maximumDecodedEventsPerTurn,
-      let event = try nextMergedEvent()
+      eventIndex < events.count
     {
-      try reducer.consume(event)
+      try reducer.consume(events[eventIndex])
+      eventIndex += 1
       processed += 1
     }
     if processed > 0 {
       decodeTurnCount = Self.increment(decodeTurnCount)
       return .processed(processed)
     }
-    finishExhaustedEventPageIfNeeded()
-    if eventsAreComplete { return .eventsComplete }
-    return .needsEventPage
-  }
-
-  mutating func accept(gapPage: ViewerPerformanceGapPage) throws {
-    guard eventsAreComplete, receipt.storeScope != nil, !storeGapsComplete else {
-      throw ViewerPerformanceStoreFailure.invalidContinuation
-    }
-    try ensureGapProjection()
-    gapProjection?.consume(storePage: gapPage)
-    if !gapPage.hasMoreRows { storeGapsComplete = true }
+    return .eventsComplete
   }
 
   mutating func finalize(
@@ -367,7 +286,7 @@ struct ViewerPerformanceProjectionSession: Sendable {
     currentUptimeNanoseconds: Int64?
   ) throws -> ViewerPerformanceProjectionPublication {
     guard sourceGeneration == self.sourceGeneration, deadlineRevision > 0, isReadyToFinalize else {
-      throw ViewerPerformanceStoreFailure.invalidContinuation
+      throw ViewerPerformanceFailure.invalidContinuation
     }
     try ensureGapProjection()
     let reference: Int64
@@ -375,36 +294,22 @@ struct ViewerPerformanceProjectionSession: Sendable {
     case .current:
       guard let currentUptimeNanoseconds,
         currentUptimeNanoseconds >= bounds.upperMonotonicNanoseconds
-      else { throw ViewerPerformanceStoreFailure.invalidScope }
+      else { throw ViewerPerformanceFailure.invalidScope }
       reference = currentUptimeNanoseconds
-    case .historical:
-      reference = bounds.upperMonotonicNanoseconds
     }
     let (result, cards) = try reducer.finalize(
       gapProjection: gapProjection!,
       coverage: coverage,
       referenceMonotonicNanoseconds: reference
     )
-    let freshnessReceipt: ViewerPerformanceFreshnessReceipt
-    switch receipt.source {
-    case .current:
-      freshnessReceipt = .current(
-        try ViewerPerformanceCurrentFreshnessReceipt(
-          sourceGeneration: sourceGeneration,
-          latestEventKey: cards.latestEventKey,
-          absoluteDeadlineMonotonicNanoseconds: cards.freshnessDeadlineMonotonicNanoseconds,
-          deadlineRevision: deadlineRevision
-        )
+    let freshnessReceipt = ViewerPerformanceFreshnessReceipt.current(
+      try ViewerPerformanceCurrentFreshnessReceipt(
+        sourceGeneration: sourceGeneration,
+        latestEventKey: cards.latestEventKey,
+        absoluteDeadlineMonotonicNanoseconds: cards.freshnessDeadlineMonotonicNanoseconds,
+        deadlineRevision: deadlineRevision
       )
-    case .historical:
-      freshnessReceipt = .historical(
-        try ViewerPerformanceHistoricalFreshnessReceipt(
-          sourceGeneration: sourceGeneration,
-          source: receipt.source,
-          frozenUpperMonotonicNanoseconds: bounds.upperMonotonicNanoseconds
-        )
-      )
-    }
+    )
     return ViewerPerformanceProjectionPublication(
       cacheKey: try ViewerPerformanceCacheKey(
         receipt: receipt,
@@ -420,87 +325,16 @@ struct ViewerPerformanceProjectionSession: Sendable {
     )
   }
 
-  private mutating func nextMergedEvent() throws -> ViewerPerformanceEventCarrier? {
-    guard let page = pendingEventPage else {
-      guard receipt.storeScope == nil, liveIndex < liveEvents.count else { return nil }
-      defer { liveIndex += 1 }
-      return liveEvents[liveIndex]
-    }
-    let storeEvent = storeEventIndex < page.events.count ? page.events[storeEventIndex] : nil
-    let liveEvent = liveIndex < liveEvents.count ? liveEvents[liveIndex] : nil
-    switch (storeEvent, liveEvent) {
-    case (let store?, let live?):
-      if store.key == live.key {
-        storeEventIndex += 1
-        liveIndex += 1
-        return try ViewerPerformanceEventReconciler.reconcile(store, live)
-      }
-      if ViewerPerformanceCanonicalOrder.eventPrecedes(live, store) {
-        liveIndex += 1
-        return live
-      }
-      storeEventIndex += 1
-      return store
-    case (let store?, nil):
-      storeEventIndex += 1
-      return store
-    case (nil, let live?):
-      if page.isComplete
-        || live.viewerMonotonicNanoseconds
-          < (page.continuation?.lastExaminedMonotonicNanoseconds ?? Int64.min)
-      {
-        liveIndex += 1
-        return live
-      }
-      return nil
-    case (nil, nil):
-      return nil
-    }
-  }
-
-  private mutating func finishExhaustedEventPageIfNeeded() {
-    guard let page = pendingEventPage, storeEventIndex == page.events.count else { return }
-    if !page.isComplete,
-      let live = liveIndex < liveEvents.count ? liveEvents[liveIndex] : nil,
-      live.viewerMonotonicNanoseconds
-        < (page.continuation?.lastExaminedMonotonicNanoseconds ?? Int64.min)
-    {
-      return
-    }
-    pendingEventPage = nil
-    storeEventIndex = 0
-    if page.isComplete { storeEventsComplete = true }
-  }
-
   private mutating func ensureGapProjection() throws {
-    guard eventsAreComplete else { throw ViewerPerformanceStoreFailure.invalidContinuation }
+    guard eventsAreComplete else { throw ViewerPerformanceFailure.invalidContinuation }
     guard gapProjection == nil else { return }
     var projection = ViewerPerformanceGapProjection(wallIndex: reducer.makeWallIndex())
-    if let liveSlice = receipt.liveSlice { try projection.consume(liveSlice: liveSlice) }
+    try projection.consume(liveSlice: receipt.liveSlice)
     gapProjection = projection
   }
 
   private static func increment(_ value: UInt64) -> UInt64 {
     value == UInt64.max ? value : value + 1
-  }
-}
-
-enum ViewerPerformanceStoreFailureResolution: Equatable, Sendable {
-  case restartWithFreshLiveOnlyFreeze
-  case publishStorageUnavailable
-  case discard
-}
-
-enum ViewerPerformanceStoreFailurePolicy {
-  static func resolution(
-    for source: ViewerPerformanceSource,
-    failure: ViewerStoreExplorerFailure
-  ) -> ViewerPerformanceStoreFailureResolution {
-    guard failure == .unavailable else { return .discard }
-    switch source {
-    case .current: return .restartWithFreshLiveOnlyFreeze
-    case .historical: return .publishStorageUnavailable
-    }
   }
 }
 
@@ -517,7 +351,7 @@ struct ViewerPerformanceRefreshToken: Equatable, Sendable {
     rangeKind: ViewerPerformanceRangeKind
   ) throws {
     guard sourceGeneration > 0, sequence > 0 else {
-      throw ViewerPerformanceStoreFailure.invalidCarrier
+      throw ViewerPerformanceFailure.invalidCarrier
     }
     self.sourceGeneration = sourceGeneration
     self.sequence = sequence
@@ -649,8 +483,8 @@ final class ViewerPerformanceLatestDeliveryPump<Value: Sendable>: @unchecked Sen
   private var sealed = false
   private var lastDeliveryNanoseconds: UInt64?
   private var workID: UUID?
-  private var storedScheduleCount: UInt64 = 0
-  private var storedDeliveryCount: UInt64 = 0
+  private var scheduleCountValue: UInt64 = 0
+  private var deliveryCountValue: UInt64 = 0
 
   init(
     scheduler: ViewerLiveRefreshScheduler = .live,
@@ -677,7 +511,7 @@ final class ViewerPerformanceLatestDeliveryPump<Value: Sendable>: @unchecked Sen
         workID = id
         workTracker.begin(id: id)
       }
-      storedScheduleCount = Self.increment(storedScheduleCount)
+      scheduleCountValue = Self.increment(scheduleCountValue)
       delay = nextDelayLocked(now: scheduler.now())
       shouldSchedule = true
     }
@@ -720,13 +554,13 @@ final class ViewerPerformanceLatestDeliveryPump<Value: Sendable>: @unchecked Sen
   var scheduleCount: UInt64 {
     lock.lock()
     defer { lock.unlock() }
-    return storedScheduleCount
+    return scheduleCountValue
   }
 
   var deliveryCount: UInt64 {
     lock.lock()
     defer { lock.unlock() }
-    return storedDeliveryCount
+    return deliveryCountValue
   }
 
   private func schedule(after delay: UInt64) {
@@ -749,7 +583,7 @@ final class ViewerPerformanceLatestDeliveryPump<Value: Sendable>: @unchecked Sen
       processing = value != nil
       if value != nil {
         lastDeliveryNanoseconds = scheduler.now()
-        storedDeliveryCount = Self.increment(storedDeliveryCount)
+        deliveryCountValue = Self.increment(deliveryCountValue)
       }
     }
     lock.unlock()
@@ -761,7 +595,7 @@ final class ViewerPerformanceLatestDeliveryPump<Value: Sendable>: @unchecked Sen
     processing = false
     if !sealed, pending != nil, !scheduled {
       scheduled = true
-      storedScheduleCount = Self.increment(storedScheduleCount)
+      scheduleCountValue = Self.increment(scheduleCountValue)
       delay = nextDelayLocked(now: scheduler.now())
       shouldSchedule = true
     } else if !processing, completionID == nil {
@@ -976,8 +810,8 @@ final class ViewerPerformanceFreshnessDeadlineOwner: @unchecked Sendable {
   private var worker: ViewerPerformanceScheduledDeadlineWork?
   private var paused = false
   private var pausedExpiryDirty = false
-  private var storedScheduleCount: UInt64 = 0
-  private var storedFireCount: UInt64 = 0
+  private var scheduleCountValue: UInt64 = 0
+  private var fireCountValue: UInt64 = 0
 
   init(scheduler: ViewerPerformanceDeadlineScheduler = .live) {
     self.scheduler = scheduler
@@ -1009,7 +843,7 @@ final class ViewerPerformanceFreshnessDeadlineOwner: @unchecked Sendable {
       return false
     }
     active = ActiveWake(receipt: current, handler: handler)
-    storedScheduleCount = Self.increment(storedScheduleCount)
+    scheduleCountValue = Self.increment(scheduleCountValue)
     // Keep the physical command inside the owner lock so a concurrent arm or invalidation cannot
     // reorder an older deadline after the latest logical receipt.
     installedWorker.schedule(after: UInt64(deadline - now))
@@ -1060,13 +894,13 @@ final class ViewerPerformanceFreshnessDeadlineOwner: @unchecked Sendable {
   var scheduleCount: UInt64 {
     lock.lock()
     defer { lock.unlock() }
-    return storedScheduleCount
+    return scheduleCountValue
   }
 
   var fireCount: UInt64 {
     lock.lock()
     defer { lock.unlock() }
-    return storedFireCount
+    return fireCountValue
   }
 
   private func fire() {
@@ -1084,7 +918,7 @@ final class ViewerPerformanceFreshnessDeadlineOwner: @unchecked Sendable {
       return
     }
     self.active = nil
-    storedFireCount = Self.increment(storedFireCount)
+    fireCountValue = Self.increment(fireCountValue)
     if paused {
       pausedExpiryDirty = true
       wake = nil

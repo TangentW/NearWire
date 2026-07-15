@@ -21,8 +21,6 @@ final class ViewerApplicationModel: ObservableObject {
   @Published private(set) var composerController: ViewerControlComposerController?
   @Published var selectedRoute: ViewerLogicalRoute?
   @Published var showsFullIdentityResetConfirmation = false
-  @Published private(set) var storageConfiguration: ViewerStorageConfiguration
-  @Published private(set) var storeStatus: ViewerStoreStatus
   @Published var requiresApproval: Bool {
     didSet {
       preferences.setRequiresApproval(requiresApproval)
@@ -44,7 +42,6 @@ final class ViewerApplicationModel: ObservableObject {
   private var isPaused = false
   private var pendingCoalescer: ViewerPendingCoalescer?
   private var sessionCoalescer: ViewerSessionSnapshotCoalescer?
-  private var storeStatusRefreshCoordinator: ViewerStoreStatusRefreshCoordinator?
   private var runtimeComponents: ViewerRuntimeComponents?
   private var sessionControl: (any ViewerSessionControlling)?
   private var terminalCleanupTask: Task<Void, Never>?
@@ -64,38 +61,7 @@ final class ViewerApplicationModel: ObservableObject {
     self.preferences = preferences
     self.dependencies = dependencies
     requiresApproval = preferences.requiresApproval()
-    let storageConfiguration = dependencies.loadStorageConfiguration()
-    self.storageConfiguration = storageConfiguration
-    storeStatus = ViewerStoreStatus(
-      state: .unavailable,
-      capacityBytes: storageConfiguration.capacityBytes,
-      logicalQuotaBytes: 0,
-      allocatedFootprintBytes: 0,
-      oldestHistoryMilliseconds: nil,
-      pinnedQuotaBytes: 0,
-      estimatedRetainedDurationMilliseconds: nil,
-      lastCleanupCategory: .none
-    )
     admissionManager.setRequiresApproval(requiresApproval)
-    let storeStatusRefreshCoordinator = ViewerStoreStatusRefreshCoordinator(
-      load: dependencies.loadStoreStatus
-    ) { [weak self] value in
-      guard let self else { return }
-      let replacedStore = value.storeGeneration != self.storeStatus.storeGeneration
-      self.storeStatus = value
-      self.runtimeComponents?.liveObservations.storeStateChanged(value.state)
-      if replacedStore {
-        self.analysisCoordinator?.noteStoreReplaced()
-      } else {
-        self.explorerController?.noteStoreChanged()
-        self.analysisCoordinator?.noteStoreChanged()
-      }
-    }
-    self.storeStatusRefreshCoordinator = storeStatusRefreshCoordinator
-    dependencies.observeStoreStatus { [weak storeStatusRefreshCoordinator] in
-      storeStatusRefreshCoordinator?.request()
-    }
-    refreshStoreStatus()
   }
 
   func openWindow() {
@@ -166,38 +132,6 @@ final class ViewerApplicationModel: ObservableObject {
     return sessionControl?.setNickname(nickname.isEmpty ? nil : nickname, route: route) ?? false
   }
 
-  func updateStorage(capacityGiB: String, historyRetentionDays: String) -> Bool {
-    guard let gibibytes = Int64(capacityGiB), let days = Int(historyRetentionDays),
-      gibibytes > 0
-    else { return false }
-    let (mebibytes, firstOverflow) = gibibytes.multipliedReportingOverflow(by: 1_024)
-    let (kibibytes, secondOverflow) = mebibytes.multipliedReportingOverflow(by: 1_024)
-    let (bytes, thirdOverflow) = kibibytes.multipliedReportingOverflow(by: 1_024)
-    guard !firstOverflow, !secondOverflow, !thirdOverflow,
-      let value = try? ViewerStorageConfiguration(
-        capacityBytes: bytes,
-        historyRetentionDays: days
-      )
-    else { return false }
-    dependencies.saveStorageConfiguration(value)
-    storageConfiguration = value
-    refreshStoreStatus()
-    return true
-  }
-
-  func cleanUpStorage() {
-    dependencies.runStoreCleanup()
-  }
-
-  func retryStorage() {
-    dependencies.retryStore()
-    refreshStoreStatus()
-  }
-
-  func refreshStoreStatus() {
-    storeStatusRefreshCoordinator?.request()
-  }
-
   var selectedSession: ViewerSessionSnapshot? {
     guard let selectedRoute else { return nil }
     return sessions.first { $0.route == selectedRoute }
@@ -234,18 +168,13 @@ final class ViewerApplicationModel: ObservableObject {
 
   func prepareForTermination() async -> ViewerCleanupOutcome {
     startupTask?.cancel()
-    let storeStatusCleanup = storeStatusRefreshCoordinator?.deactivateAndWait()
     _ = beginStopRuntime()
     guard let runtimeCleanupReceipt = shutdownReceipt else {
       status = .stopped
       return .completed
     }
-    let closeWorkingStore = dependencies.closeWorkingStore
     let terminalCleanupTask = Task {
-      async let runtimeCleanup: Void = runtimeCleanupReceipt.waitForCompletion()
-      async let statusCleanup: Void = storeStatusCleanup?.value ?? ()
-      _ = await (runtimeCleanup, statusCleanup)
-      await closeWorkingStore()
+      await runtimeCleanupReceipt.waitForCompletion()
     }
     self.terminalCleanupTask = terminalCleanupTask
     let outcome = await ViewerCleanupReceipt(cleanup: terminalCleanupTask).wait(
@@ -318,17 +247,11 @@ final class ViewerApplicationModel: ObservableObject {
     explorerController.start()
     let performanceController = ViewerPerformanceDashboardController(
       driver: ViewerPerformanceProjectionDriver(
-        live: components.liveObservations,
-        storeGateway: components.explorerInputs.storeGateway
+        live: components.liveObservations
       ),
       analysisActive: false
     )
-    let rawResolver = ViewerPerformanceRawEventResolver(
-      store: ViewerPerformanceRawEventStoreDriver(
-        gateway: components.explorerInputs.storeGateway
-      ),
-      live: components.liveObservations
-    )
+    let rawResolver = ViewerPerformanceRawEventResolver(live: components.liveObservations)
     analysisCoordinator = ViewerAnalysisModeCoordinator(
       eventController: explorerController,
       performanceController: performanceController,
@@ -338,7 +261,6 @@ final class ViewerApplicationModel: ObservableObject {
       runtimeLogicalID: runtimeLogicalID,
       sessionControl: components.sessionControl
     )
-    refreshStoreStatus()
     sessionControl = components.sessionControl
     components.sessionControl.setSnapshotHandler { snapshots in
       sessionCoalescer.submit(snapshots)

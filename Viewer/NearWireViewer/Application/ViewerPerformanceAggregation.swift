@@ -28,9 +28,7 @@ enum ViewerPerformanceAccounting {
 
   static let deterministicPeakBytes =
     ViewerPerformanceAggregationLimits.maximumLedgerBytes
-    + ViewerPerformanceLimits.maximumEventPageBytes
     + ViewerPerformanceLimits.maximumLiveSliceBytes
-    + ViewerPerformanceLimits.maximumGapPageBytes
     + ViewerPerformanceLimits.decoderBufferBytes
 
   static func resultBytes(
@@ -43,7 +41,7 @@ enum ViewerPerformanceAccounting {
       (0...ViewerPerformanceAggregationLimits.maximumDetailedGaps).contains(detailedGapCount),
       (0...ViewerPerformanceAggregationLimits.maximumInvalidDetails).contains(invalidDetailCount),
       availabilityCount == PerformanceMetricKey.allCases.count
-    else { throw ViewerPerformanceStoreFailure.limitExceeded }
+    else { throw ViewerPerformanceFailure.limitExceeded }
     return try checkedSum([
       resultBaseBytes,
       cacheKeyBytes,
@@ -70,18 +68,18 @@ enum ViewerPerformanceAccounting {
   fileprivate static func checkedSum(_ values: [Int]) throws -> Int {
     var total = 0
     for value in values {
-      guard value >= 0 else { throw ViewerPerformanceStoreFailure.limitExceeded }
+      guard value >= 0 else { throw ViewerPerformanceFailure.limitExceeded }
       let (next, overflow) = total.addingReportingOverflow(value)
-      guard !overflow else { throw ViewerPerformanceStoreFailure.limitExceeded }
+      guard !overflow else { throw ViewerPerformanceFailure.limitExceeded }
       total = next
     }
     return total
   }
 
   fileprivate static func checkedMultiply(_ lhs: Int, _ rhs: Int) throws -> Int {
-    guard lhs >= 0, rhs >= 0 else { throw ViewerPerformanceStoreFailure.limitExceeded }
+    guard lhs >= 0, rhs >= 0 else { throw ViewerPerformanceFailure.limitExceeded }
     let (value, overflow) = lhs.multipliedReportingOverflow(by: rhs)
-    guard !overflow else { throw ViewerPerformanceStoreFailure.limitExceeded }
+    guard !overflow else { throw ViewerPerformanceFailure.limitExceeded }
     return value
   }
 }
@@ -114,7 +112,7 @@ final class ViewerPerformanceMemoryLedger: @unchecked Sendable {
     bytes: Int
   ) throws -> Reservation? {
     guard bytes > 0, bytes <= ViewerPerformanceAggregationLimits.maximumLedgerBytes else {
-      throw ViewerPerformanceStoreFailure.limitExceeded
+      throw ViewerPerformanceFailure.limitExceeded
     }
     lock.lock()
     defer { lock.unlock() }
@@ -141,12 +139,12 @@ final class ViewerPerformanceMemoryLedger: @unchecked Sendable {
     to bytes: Int
   ) throws -> Reservation? {
     guard bytes > 0, bytes <= ViewerPerformanceAggregationLimits.maximumLedgerBytes else {
-      throw ViewerPerformanceStoreFailure.limitExceeded
+      throw ViewerPerformanceFailure.limitExceeded
     }
     lock.lock()
     defer { lock.unlock() }
     guard reservations[reservation.id] == reservation else {
-      throw ViewerPerformanceStoreFailure.invalidCarrier
+      throw ViewerPerformanceFailure.invalidCarrier
     }
     if bytes > reservation.bytes {
       let increase = bytes - reservation.bytes
@@ -169,7 +167,7 @@ final class ViewerPerformanceMemoryLedger: @unchecked Sendable {
     lock.lock()
     defer { lock.unlock() }
     guard reservations[reservation.id] == reservation else {
-      throw ViewerPerformanceStoreFailure.invalidCarrier
+      throw ViewerPerformanceFailure.invalidCarrier
     }
     let transferred = Reservation(id: reservation.id, owner: owner, bytes: reservation.bytes)
     reservations[reservation.id] = transferred
@@ -395,7 +393,7 @@ struct ViewerPerformanceNumericAccumulator: Equatable, Sendable {
   ) throws {
     guard sourceGeneration > 0, value.isFinite, value >= 0, viewerMonotonicNanoseconds >= 0,
       bucketCenterMonotonicNanoseconds >= 0
-    else { throw ViewerPerformanceStoreFailure.invalidCarrier }
+    else { throw ViewerPerformanceFailure.invalidCarrier }
     let priorCount = measurementCount
     measurementCount = Self.increment(measurementCount)
     minimum = min(minimum ?? value, value)
@@ -404,7 +402,7 @@ struct ViewerPerformanceNumericAccumulator: Equatable, Sendable {
       let nextAverage =
         currentAverage
         + (value - currentAverage) / Double(priorCount + 1)
-      guard nextAverage.isFinite else { throw ViewerPerformanceStoreFailure.limitExceeded }
+      guard nextAverage.isFinite else { throw ViewerPerformanceFailure.limitExceeded }
       average = nextAverage
     } else if average == nil {
       average = value
@@ -542,7 +540,7 @@ struct ViewerPerformanceCategoricalAccumulator<Value: Equatable & Sendable>: Equ
     key: ViewerEventJournalKey
   ) throws {
     guard viewerMonotonicNanoseconds >= 0 else {
-      throw ViewerPerformanceStoreFailure.invalidCarrier
+      throw ViewerPerformanceFailure.invalidCarrier
     }
     let sample = ViewerPerformanceCategoricalSample(
       value: value,
@@ -572,7 +570,7 @@ struct ViewerPerformanceBucket: Equatable, Sendable {
     guard (0..<ViewerPerformanceAggregationLimits.maximumBuckets).contains(index),
       lowerMonotonicNanoseconds >= 0,
       upperMonotonicNanoseconds >= lowerMonotonicNanoseconds
-    else { throw ViewerPerformanceStoreFailure.invalidScope }
+    else { throw ViewerPerformanceFailure.invalidScope }
     self.index = index
     self.lowerMonotonicNanoseconds = lowerMonotonicNanoseconds
     self.upperMonotonicNanoseconds = upperMonotonicNanoseconds
@@ -589,7 +587,7 @@ struct ViewerPerformanceBucket: Equatable, Sendable {
   ) throws {
     guard event.viewerMonotonicNanoseconds >= lowerMonotonicNanoseconds,
       event.viewerMonotonicNanoseconds <= upperMonotonicNanoseconds
-    else { throw ViewerPerformanceStoreFailure.invalidCarrier }
+    else { throw ViewerPerformanceFailure.invalidCarrier }
     availability.record(snapshot)
     for metric in ViewerPerformanceNumericMetric.allCases {
       let state = snapshot.state(for: metric.key)
@@ -648,7 +646,7 @@ struct ViewerPerformanceInvalidDetail: Equatable, Sendable {
     reason: ViewerPerformanceInvalidSnapshotReason
   ) throws {
     guard viewerMonotonicNanoseconds >= 0 else {
-      throw ViewerPerformanceStoreFailure.invalidCarrier
+      throw ViewerPerformanceFailure.invalidCarrier
     }
     self.key = key
     self.viewerMonotonicNanoseconds = viewerMonotonicNanoseconds
@@ -724,7 +722,7 @@ struct ViewerPerformanceAggregationResult: Equatable, Sendable {
     guard buckets.count <= ViewerPerformanceAggregationLimits.maximumBuckets,
       buckets.enumerated().allSatisfy({ $0.offset == $0.element.index }),
       availability.map(\.key) == PerformanceMetricKey.allCases
-    else { throw ViewerPerformanceStoreFailure.limitExceeded }
+    else { throw ViewerPerformanceFailure.limitExceeded }
     let accountedBytes = try ViewerPerformanceAccounting.resultBytes(
       bucketCount: buckets.count,
       detailedGapCount: details.gaps.count,
@@ -732,7 +730,7 @@ struct ViewerPerformanceAggregationResult: Equatable, Sendable {
       availabilityCount: availability.count
     )
     guard accountedBytes <= ViewerPerformanceAggregationLimits.maximumResultBytes else {
-      throw ViewerPerformanceStoreFailure.limitExceeded
+      throw ViewerPerformanceFailure.limitExceeded
     }
     self.buckets = buckets
     gaps = details.gaps
@@ -758,7 +756,7 @@ struct ViewerPerformanceAggregationResult: Equatable, Sendable {
 enum ViewerPerformancePresentationBounds {
   static func maximumMarkCount(bucketCount: Int) throws -> Int {
     guard (0...ViewerPerformanceAggregationLimits.maximumBuckets).contains(bucketCount) else {
-      throw ViewerPerformanceStoreFailure.limitExceeded
+      throw ViewerPerformanceFailure.limitExceeded
     }
     let count = try ViewerPerformanceAccounting.checkedMultiply(
       bucketCount,
@@ -766,14 +764,14 @@ enum ViewerPerformancePresentationBounds {
         * ViewerPerformanceAggregationLimits.maximumMarksPerBucketPerChart
     )
     guard count <= ViewerPerformanceAggregationLimits.maximumTotalMarks else {
-      throw ViewerPerformanceStoreFailure.limitExceeded
+      throw ViewerPerformanceFailure.limitExceeded
     }
     return count
   }
 
   static func accessibilityBucketIndices(bucketCount: Int) throws -> [Int] {
     guard (0...ViewerPerformanceAggregationLimits.maximumBuckets).contains(bucketCount) else {
-      throw ViewerPerformanceStoreFailure.limitExceeded
+      throw ViewerPerformanceFailure.limitExceeded
     }
     guard bucketCount > ViewerPerformanceAggregationLimits.maximumAccessibleBucketsPerChart else {
       return Array(0..<bucketCount)
@@ -835,14 +833,14 @@ struct ViewerPerformanceRangeBounds: Equatable, Hashable, Sendable {
   ) throws -> ViewerPerformanceRangeBounds {
     guard deviceStartMonotonicNanoseconds >= 0,
       upperMonotonicNanoseconds >= deviceStartMonotonicNanoseconds
-    else { throw ViewerPerformanceStoreFailure.invalidScope }
+    else { throw ViewerPerformanceFailure.invalidScope }
     let effectiveDuration = max(durationNanoseconds, 1)
     let distance = effectiveDuration - 1
     let upper = UInt64(upperMonotonicNanoseconds)
     let saturatedLower = upper >= distance ? upper - distance : 0
     let lower = max(UInt64(deviceStartMonotonicNanoseconds), saturatedLower)
     guard let exactLower = Int64(exactly: lower) else {
-      throw ViewerPerformanceStoreFailure.limitExceeded
+      throw ViewerPerformanceFailure.limitExceeded
     }
     return try ViewerPerformanceRangeBounds(
       lowerMonotonicNanoseconds: exactLower,
@@ -866,7 +864,7 @@ struct ViewerPerformanceRangeBounds: Equatable, Hashable, Sendable {
   ) throws {
     guard lowerMonotonicNanoseconds >= 0,
       upperMonotonicNanoseconds >= lowerMonotonicNanoseconds
-    else { throw ViewerPerformanceStoreFailure.invalidScope }
+    else { throw ViewerPerformanceFailure.invalidScope }
     let lower = UInt64(lowerMonotonicNanoseconds)
     let upper = UInt64(upperMonotonicNanoseconds)
     let inclusiveSpanNanoseconds = upper - lower + 1
@@ -878,7 +876,7 @@ struct ViewerPerformanceRangeBounds: Equatable, Hashable, Sendable {
     let count = Self.ceilingDivision(inclusiveSpanNanoseconds, by: bucketWidthNanoseconds)
     guard let bucketCount = Int(exactly: count),
       (1...ViewerPerformanceAggregationLimits.maximumBuckets).contains(bucketCount)
-    else { throw ViewerPerformanceStoreFailure.limitExceeded }
+    else { throw ViewerPerformanceFailure.limitExceeded }
     self.lowerMonotonicNanoseconds = lowerMonotonicNanoseconds
     self.upperMonotonicNanoseconds = upperMonotonicNanoseconds
     self.inclusiveSpanNanoseconds = inclusiveSpanNanoseconds
@@ -896,7 +894,7 @@ struct ViewerPerformanceRangeBounds: Equatable, Hashable, Sendable {
 
   func bucketBounds(at index: Int) throws -> ClosedRange<Int64> {
     guard (0..<bucketCount).contains(index) else {
-      throw ViewerPerformanceStoreFailure.invalidScope
+      throw ViewerPerformanceFailure.invalidScope
     }
     let (bucketOffset, multiplicationOverflow) = UInt64(index).multipliedReportingOverflow(
       by: bucketWidthNanoseconds
@@ -905,7 +903,7 @@ struct ViewerPerformanceRangeBounds: Equatable, Hashable, Sendable {
       .addingReportingOverflow(bucketOffset)
     guard !multiplicationOverflow, !additionOverflow,
       bucketLower <= UInt64(upperMonotonicNanoseconds)
-    else { throw ViewerPerformanceStoreFailure.limitExceeded }
+    else { throw ViewerPerformanceFailure.limitExceeded }
     let (unclampedUpper, upperOverflow) = bucketLower.addingReportingOverflow(
       bucketWidthNanoseconds - 1
     )
@@ -914,7 +912,7 @@ struct ViewerPerformanceRangeBounds: Equatable, Hashable, Sendable {
       ? UInt64(upperMonotonicNanoseconds)
       : min(unclampedUpper, UInt64(upperMonotonicNanoseconds))
     guard let lower = Int64(exactly: bucketLower), let upper = Int64(exactly: bucketUpper)
-    else { throw ViewerPerformanceStoreFailure.limitExceeded }
+    else { throw ViewerPerformanceFailure.limitExceeded }
     return lower...upper
   }
 
@@ -938,9 +936,6 @@ struct ViewerPerformanceRangeBounds: Equatable, Hashable, Sendable {
 
 enum ViewerPerformanceAnchorKind: Equatable, Sendable {
   case current
-  case ended
-  case interrupted
-  case empty
 }
 
 struct ViewerPerformanceAnchor: Equatable, Sendable {
@@ -957,43 +952,11 @@ struct ViewerPerformanceAnchor: Equatable, Sendable {
       liveSlice.runtimeLogicalID == runtimeLogicalID,
       liveSlice.connectionID == connectionID,
       let upper = Int64(exactly: liveSlice.anchorMonotonicNanoseconds)
-    else { throw ViewerPerformanceStoreFailure.invalidScope }
+    else { throw ViewerPerformanceFailure.invalidScope }
     return try ViewerPerformanceAnchor(
       kind: .current,
       deviceStartMonotonicNanoseconds: deviceStartMonotonicNanoseconds,
       upperMonotonicNanoseconds: upper
-    )
-  }
-
-  static func ended(
-    deviceStartMonotonicNanoseconds: Int64,
-    deviceEndMonotonicNanoseconds: Int64
-  ) throws -> ViewerPerformanceAnchor {
-    try ViewerPerformanceAnchor(
-      kind: .ended,
-      deviceStartMonotonicNanoseconds: deviceStartMonotonicNanoseconds,
-      upperMonotonicNanoseconds: deviceEndMonotonicNanoseconds
-    )
-  }
-
-  static func interrupted(
-    deviceStartMonotonicNanoseconds: Int64,
-    frozenRecordingUpperMonotonicNanoseconds: Int64
-  ) throws -> ViewerPerformanceAnchor {
-    try ViewerPerformanceAnchor(
-      kind: .interrupted,
-      deviceStartMonotonicNanoseconds: deviceStartMonotonicNanoseconds,
-      upperMonotonicNanoseconds: frozenRecordingUpperMonotonicNanoseconds
-    )
-  }
-
-  static func empty(
-    deviceStartMonotonicNanoseconds: Int64
-  ) throws -> ViewerPerformanceAnchor {
-    try ViewerPerformanceAnchor(
-      kind: .empty,
-      deviceStartMonotonicNanoseconds: deviceStartMonotonicNanoseconds,
-      upperMonotonicNanoseconds: deviceStartMonotonicNanoseconds
     )
   }
 
@@ -1004,7 +967,7 @@ struct ViewerPerformanceAnchor: Equatable, Sendable {
   ) throws {
     guard deviceStartMonotonicNanoseconds >= 0,
       upperMonotonicNanoseconds >= deviceStartMonotonicNanoseconds
-    else { throw ViewerPerformanceStoreFailure.invalidScope }
+    else { throw ViewerPerformanceFailure.invalidScope }
     self.kind = kind
     self.deviceStartMonotonicNanoseconds = deviceStartMonotonicNanoseconds
     self.upperMonotonicNanoseconds = upperMonotonicNanoseconds
@@ -1016,16 +979,12 @@ struct ViewerPerformanceCacheKey: Equatable, Hashable, Sendable {
   let rangeKind: ViewerPerformanceRangeKind
   let lowerMonotonicNanoseconds: Int64
   let upperMonotonicNanoseconds: Int64
-  let storeGeneration: UInt64
-  let eventUpperRowID: Int64
-  let gapUpperRowID: Int64
   let liveGeneration: UInt64
   let liveSliceRevision: UInt64
 
   var runtimeLogicalID: UUID {
     switch source {
     case .current(let runtimeLogicalID, _): return runtimeLogicalID
-    case .historical(_, _, let recordingLogicalID, _): return recordingLogicalID
     }
   }
 
@@ -1033,32 +992,18 @@ struct ViewerPerformanceCacheKey: Equatable, Hashable, Sendable {
     source: ViewerPerformanceSource,
     rangeKind: ViewerPerformanceRangeKind,
     bounds: ViewerPerformanceRangeBounds,
-    storeGeneration: UInt64,
-    eventUpperRowID: Int64,
-    gapUpperRowID: Int64,
     liveGeneration: UInt64,
     liveSliceRevision: UInt64
   ) throws {
-    guard eventUpperRowID >= 0, gapUpperRowID >= 0 else {
-      throw ViewerPerformanceStoreFailure.invalidScope
-    }
     switch source {
     case .current:
-      guard liveGeneration > 0, liveSliceRevision > 0,
-        storeGeneration > 0 || (eventUpperRowID == 0 && gapUpperRowID == 0)
-      else { throw ViewerPerformanceStoreFailure.invalidScope }
-    case .historical(let recordingID, let deviceSessionID, _, _):
-      guard recordingID > 0, deviceSessionID > 0, storeGeneration > 0,
-        liveGeneration == 0, liveSliceRevision == 0
-      else { throw ViewerPerformanceStoreFailure.invalidScope }
+      guard liveGeneration > 0, liveSliceRevision > 0
+      else { throw ViewerPerformanceFailure.invalidScope }
     }
     self.source = source
     self.rangeKind = rangeKind
     lowerMonotonicNanoseconds = bounds.lowerMonotonicNanoseconds
     upperMonotonicNanoseconds = bounds.upperMonotonicNanoseconds
-    self.storeGeneration = storeGeneration
-    self.eventUpperRowID = eventUpperRowID
-    self.gapUpperRowID = gapUpperRowID
     self.liveGeneration = liveGeneration
     self.liveSliceRevision = liveSliceRevision
   }
@@ -1068,32 +1013,20 @@ struct ViewerPerformanceCacheKey: Equatable, Hashable, Sendable {
     rangeKind: ViewerPerformanceRangeKind,
     bounds: ViewerPerformanceRangeBounds
   ) throws {
-    if let scope = receipt.storeScope {
-      guard scope.lowerMonotonicNanoseconds <= bounds.lowerMonotonicNanoseconds,
-        scope.upperMonotonicNanoseconds == bounds.upperMonotonicNanoseconds
-      else { throw ViewerPerformanceStoreFailure.invalidScope }
-    }
     switch receipt.source {
     case .current(let runtimeLogicalID, let connectionID):
-      guard let live = receipt.liveSlice,
-        live.runtimeLogicalID == runtimeLogicalID,
-        live.connectionID == connectionID,
-        Int64(exactly: live.anchorMonotonicNanoseconds) == bounds.upperMonotonicNanoseconds
-      else { throw ViewerPerformanceStoreFailure.invalidScope }
-    case .historical(let recordingID, let deviceSessionID, _, _):
-      guard receipt.liveSlice == nil, let scope = receipt.storeScope,
-        scope.recordingID == recordingID, scope.deviceSessionID == deviceSessionID
-      else { throw ViewerPerformanceStoreFailure.invalidScope }
+      guard receipt.liveSlice.runtimeLogicalID == runtimeLogicalID,
+        receipt.liveSlice.connectionID == connectionID,
+        Int64(exactly: receipt.liveSlice.anchorMonotonicNanoseconds)
+          == bounds.upperMonotonicNanoseconds
+      else { throw ViewerPerformanceFailure.invalidScope }
     }
     try self.init(
       source: receipt.source,
       rangeKind: rangeKind,
       bounds: bounds,
-      storeGeneration: receipt.storeScope?.storeGeneration ?? 0,
-      eventUpperRowID: receipt.storeScope?.eventUpperRowID ?? 0,
-      gapUpperRowID: receipt.storeScope?.gapUpperRowID ?? 0,
-      liveGeneration: receipt.liveSlice?.liveGeneration ?? 0,
-      liveSliceRevision: receipt.liveSlice?.revision ?? 0
+      liveGeneration: receipt.liveSlice.liveGeneration,
+      liveSliceRevision: receipt.liveSlice.revision
     )
   }
 }
@@ -1102,8 +1035,6 @@ enum ViewerPerformanceCacheCanonicalOrder {
   static func keyPrecedes(_ lhs: ViewerPerformanceCacheKey, _ rhs: ViewerPerformanceCacheKey)
     -> Bool
   {
-    let sourceKindComparison = compare(sourceKind(lhs.source), sourceKind(rhs.source))
-    if sourceKindComparison != 0 { return sourceKindComparison < 0 }
     let sourceComparison = compareSourceIdentity(lhs.source, rhs.source)
     if sourceComparison != 0 { return sourceComparison < 0 }
     let deviceComparison = compareDeviceIdentity(lhs.source, rhs.source)
@@ -1120,12 +1051,6 @@ enum ViewerPerformanceCacheCanonicalOrder {
       UInt64(rhs.upperMonotonicNanoseconds)
     )
     if upperComparison != 0 { return upperComparison < 0 }
-    let storeComparison = compare(lhs.storeGeneration, rhs.storeGeneration)
-    if storeComparison != 0 { return storeComparison < 0 }
-    let eventComparison = compare(UInt64(lhs.eventUpperRowID), UInt64(rhs.eventUpperRowID))
-    if eventComparison != 0 { return eventComparison < 0 }
-    let gapComparison = compare(UInt64(lhs.gapUpperRowID), UInt64(rhs.gapUpperRowID))
-    if gapComparison != 0 { return gapComparison < 0 }
     let runtimeComparison = ViewerPerformanceCanonicalOrder.compareUUID(
       lhs.runtimeLogicalID,
       rhs.runtimeLogicalID
@@ -1136,13 +1061,6 @@ enum ViewerPerformanceCacheCanonicalOrder {
     return lhs.liveSliceRevision < rhs.liveSliceRevision
   }
 
-  private static func sourceKind(_ source: ViewerPerformanceSource) -> UInt8 {
-    switch source {
-    case .current: return 0
-    case .historical: return 1
-    }
-  }
-
   private static func compareSourceIdentity(
     _ lhs: ViewerPerformanceSource,
     _ rhs: ViewerPerformanceSource
@@ -1150,13 +1068,6 @@ enum ViewerPerformanceCacheCanonicalOrder {
     switch (lhs, rhs) {
     case (.current(let left, _), .current(let right, _)):
       return ViewerPerformanceCanonicalOrder.compareUUID(left, right)
-    case (
-      .historical(let left, _, _, _),
-      .historical(let right, _, _, _)
-    ):
-      return compare(signBitFlipped(left), signBitFlipped(right))
-    default:
-      return compare(sourceKind(lhs), sourceKind(rhs))
     }
   }
 
@@ -1167,18 +1078,7 @@ enum ViewerPerformanceCacheCanonicalOrder {
     switch (lhs, rhs) {
     case (.current(_, let left), .current(_, let right)):
       return ViewerPerformanceCanonicalOrder.compareUUID(left, right)
-    case (
-      .historical(_, let left, _, _),
-      .historical(_, let right, _, _)
-    ):
-      return compare(signBitFlipped(left), signBitFlipped(right))
-    default:
-      return compare(sourceKind(lhs), sourceKind(rhs))
     }
-  }
-
-  private static func signBitFlipped(_ value: Int64) -> UInt64 {
-    UInt64(bitPattern: value) ^ 0x8000_0000_0000_0000
   }
 
   private static func compare<T: Comparable>(_ lhs: T, _ rhs: T) -> Int {
@@ -1220,7 +1120,7 @@ struct ViewerPerformanceResultCache: Sendable {
   mutating func result(
     for key: ViewerPerformanceCacheKey
   ) throws -> ViewerPerformanceAggregationResult? {
-    guard key.source == activeSource else { throw ViewerPerformanceStoreFailure.invalidScope }
+    guard key.source == activeSource else { throw ViewerPerformanceFailure.invalidScope }
     guard var entry = entries[key] else { return nil }
     entry.touchOrdinal = nextTouchOrdinal()
     entries[key] = entry
@@ -1235,7 +1135,7 @@ struct ViewerPerformanceResultCache: Sendable {
   ) throws -> Bool {
     guard key.source == activeSource,
       result.accountedBytes <= ViewerPerformanceAggregationLimits.maximumResultBytes
-    else { throw ViewerPerformanceStoreFailure.invalidScope }
+    else { throw ViewerPerformanceFailure.invalidScope }
     if entries[key] != nil {
       _ = try self.result(for: key)
       return true
@@ -1270,7 +1170,7 @@ struct ViewerPerformanceResultCache: Sendable {
       reservation.owner == .completedResult,
       reservation.bytes == result.accountedBytes,
       ledger.owns(reservation)
-    else { throw ViewerPerformanceStoreFailure.invalidScope }
+    else { throw ViewerPerformanceFailure.invalidScope }
     if entries[key] != nil {
       _ = ledger.release(reservation)
       _ = try self.result(for: key)
@@ -1301,7 +1201,7 @@ struct ViewerPerformanceResultCache: Sendable {
       reservation.bytes == result.accountedBytes,
       ledger.owns(reservation),
       let predecessor = entries[key]
-    else { throw ViewerPerformanceStoreFailure.invalidScope }
+    else { throw ViewerPerformanceFailure.invalidScope }
     let touchOrdinal = nextTouchOrdinal()
     entries[key] = Entry(
       result: result,

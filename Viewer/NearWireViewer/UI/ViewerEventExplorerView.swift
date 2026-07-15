@@ -6,7 +6,7 @@ import UniformTypeIdentifiers
 struct ViewerTimelinePresentationSignature: Equatable {
   let rows: [ViewerExplorerTimelinePresentationRow]
   let selectedEventID: ViewerExplorerEventIdentity?
-  let traversalState: ViewerExplorerTraversalState
+  let emptyTraversalState: ViewerExplorerTraversalState?
   let isPaused: Bool
   let autoFollow: Bool
   let searchText: String
@@ -14,22 +14,18 @@ struct ViewerTimelinePresentationSignature: Equatable {
   let activeFilterCount: Int
   let filterValidationMessage: String?
   let liveEvaluationGuidance: String?
-  let pageFailure: ViewerStoreExplorerFailure?
+  let pageFailure: ViewerExplorerFailure?
   let workspaceOperationState: ViewerWorkspaceOperationState
-  let gapRows: [ViewerGapRow]
-  let liveGapLane: ViewerExplorerLiveGapLane?
-  let gapPageFailure: ViewerStoreExplorerFailure?
+  let liveGapLane: ViewerExplorerMemoryGapLane?
   let hasOlderEvents: Bool
   let hasNewerEvents: Bool
-  let hasOlderGaps: Bool
-  let hasNewerGaps: Bool
 
   @MainActor
   static func make(_ explorer: ViewerEventExplorerController) -> Self {
     Self(
       rows: explorer.timelineRows,
       selectedEventID: explorer.selectedEventID,
-      traversalState: explorer.traversalState,
+      emptyTraversalState: explorer.timelineRows.isEmpty ? explorer.traversalState : nil,
       isPaused: explorer.isPaused,
       autoFollow: explorer.autoFollow,
       searchText: explorer.filterDraft.searchText,
@@ -39,13 +35,9 @@ struct ViewerTimelinePresentationSignature: Equatable {
       liveEvaluationGuidance: explorer.liveEvaluationGuidance,
       pageFailure: explorer.timelinePageFailure,
       workspaceOperationState: explorer.workspaceOperationState,
-      gapRows: explorer.gapRows,
       liveGapLane: explorer.liveGapLane,
-      gapPageFailure: explorer.gapPageFailure,
       hasOlderEvents: explorer.hasOlderEvents,
-      hasNewerEvents: explorer.hasNewerEvents,
-      hasOlderGaps: explorer.hasOlderGaps,
-      hasNewerGaps: explorer.hasNewerGaps
+      hasNewerEvents: explorer.hasNewerEvents
     )
   }
 }
@@ -192,8 +184,12 @@ struct ViewerExplorerTimelineView: View {
       Button("Clear Events", role: .destructive) { explorer.clearCurrentSession() }
     } message: {
       Text(
-        "This removes recorded Events, Event details, diagnostics, and Performance data from the current Session. Connected Devices stay connected and new Events continue to arrive."
+        "This removes retained Events, Event details, diagnostics, and Performance data from the current Session. Connected Devices stay connected and new Events continue to arrive."
       )
+    }
+    .transaction { transaction in
+      transaction.animation = nil
+      transaction.disablesAnimations = true
     }
   }
 
@@ -246,10 +242,10 @@ struct ViewerExplorerTimelineView: View {
       } label: {
         Label("Clear", systemImage: "trash")
       }
-      .disabled(!explorer.canManageSelectedRecording || workspaceOperationIsRunning)
+      .disabled(!explorer.canClearCurrentSession || workspaceOperationIsRunning)
       .accessibilityLabel("Clear current Session Events")
-      .accessibilityHint("Permanently removes recorded Events from the current Session.")
-      .help("Clear recorded Events from the current Session")
+      .accessibilityHint("Removes retained Events from the current memory Session.")
+      .help("Clear retained Events from the current Session")
       Button(presentation.isPaused ? "Resume" : "Pause") { explorer.pauseOrResume() }
         .accessibilityHint("Freezes or resumes timeline presentation only.")
       Button("Jump to Latest") { explorer.jumpToLatest() }
@@ -264,7 +260,7 @@ struct ViewerExplorerTimelineView: View {
     } label: {
       Label("Clear Events", systemImage: "trash")
     }
-    .disabled(!explorer.canManageSelectedRecording || workspaceOperationIsRunning)
+    .disabled(!explorer.canClearCurrentSession || workspaceOperationIsRunning)
     Button(presentation.isPaused ? "Resume Timeline" : "Pause Timeline") {
       explorer.pauseOrResume()
     }
@@ -299,7 +295,6 @@ struct ViewerExplorerTimelineView: View {
       )
     ) {
       Text("Literal").tag(ViewerExplorerSearchMode.literal)
-      Text("Full Text").tag(ViewerExplorerSearchMode.fullText)
     }
     .labelsHidden()
     .frame(width: 110)
@@ -334,8 +329,8 @@ struct ViewerExplorerTimelineView: View {
   private var content: some View {
     let rows = presentation.rows
     if rows.isEmpty {
-      switch presentation.traversalState {
-      case .loading, .releasing:
+      switch presentation.emptyTraversalState ?? .idle {
+      case .loading:
         VStack(spacing: 10) {
           ProgressView()
           Text("Loading bounded Event window").foregroundStyle(.secondary)
@@ -397,8 +392,7 @@ struct ViewerExplorerTimelineView: View {
   }
 
   private var hasDiagnostics: Bool {
-    !presentation.gapRows.isEmpty || presentation.liveGapLane?.hasDiagnostic == true
-      || presentation.gapPageFailure != nil
+    presentation.liveGapLane?.hasDiagnostic == true
   }
 
   private var diagnosticLane: some View {
@@ -406,39 +400,11 @@ struct ViewerExplorerTimelineView: View {
       VStack(alignment: .leading, spacing: 8) {
         if let gaps = presentation.liveGapLane?.gaps {
           Text(
-            "Live: ingress \(gaps.ingressOverflowCount), window \(gaps.windowOverflowCount), conflicts \(gaps.residentConflictCount), diagnostic loss \(gaps.diagnosticLossCount), storage outages \(gaps.storeUnavailableCount), recoveries \(gaps.storeRecoveryCount)"
+            "Memory: ingress \(gaps.ingressOverflowCount), window \(gaps.windowOverflowCount), conflicts \(gaps.residentConflictCount), diagnostic loss \(gaps.diagnosticLossCount)"
           )
           .font(.caption.monospacedDigit())
-          .foregroundStyle(gaps.storeUnavailable ? .orange : .secondary)
+          .foregroundStyle(.secondary)
         }
-        if let failure = presentation.gapPageFailure {
-          Text(LocalizedStringKey(failure.operatorMessage))
-            .font(.caption)
-            .foregroundStyle(.orange)
-        }
-        ScrollView {
-          LazyVStack(alignment: .leading, spacing: 7) {
-            ForEach(presentation.gapRows, id: \.rowID) { gap in
-              VStack(alignment: .leading, spacing: 2) {
-                Text("\(gap.namespace) · \(gap.reason)").font(.caption).fontWeight(.medium)
-                Text(
-                  "\(gap.count) records · \(ViewerLocalization.string(gap.directions, locale: locale)) · \(ViewerExplorerFormatting.date(gap.firstViewerWallMilliseconds, locale: locale)) – \(ViewerExplorerFormatting.date(gap.lastViewerWallMilliseconds, locale: locale))"
-                )
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-              }
-              .onAppear {
-                if gap.rowID == presentation.gapRows.first?.rowID, presentation.hasOlderGaps {
-                  explorer.loadOlderGaps()
-                }
-                if gap.rowID == presentation.gapRows.last?.rowID, presentation.hasNewerGaps {
-                  explorer.loadNewerGaps()
-                }
-              }
-            }
-          }
-        }
-        .frame(maxHeight: 120)
       }
       .padding(.top, 8)
     } label: {
@@ -472,13 +438,18 @@ private struct ViewerExplorerTimelineRowView: View {
   var body: some View {
     VStack(alignment: .leading, spacing: 5) {
       HStack(alignment: .firstTextBaseline) {
-        Text(row.eventType).font(.headline).lineLimit(1)
+        Text(row.contentSummary)
+          .font(.body)
+          .lineLimit(1)
+          .truncationMode(.tail)
         Spacer()
         Text(ViewerExplorerFormatting.time(row.viewerWallMilliseconds, locale: locale))
           .font(.caption.monospacedDigit())
           .foregroundStyle(.secondary)
+          .fixedSize(horizontal: true, vertical: false)
       }
       HStack(spacing: 7) {
+        Text(row.eventType)
         Label(row.deviceAlias, systemImage: "iphone")
         Text(LocalizedStringKey(row.direction))
         Text(LocalizedStringKey(row.priority.capitalized))
@@ -487,13 +458,14 @@ private struct ViewerExplorerTimelineRowView: View {
       .font(.caption)
       .foregroundStyle(.secondary)
       .lineLimit(1)
-      HStack(spacing: 6) {
-        if row.isTransient { badge("Not recorded", color: .orange) }
-        if let disposition = row.disposition { badge(disposition, color: .secondary) }
-        if row.hasGap { badge("Gap", color: .orange) }
-        if row.hasDrop { badge("Drop", color: .red) }
-        if row.hasPresentationConflict { badge("Conflict", color: .red) }
-        if row.sessionEnded { badge("Session ended", color: .secondary) }
+      if hasVisibleStatus {
+        HStack(spacing: 6) {
+          if let disposition = visibleDisposition { badge(disposition, color: .secondary) }
+          if row.hasGap { badge("Gap", color: .orange) }
+          if row.hasDrop { badge("Drop", color: .red) }
+          if row.hasPresentationConflict { badge("Conflict", color: .red) }
+          if row.sessionEnded { badge("Session ended", color: .secondary) }
+        }
       }
     }
     .padding(.vertical, 4)
@@ -502,12 +474,8 @@ private struct ViewerExplorerTimelineRowView: View {
   }
 
   private var accessibilitySummary: String {
-    let recording = ViewerLocalization.string(
-      row.isTransient ? "not recorded" : "recorded",
-      locale: locale
-    )
-    var states = [recording]
-    if let disposition = row.disposition {
+    var states: [String] = []
+    if let disposition = visibleDisposition {
       states.append(
         ViewerLocalization.format(
           "disposition %@",
@@ -528,7 +496,7 @@ private struct ViewerExplorerTimelineRowView: View {
       "%@, %@, %@, %@, %@, %@",
       locale: locale,
       arguments: [
-        row.eventType,
+        "\(row.contentSummary), \(row.eventType)",
         row.deviceAlias,
         ViewerLocalization.string(row.direction, locale: locale),
         ViewerLocalization.string(row.priority.capitalized, locale: locale),
@@ -536,6 +504,16 @@ private struct ViewerExplorerTimelineRowView: View {
         ViewerExplorerFormatting.date(row.viewerWallMilliseconds, locale: locale),
       ]
     )
+  }
+
+  private var visibleDisposition: String? {
+    guard row.disposition != ViewerEventDisposition.consumerAccepted.rawValue else { return nil }
+    return row.disposition
+  }
+
+  private var hasVisibleStatus: Bool {
+    visibleDisposition != nil || row.hasGap || row.hasDrop || row.hasPresentationConflict
+      || row.sessionEnded
   }
 
   private func badge(_ text: String, color: Color) -> some View {
@@ -603,7 +581,7 @@ struct ViewerExportSheet: View {
     case .exporting(let eventCount):
       VStack(spacing: 12) {
         ProgressView()
-        Text("Exporting \(eventCount) recorded Event(s)")
+        Text("Exporting \(eventCount) retained Event(s)")
         Text("The destination is replaced only after the complete JSON file commits.")
           .font(.caption)
           .foregroundStyle(.secondary)
@@ -612,7 +590,7 @@ struct ViewerExportSheet: View {
     case .cancelling(let eventCount):
       VStack(spacing: 12) {
         ProgressView()
-        Text("Cancelling export of \(eventCount) recorded Event(s)")
+        Text("Cancelling export of \(eventCount) retained Event(s)")
         Text("Waiting for the export commit boundary before reporting the final result.")
           .font(.caption)
           .foregroundStyle(.secondary)
@@ -622,7 +600,7 @@ struct ViewerExportSheet: View {
       ViewerExplorerEmptyState(
         title: "Export Complete",
         systemImage: "checkmark.circle",
-        description: "Committed \(eventCount) recorded Event(s) to the selected JSON file."
+        description: "Committed \(eventCount) retained Event(s) to the selected JSON file."
       )
     case .cancelled:
       ViewerExplorerEmptyState(
@@ -646,7 +624,7 @@ struct ViewerExportSheet: View {
     VStack(alignment: .leading, spacing: 14) {
       Label("Review Before Choosing a Destination", systemImage: "exclamationmark.shield")
         .font(.headline)
-      Text("This export contains \(eventCount) recorded Event(s).")
+      Text("This export contains \(eventCount) Events retained in the current memory Session.")
         .font(.body.monospacedDigit())
       disclosureLine(disclosure.warning)
       if disclosure.unencrypted {
@@ -657,12 +635,12 @@ struct ViewerExportSheet: View {
       }
       if disclosure.outsideViewerQuotaAndRetention {
         disclosureLine(
-          "The file is outside Viewer quota, retention, cleanup, and automatic deletion.")
+          "Viewer does not manage, retain, clean up, or delete the exported file.")
       }
       if disclosure.mayBeSyncedOrBackedUpByDestinationProvider {
         disclosureLine("The chosen destination provider may sync or back up the file.")
       }
-      disclosureLine(ViewerExportPresentationText.transientRowsExcluded)
+      disclosureLine("Only Events currently retained in memory are included.")
       Text("NearWire does not remember the selected destination.")
         .font(.caption)
         .foregroundStyle(.secondary)
@@ -734,8 +712,7 @@ struct ViewerExportSheet: View {
 extension ViewerExportMode {
   fileprivate var title: String {
     switch self {
-    case .completeRecording: return "Complete Session"
-    case .currentFilteredResult: return "Current Filtered Result"
+    case .completeSession: return "Complete Session"
     }
   }
 }
@@ -749,7 +726,6 @@ private struct ViewerInspectorPresentationSignature: Equatable {
   let rawChunk: ViewerRawJSONChunk?
   let treeState: ViewerJSONTreeState?
   let rendererPreparation: ViewerRendererPreparation?
-  let causalityState: ViewerExplorerCausalityState
 
   @MainActor
   static func make(_ explorer: ViewerEventExplorerController) -> Self {
@@ -761,8 +737,7 @@ private struct ViewerInspectorPresentationSignature: Equatable {
       rawChunkIndex: explorer.rawChunkIndex,
       rawChunk: explorer.rawChunk,
       treeState: explorer.inspectorTreeState,
-      rendererPreparation: explorer.rendererPreparation,
-      causalityState: explorer.causalityState
+      rendererPreparation: explorer.rendererPreparation
     )
   }
 }
@@ -805,7 +780,6 @@ enum ViewerExplorerInspectorTab: String, CaseIterable {
   case tree = "Tree"
   case pretty = "Pretty"
   case renderer = "Renderer"
-  case causality = "Causality"
 }
 
 struct ViewerExplorerInspectorView: View {
@@ -831,11 +805,6 @@ struct ViewerExplorerInspectorView: View {
       HStack {
         Label("Event Inspector", systemImage: "sidebar.right").font(.headline)
         Spacer()
-        if let metadata = explorer.inspectorMetadata {
-          Text(metadata.isRecorded ? "Recorded" : "Not recorded")
-            .font(.caption)
-            .foregroundStyle(metadata.isRecorded ? Color.secondary : Color.orange)
-        }
       }
       .padding(.horizontal, 14)
       .padding(.vertical, 10)
@@ -899,7 +868,6 @@ struct ViewerExplorerInspectorView: View {
     case .tree: treeView
     case .pretty: prettyView
     case .renderer: rendererView
-    case .causality: causalityView
     }
   }
 
@@ -1119,76 +1087,6 @@ struct ViewerExplorerInspectorView: View {
       description:
         "Use Raw, Tree, or Pretty. \(preparation.generic.rawChunkCount) bounded raw chunk(s) are available."
     )
-  }
-
-  @ViewBuilder
-  private var causalityView: some View {
-    switch explorer.causalityState {
-    case .none:
-      ViewerExplorerEmptyState(
-        title: "No Causality Selection",
-        systemImage: "point.3.filled.connected.trianglepath.dotted",
-        description: "Select a recorded Event to inspect bounded causality candidates."
-      )
-    case .loading:
-      ProgressView("Loading causality").frame(maxWidth: .infinity, maxHeight: .infinity)
-    case .recordedDataRequired:
-      ViewerExplorerEmptyState(
-        title: "Recorded Data Required",
-        systemImage: "externaldrive.badge.exclamationmark",
-        description: "Transient Events do not have durable causality candidates."
-      )
-    case .failed(let failure):
-      ViewerExplorerEmptyState(
-        title: "Causality Unavailable",
-        systemImage: "exclamationmark.triangle",
-        description: failure.operatorMessage
-      )
-    case .ready(let graph):
-      List {
-        Section("Candidates") {
-          ForEach(graph.nodes, id: \.rowID) { node in
-            VStack(alignment: .leading, spacing: 3) {
-              Text(node.eventType).font(.headline)
-              Text(
-                "\(ViewerLocalization.string(node.direction, locale: locale)) · sequence \(node.wireSequence) · \(node.eventUUID)"
-              )
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            }
-          }
-        }
-        Section("Edges") {
-          ForEach(Array(graph.edges.enumerated()), id: \.offset) { _, edge in
-            VStack(alignment: .leading, spacing: 3) {
-              Text(LocalizedStringKey(edge.kind == .replyTo ? "Reply to" : "Correlation"))
-                .fontWeight(.medium)
-              Text(edge.referencedEventUUID).font(.caption)
-              Text(
-                ViewerLocalization.format(
-                  "%lld candidate(s)%@%@",
-                  locale: locale,
-                  arguments: [
-                    edge.candidateRowIDs.count,
-                    edge.hasMore
-                      ? ViewerLocalization.string(", more omitted", locale: locale) : "",
-                    edge.cyclicCandidateRowIDs.isEmpty
-                      ? "" : ViewerLocalization.string(", cycle observed", locale: locale),
-                  ]
-                )
-              )
-              .font(.caption2)
-              .foregroundStyle(.secondary)
-            }
-          }
-        }
-        if graph.truncated {
-          Text("Causality candidates were bounded; additional matches may exist.")
-            .font(.caption)
-            .foregroundStyle(.orange)
-        }
-      }
-    }
   }
 
   private func metadataRow(_ label: String, _ value: String) -> some View {
@@ -1554,18 +1452,16 @@ private enum ViewerExplorerFormatting {
   }
 }
 
-extension ViewerStoreExplorerFailure {
+extension ViewerExplorerFailure {
   var operatorMessage: String {
     switch self {
-    case .storeReplaced: return "Storage changed. The explorer will load a fresh snapshot."
     case .cancelled: return "The operation was cancelled."
-    case .unavailable: return "Recorded data is currently unavailable. Live data may still appear."
+    case .unavailable: return "The Event is no longer retained in the current Session."
     case .invalidRequest: return "The requested bounded view is no longer valid."
     case .busy: return "Another Session operation is still finishing. Try again shortly."
-    case .refineQuery: return "Refine the filters to stay within bounded query work."
+    case .refineQuery: return "Refine the filters to stay within bounded evaluation work."
     case .exportTooLarge:
       return "The complete Session is too large to export. Clear unneeded Events and try again."
-    case .catalogChanged: return "The catalog changed. Reloading from a fresh snapshot is required."
     }
   }
 }
@@ -1578,7 +1474,7 @@ extension ViewerWorkspaceMutationFailure {
     case .invalidFile: return "The selected JSON file is not a valid NearWire Session export."
     case .unsupportedFile: return "The selected JSON file uses an unsupported export format."
     case .capacityExceeded:
-      return "The imported Session is too large for the current Viewer storage limit. Import a smaller Session."
+      return "The imported Session is too large for the current memory limit. Import a smaller Session."
     case .cancelled: return "The Session operation was cancelled."
     }
   }

@@ -84,13 +84,13 @@ Implement multi-device sessions, device identity and nicknames, one-to-many conn
 
 Implemented: the Viewer owns at most 16 exact connection sessions through cleanup, rejects duplicate unauthenticated logical routes, retains 64 short-lived recent rows, negotiates conservative directional policy, exchanges bounded bidirectional Events with atomic mailbox admission and receive backpressure, persists only bounded requested preferences and nicknames, and presents content-free per-device telemetry.
 
-### 18. `viewer-local-store-search`
+### 18. `viewer-memory-session`
 
-Implement SQLite persistence, automatic sessions, 3 GiB and seven-day defaults, transactional cleanup, pinned-session protection, search indexing, JSON-path filters, pagination, and streaming JSON export.
+Implemented as a bounded memory Session: no Sources database, retention settings, cleanup worker, or historical launch catalog. Search, typed JSON filters, Event details, Performance input, Clear, and explicit complete-Session JSON import/export share the one process Session.
 
 ### 19. `viewer-event-explorer-control`
 
-Implement the three-column event explorer, single and merged timelines, receive-time ordering, detail inspection, renderers, pause-without-data-loss, simple Viewer-to-App control composition, and session causality display.
+Implement the Event workspace, single and merged timelines, receive-time ordering, detail inspection, bounded renderers, pause-without-data-loss, simple Viewer-to-App control composition, and explicit Session transfer. Correlation and reply identifiers remain Event metadata; the Viewer does not infer a cross-Event causality graph.
 
 ### 20. `viewer-performance-dashboard`
 

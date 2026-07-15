@@ -11,7 +11,7 @@ struct ViewerPerformanceDashboardScope: Equatable, Hashable, Sendable {
     source: ViewerPerformanceSource,
     rangeKind: ViewerPerformanceRangeKind
   ) throws {
-    guard sourceGeneration > 0 else { throw ViewerPerformanceStoreFailure.invalidScope }
+    guard sourceGeneration > 0 else { throw ViewerPerformanceFailure.invalidScope }
     self.sourceGeneration = sourceGeneration
     self.source = source
     self.rangeKind = rangeKind
@@ -46,8 +46,7 @@ enum ViewerPerformanceDashboardPhase: Equatable, Sendable {
   case loading(retainsPresentation: Bool)
   case ready(ViewerPerformanceProjectionCoverage)
   case empty(ViewerPerformanceProjectionCoverage)
-  case storageUnavailable
-  case failed(ViewerPerformanceStoreFailure)
+  case failed(ViewerPerformanceFailure)
 }
 
 enum ViewerPerformanceChartGroupKind: UInt8, CaseIterable, Equatable, Hashable, Sendable {
@@ -94,7 +93,6 @@ enum ViewerPerformanceDashboardPhaseKind: UInt8, Equatable, Sendable {
   case loading
   case ready
   case empty
-  case storageUnavailable
   case failed
 }
 
@@ -106,7 +104,6 @@ struct ViewerPerformanceDashboardDiagnostics: Equatable, Sendable {
   let invalidSnapshotCount: Int
   let hasCrosshair: Bool
   let hasCurrentDeadline: Bool
-  let hasHistoricalAnchor: Bool
 }
 
 @MainActor
@@ -120,7 +117,6 @@ final class ViewerPerformanceDashboardModel: ObservableObject, CustomReflectable
   private(set) var phase: ViewerPerformanceDashboardPhase = .idle
   private(set) var progress: ViewerPerformanceProjectionProgress?
   private(set) var currentFreshnessReceipt: ViewerPerformanceCurrentFreshnessReceipt?
-  private(set) var historicalFreshnessReceipt: ViewerPerformanceHistoricalFreshnessReceipt?
   private(set) var crosshair: ViewerPerformanceCrosshair?
   private(set) var sealed = false
 
@@ -153,8 +149,7 @@ final class ViewerPerformanceDashboardModel: ObservableObject, CustomReflectable
       invalidSnapshotCount: publication?.result.invalidSnapshots.count ?? 0,
       hasCrosshair: crosshair != nil,
       hasCurrentDeadline: currentFreshnessReceipt?.absoluteDeadlineMonotonicNanoseconds != nil
-        && publication?.cards.shouldArmDeadline == true,
-      hasHistoricalAnchor: historicalFreshnessReceipt != nil
+        && publication?.cards.shouldArmDeadline == true
     )
   }
 
@@ -172,9 +167,10 @@ final class ViewerPerformanceDashboardModel: ObservableObject, CustomReflectable
     progress nextProgress: ViewerPerformanceProjectionProgress = .initial
   ) -> Bool {
     guard !sealed, scope == expectedScope else { return false }
+    let retainsPresentation = publication != nil
     progress = nextProgress
-    phase = .loading(retainsPresentation: publication != nil)
-    publish()
+    phase = .loading(retainsPresentation: retainsPresentation)
+    if !retainsPresentation { publish() }
     return true
   }
 
@@ -197,7 +193,7 @@ final class ViewerPerformanceDashboardModel: ObservableObject, CustomReflectable
   ) -> Bool {
     guard !sealed, scope == expectedScope, case .loading = phase else { return false }
     progress = nextProgress
-    publish()
+    if publication == nil { publish() }
     return true
   }
 
@@ -209,21 +205,21 @@ final class ViewerPerformanceDashboardModel: ObservableObject, CustomReflectable
     guard !sealed, scope == expectedScope,
       Self.isValid(nextPublication, for: expectedScope)
     else { return false }
+    let priorPublication = publication
+    let priorCrosshair = crosshair
     publication = nextPublication
     progress = nil
-    crosshair = nil
+    crosshair = Self.revalidatedCrosshair(priorCrosshair, in: nextPublication)
     switch nextPublication.freshnessReceipt {
     case .current(let receipt):
       currentFreshnessReceipt = receipt
-      historicalFreshnessReceipt = nil
-    case .historical(let receipt):
-      currentFreshnessReceipt = nil
-      historicalFreshnessReceipt = receipt
     }
     phase =
       nextPublication.decodedEventCount == 0
       ? .empty(nextPublication.coverage) : .ready(nextPublication.coverage)
-    publish()
+    if priorPublication != nextPublication || priorCrosshair != crosshair {
+      publish()
+    }
     return true
   }
 
@@ -251,21 +247,8 @@ final class ViewerPerformanceDashboardModel: ObservableObject, CustomReflectable
   }
 
   @discardableResult
-  func showStorageUnavailable(
-    for expectedScope: ViewerPerformanceDashboardScope
-  ) -> Bool {
-    guard !sealed, scope == expectedScope, case .historical = expectedScope.source else {
-      return false
-    }
-    clearPresentation()
-    phase = .storageUnavailable
-    publish()
-    return true
-  }
-
-  @discardableResult
   func showFailure(
-    _ failure: ViewerPerformanceStoreFailure,
+    _ failure: ViewerPerformanceFailure,
     for expectedScope: ViewerPerformanceDashboardScope
   ) -> Bool {
     guard !sealed, scope == expectedScope else { return false }
@@ -360,7 +343,6 @@ final class ViewerPerformanceDashboardModel: ObservableObject, CustomReflectable
     case .loading: return .loading
     case .ready: return .ready
     case .empty: return .empty
-    case .storageUnavailable: return .storageUnavailable
     case .failed: return .failed
     }
   }
@@ -369,7 +351,6 @@ final class ViewerPerformanceDashboardModel: ObservableObject, CustomReflectable
     publication = nil
     progress = nil
     currentFreshnessReceipt = nil
-    historicalFreshnessReceipt = nil
     crosshair = nil
   }
 
@@ -390,17 +371,25 @@ final class ViewerPerformanceDashboardModel: ObservableObject, CustomReflectable
       last.upperMonotonicNanoseconds == publication.cacheKey.upperMonotonicNanoseconds,
       bucketsAreContiguous(publication.result.buckets)
     else { return false }
-    switch (scope.source, publication.freshnessReceipt) {
-    case (.current, .current):
-      return true
-    case (.historical, .historical(let receipt)):
-      return receipt.source == scope.source
-        && receipt.frozenUpperMonotonicNanoseconds
-          == publication.cacheKey.upperMonotonicNanoseconds
-        && publication.coverage == .completeRange
-    default:
-      return false
-    }
+    return true
+  }
+
+  private static func revalidatedCrosshair(
+    _ crosshair: ViewerPerformanceCrosshair?,
+    in publication: ViewerPerformanceProjectionPublication
+  ) -> ViewerPerformanceCrosshair? {
+    guard let crosshair,
+      let bucket = publication.result.buckets.first(where: {
+        crosshair.viewerMonotonicNanoseconds >= $0.lowerMonotonicNanoseconds
+          && crosshair.viewerMonotonicNanoseconds <= $0.upperMonotonicNanoseconds
+      })
+    else { return nil }
+    return ViewerPerformanceCrosshair(
+      viewerMonotonicNanoseconds: crosshair.viewerMonotonicNanoseconds,
+      bucketIndex: bucket.index,
+      chartGroup: crosshair.chartGroup,
+      selectedMetric: crosshair.selectedMetric
+    )
   }
 
   private static func bucketsAreContiguous(_ buckets: [ViewerPerformanceBucket]) -> Bool {

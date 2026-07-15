@@ -66,8 +66,8 @@ Uplink consumer execution transfers one Event at a time and is globally capped a
 
 The Event Explorer composes these sessions, telemetry values, bounded queues, and typed downlink
 admission through the same manager; it does not create a second protocol owner. See
-[Viewer-Event-Explorer.md](Viewer-Event-Explorer.md) for live-versus-recorded presentation,
-inspection, history operations, export, and control-composer semantics.
+[Viewer-Event-Explorer.md](Viewer-Event-Explorer.md) for current-Session presentation,
+inspection, filtering, export, and control-composer semantics.
 
 ## Signing Gate
 

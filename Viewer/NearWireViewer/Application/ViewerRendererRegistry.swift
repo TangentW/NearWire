@@ -163,7 +163,7 @@ struct ViewerRendererPreparation: Equatable, Sendable {
 struct ViewerInspectorGenerationToken: Equatable, Hashable, Sendable {
   let runtimeLogicalID: UUID
   let generation: UInt64
-  let eventIdentity: ViewerExplorerEventIdentity
+  let eventIdentity: ViewerExplorerEventIdentity?
 }
 
 struct ViewerRendererPreparationRequest: Sendable {
@@ -697,35 +697,6 @@ final class ViewerEventInspectorModel: CustomReflectable, CustomStringConvertibl
 
   @discardableResult
   func select(
-    detail: ViewerStoredEventDetail,
-    identity: ViewerExplorerEventIdentity
-  ) throws -> ViewerRendererPreparationRequest {
-    let buffer = try prepare(detail: detail, identity: identity)
-    return select(preparedDurableBuffer: buffer, identity: identity)
-  }
-
-  func prepare(
-    detail: ViewerStoredEventDetail,
-    identity: ViewerExplorerEventIdentity
-  ) throws -> ViewerCanonicalEventDetailBuffer {
-    guard identity == .durable(rowID: detail.summary.rowID) else {
-      throw ViewerJSONInspectionError.invalidRequest
-    }
-    return try ViewerCanonicalEventDetailBuffer(detail: detail)
-  }
-
-  @discardableResult
-  func select(
-    preparedDurableBuffer buffer: ViewerCanonicalEventDetailBuffer,
-    identity: ViewerExplorerEventIdentity
-  ) -> ViewerRendererPreparationRequest {
-    generation = Self.saturatingIncrement(generation)
-    selectedIdentity = identity
-    return select(buffer: buffer, identity: identity)
-  }
-
-  @discardableResult
-  func select(
     liveEvent: ViewerLiveEventSnapshot,
     identity: ViewerExplorerEventIdentity
   ) throws -> ViewerRendererPreparationRequest {
@@ -737,7 +708,7 @@ final class ViewerEventInspectorModel: CustomReflectable, CustomStringConvertibl
     liveEvent: ViewerLiveEventSnapshot,
     identity: ViewerExplorerEventIdentity
   ) throws -> ViewerCanonicalEventDetailBuffer {
-    guard case .transient(let key) = identity, key == liveEvent.observation.key else {
+    guard case .memory(let key) = identity, key == liveEvent.observation.key else {
       throw ViewerJSONInspectionError.invalidRequest
     }
     return try ViewerCanonicalEventDetailBuffer(liveEvent: liveEvent)
@@ -789,7 +760,7 @@ final class ViewerEventInspectorModel: CustomReflectable, CustomStringConvertibl
     ViewerInspectorGenerationToken(
       runtimeLogicalID: runtimeLogicalID,
       generation: generation,
-      eventIdentity: selectedIdentity ?? .durable(rowID: 0)
+      eventIdentity: selectedIdentity
     )
   }
 

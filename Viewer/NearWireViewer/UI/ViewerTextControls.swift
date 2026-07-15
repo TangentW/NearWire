@@ -114,12 +114,13 @@ struct ViewerBoundedTextInput: NSViewRepresentable {
   var onEdit: (NSRange, String) -> Bool
   var onSubmit: () -> Void = {}
 
-  func makeNSView(context: Context) -> NSScrollView {
+  func makeNSView(context: Context) -> ViewerBoundedTextScrollView {
     let editor = ViewerOperatorTextView(frame: .zero)
     configure(editor)
     editor.string = text
 
-    let scrollView = NSScrollView(frame: .zero)
+    let scrollView = ViewerBoundedTextScrollView(frame: .zero)
+    scrollView.controlStyle = style
     scrollView.borderType = .bezelBorder
     scrollView.drawsBackground = true
     scrollView.backgroundColor = .textBackgroundColor
@@ -131,8 +132,9 @@ struct ViewerBoundedTextInput: NSViewRepresentable {
     return scrollView
   }
 
-  func updateNSView(_ scrollView: NSScrollView, context: Context) {
+  func updateNSView(_ scrollView: ViewerBoundedTextScrollView, context: Context) {
     guard let editor = scrollView.documentView as? ViewerOperatorTextView else { return }
+    scrollView.controlStyle = style
     configure(editor)
     configureSizing(editor, in: scrollView)
     guard !editor.isProcessingNativeEdit else { return }
@@ -144,7 +146,7 @@ struct ViewerBoundedTextInput: NSViewRepresentable {
     )
   }
 
-  static func dismantleNSView(_ scrollView: NSScrollView, coordinator: ()) {
+  static func dismantleNSView(_ scrollView: ViewerBoundedTextScrollView, coordinator: ()) {
     (scrollView.documentView as? ViewerOperatorTextView)?.clearSensitiveState()
     scrollView.documentView = nil
   }
@@ -175,6 +177,39 @@ struct ViewerBoundedTextInput: NSViewRepresentable {
     editor.textContainer?.containerSize = NSSize(
       width: max(contentSize.width, 1),
       height: style == .multiline ? .greatestFiniteMagnitude : max(contentSize.height, 1)
+    )
+  }
+}
+
+@MainActor
+final class ViewerBoundedTextScrollView: NSScrollView {
+  var controlStyle: ViewerOperatorTextControlStyle = .singleLine
+
+  override func layout() {
+    super.layout()
+    guard let editor = documentView as? ViewerOperatorTextView else { return }
+    let viewport = contentView.bounds.size
+    let width = max(viewport.width, 1)
+    let height: CGFloat
+    switch controlStyle {
+    case .singleLine:
+      height = max(viewport.height, 1)
+    case .multiline:
+      let measured = editor.layoutManager?.usedRect(for: editor.textContainer!).height ?? 0
+      height = max(viewport.height, measured + editor.textContainerInset.height * 2)
+    }
+    if editor.frame.size != NSSize(width: width, height: height) {
+      editor.frame = NSRect(origin: .zero, size: NSSize(width: width, height: height))
+    }
+    editor.minSize = NSSize(width: width, height: max(viewport.height, 1))
+    editor.maxSize = NSSize(
+      width: width,
+      height: controlStyle == .multiline ? .greatestFiniteMagnitude : max(viewport.height, 1)
+    )
+    editor.textContainer?.widthTracksTextView = true
+    editor.textContainer?.containerSize = NSSize(
+      width: width,
+      height: controlStyle == .multiline ? .greatestFiniteMagnitude : max(viewport.height, 1)
     )
   }
 }

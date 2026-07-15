@@ -225,9 +225,9 @@ final class ViewerDeviceSession: ViewerAdmissionSessionReceiving, @unchecked Sen
   private let onSnapshot: @Sendable (ViewerSessionSnapshot) -> Void
   private let onTerminal: @Sendable (UUID, ViewerSessionTerminalCategory) -> Void
   private let uplinkSink: @Sendable (WireReceivedEvent) -> Void
-  private let uplinkJournal: @Sendable (WireReceivedEvent, ViewerStoredDisposition) -> Void
+  private let uplinkJournal: @Sendable (WireReceivedEvent, ViewerEventDisposition) -> Void
   private let uplinkDispositionJournal:
-    @Sendable (EventDirection, UInt64, ViewerStoredDisposition, UInt64) -> Void
+    @Sendable (EventDirection, UInt64, ViewerEventDisposition, UInt64) -> Void
   private let downlinkJournal: @Sendable ([ViewerDownlinkJournalEvent], UInt64) -> Void
   private let policyJournal: @Sendable (ViewerRatePolicy, UInt64) -> Void
   private let dropJournal: @Sendable ([ViewerDropJournalSample], UInt64) -> Void
@@ -280,14 +280,14 @@ final class ViewerDeviceSession: ViewerAdmissionSessionReceiving, @unchecked Sen
     nickname: String?,
     scheduler: ViewerAdmissionScheduler,
     uplinkSink: @escaping @Sendable (WireReceivedEvent) -> Void,
-    uplinkJournal: @escaping @Sendable (WireReceivedEvent, ViewerStoredDisposition) -> Void = {
+    uplinkJournal: @escaping @Sendable (WireReceivedEvent, ViewerEventDisposition) -> Void = {
       _, _ in
     },
     uplinkDispositionJournal:
       @escaping @Sendable (
         EventDirection,
         UInt64,
-        ViewerStoredDisposition,
+        ViewerEventDisposition,
         UInt64
       ) -> Void = { _, _, _, _ in },
     downlinkJournal: @escaping @Sendable ([ViewerDownlinkJournalEvent], UInt64) -> Void = { _, _ in
@@ -722,8 +722,8 @@ final class ViewerDeviceSession: ViewerAdmissionSessionReceiving, @unchecked Sen
     var plannedQueue = uplinkQueue
     var plannedJournalSequences = uplinkJournalSequences
     var plannedDrops = ViewerLocalDropCounts()
-    var journalCommits: [(WireReceivedEvent, ViewerStoredDisposition)] = []
-    var journalTerminals: [(UInt64, ViewerStoredDisposition)] = []
+    var journalCommits: [(WireReceivedEvent, ViewerEventDisposition)] = []
+    var journalTerminals: [(UInt64, ViewerEventDisposition)] = []
     for record in records {
       let envelope = record.envelope
       let queueID = EventID()
@@ -748,7 +748,7 @@ final class ViewerDeviceSession: ViewerAdmissionSessionReceiving, @unchecked Sen
       plannedJournalSequences[queueID] = wireSequence
       let immediatelyExpired = result.expiredEventIDs.contains(queueID)
       let immediatelyDisplaced = result.overflowDroppedEventIDs.contains(queueID)
-      let initialDisposition: ViewerStoredDisposition =
+      let initialDisposition: ViewerEventDisposition =
         immediatelyExpired ? .expired : (immediatelyDisplaced ? .overflowDisplaced : .buffered)
       journalCommits.append((received, initialDisposition))
       for expiredID in result.expiredEventIDs where expiredID != queueID {
@@ -1072,7 +1072,7 @@ final class ViewerDeviceSession: ViewerAdmissionSessionReceiving, @unchecked Sen
 
   private func journalUplinkTerminals(
     _ eventIDs: [EventID],
-    disposition: ViewerStoredDisposition,
+    disposition: ViewerEventDisposition,
     now: UInt64
   ) {
     for eventID in eventIDs {

@@ -42,7 +42,7 @@ struct ViewerDecodedPerformanceSnapshot: Equatable, Sendable {
     states: [ViewerPerformanceMetricState]
   ) throws {
     guard states.count == PerformanceMetricKey.allCases.count else {
-      throw ViewerPerformanceStoreFailure.invalidCarrier
+      throw ViewerPerformanceFailure.invalidCarrier
     }
     self.sampledAt = sampledAt
     self.sampleIntervalMilliseconds = sampleIntervalMilliseconds
@@ -212,113 +212,18 @@ enum ViewerPerformanceEventReconciler {
       lhs.viewerWallMilliseconds == rhs.viewerWallMilliseconds,
       lhs.viewerMonotonicNanoseconds == rhs.viewerMonotonicNanoseconds,
       lhs.content == rhs.content
-    else { throw ViewerPerformanceStoreFailure.invalidCarrier }
+    else { throw ViewerPerformanceFailure.invalidCarrier }
 
-    let locator: ViewerPerformanceEventLocator
-    switch (lhs.locator, rhs.locator) {
-    case (.durable(let leftRow, let leftDevice), .durable(let rightRow, let rightDevice)):
-      guard leftRow == rightRow, leftDevice == rightDevice else {
-        throw ViewerPerformanceStoreFailure.invalidCarrier
-      }
-      locator = lhs.locator
-    case (.durable, .transient):
-      locator = lhs.locator
-    case (.transient, .durable):
-      locator = rhs.locator
-    case (.transient(let leftID), .transient(let rightID)):
-      locator =
-        ViewerPerformanceCanonicalOrder.uuidPrecedes(leftID, rightID)
-        ? lhs.locator : rhs.locator
+    guard lhs.locator == rhs.locator else {
+      throw ViewerPerformanceFailure.invalidCarrier
     }
     return try ViewerPerformanceEventCarrier(
-      locator: locator,
+      locator: lhs.locator,
       key: lhs.key,
       viewerWallMilliseconds: lhs.viewerWallMilliseconds,
       viewerMonotonicNanoseconds: lhs.viewerMonotonicNanoseconds,
       content: lhs.content
     )
-  }
-}
-
-enum ViewerPerformanceFreezeFailure: Error, Equatable, Sendable {
-  case live(ViewerPerformanceStoreFailure)
-  case store(ViewerStoreExplorerFailure)
-}
-
-final class ViewerPerformanceFreezeCoordinator: @unchecked Sendable {
-  private let live: any ViewerLiveObservationProviding
-  private let storeGateway: ViewerStoreExplorerGateway
-
-  init(
-    live: any ViewerLiveObservationProviding,
-    storeGateway: ViewerStoreExplorerGateway
-  ) {
-    self.live = live
-    self.storeGateway = storeGateway
-  }
-
-  @discardableResult
-  func freezeCurrent(
-    connectionID: UUID,
-    recordingID: Int64,
-    deviceSessionID: Int64,
-    lowerMonotonicNanoseconds: Int64,
-    completion:
-      @escaping @Sendable (
-        Result<ViewerPerformanceFrozenReceipt, ViewerPerformanceFreezeFailure>
-      ) -> Void
-  ) -> ViewerStoreExplorerOperationToken? {
-    let slice: ViewerPerformanceLiveSlice
-    do {
-      slice = try live.freezePerformance(connectionID: connectionID)
-    } catch let failure as ViewerPerformanceStoreFailure {
-      completion(.failure(.live(failure)))
-      return nil
-    } catch {
-      completion(.failure(.live(.unavailable)))
-      return nil
-    }
-    guard let upper = Int64(exactly: slice.anchorMonotonicNanoseconds),
-      lowerMonotonicNanoseconds >= 0, lowerMonotonicNanoseconds <= upper
-    else {
-      completion(.failure(.live(.invalidScope)))
-      return nil
-    }
-    let source = ViewerPerformanceSource.current(
-      runtimeLogicalID: live.runtimeLogicalID,
-      connectionID: connectionID
-    )
-    return storeGateway.beginPerformanceTraversal(
-      recordingID: recordingID,
-      deviceSessionID: deviceSessionID,
-      lowerMonotonicNanoseconds: lowerMonotonicNanoseconds,
-      upperMonotonicNanoseconds: upper
-    ) { result in
-      switch result {
-      case .success(let scope):
-        completion(
-          .success(
-            ViewerPerformanceFrozenReceipt(
-              source: source,
-              storeScope: scope,
-              liveSlice: slice
-            )
-          )
-        )
-      case .failure(.unavailable):
-        completion(
-          .success(
-            ViewerPerformanceFrozenReceipt(
-              source: source,
-              storeScope: nil,
-              liveSlice: slice
-            )
-          )
-        )
-      case .failure(let failure):
-        completion(.failure(.store(failure)))
-      }
-    }
   }
 }
 
@@ -344,12 +249,4 @@ extension ViewerPerformanceDecodeOutcome: CustomReflectable, CustomStringConvert
   var description: String { "ViewerPerformanceDecodeOutcome(redacted)" }
   var debugDescription: String { description }
   var customMirror: Mirror { Mirror(self, children: [:], displayStyle: .enum) }
-}
-
-extension ViewerPerformanceFreezeCoordinator: CustomReflectable, CustomStringConvertible,
-  CustomDebugStringConvertible
-{
-  var description: String { "ViewerPerformanceFreezeCoordinator(redacted)" }
-  var debugDescription: String { description }
-  var customMirror: Mirror { Mirror(self, children: [:], displayStyle: .class) }
 }

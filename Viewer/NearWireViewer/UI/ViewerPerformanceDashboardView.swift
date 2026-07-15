@@ -695,7 +695,7 @@ struct ViewerPerformanceWindowContent: View {
 
 struct ViewerPerformanceDashboardView: View {
   @ObservedObject var coordinator: ViewerAnalysisModeCoordinator
-  @ObservedObject private var dashboard: ViewerPerformanceDashboardModel
+  private let dashboard: ViewerPerformanceDashboardModel
   private let openRawEvent: (Int, ViewerPerformanceNumericMetric) -> Void
 
   init(
@@ -703,7 +703,7 @@ struct ViewerPerformanceDashboardView: View {
     openRawEvent: ((Int, ViewerPerformanceNumericMetric) -> Void)? = nil
   ) {
     self.coordinator = coordinator
-    _dashboard = ObservedObject(wrappedValue: coordinator.performanceController.model)
+    dashboard = coordinator.performanceController.model
     self.openRawEvent = openRawEvent ?? { [weak coordinator] bucketIndex, metric in
       coordinator?.openRawEvent(bucketIndex: bucketIndex, metric: metric)
     }
@@ -788,6 +788,10 @@ struct ViewerPerformanceDashboardContent: View {
       .frame(maxWidth: .infinity, alignment: .leading)
     }
     .accessibilityIdentifier("nearwire.performance.dashboard")
+    .transaction { transaction in
+      transaction.animation = nil
+      transaction.disablesAnimations = true
+    }
   }
 
   private var performanceControls: some View {
@@ -848,16 +852,10 @@ struct ViewerPerformanceDashboardContent: View {
         detail: "The current view is frozen. Resume to apply the latest bounded refresh.",
         systemImage: "pause.circle"
       )
-    } else if case .loading(let retainsPresentation) = model.phase, retainsPresentation {
-      notice(
-        title: "Refreshing performance data",
-        detail: "The previous complete presentation remains visible until the new result is ready.",
-        systemImage: "arrow.clockwise"
-      )
     } else if model.coverage == .liveWindowOnly {
       notice(
-        title: "Live window only",
-        detail: "Earlier durable history is unavailable; the leading range remains disconnected.",
+        title: "Memory window only",
+        detail: "Earlier Events are outside the retained memory window; the leading range remains disconnected.",
         systemImage: "dot.radiowaves.left.and.right"
       )
     }
@@ -895,7 +893,7 @@ struct ViewerPerformanceDashboardContent: View {
       HStack(alignment: .firstTextBaseline) {
         Text("Current").font(.title2.weight(.semibold))
         Spacer()
-        Text(model.coverage == .liveWindowOnly ? "Live window only" : "Latest sample")
+        Text(model.coverage == .liveWindowOnly ? "Memory window only" : "Latest sample")
           .font(.caption)
           .foregroundStyle(.secondary)
       }
@@ -971,12 +969,6 @@ struct ViewerPerformanceDashboardContent: View {
           Text("Loading performance data")
         }
         .frame(maxWidth: .infinity, minHeight: 92, alignment: .center)
-      case .storageUnavailable:
-        performanceStatus(
-          title: "Storage unavailable",
-          detail: "Historical performance data cannot be read right now.",
-          systemImage: "externaldrive.badge.exclamationmark"
-        )
       case .failed:
         performanceStatus(
           title: "Performance data unavailable",

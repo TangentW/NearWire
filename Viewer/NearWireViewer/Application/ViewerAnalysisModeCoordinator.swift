@@ -38,104 +38,6 @@ enum ViewerPerformanceTargetSelection: Equatable, Sendable {
   }
 }
 
-enum ViewerPerformanceTargetCompiler {
-  static func compile(
-    source: ViewerExplorerSource,
-    selectedDeviceIDs: [UUID],
-    catalogRecordingID: Int64?,
-    recordingRows: [ViewerRecordingCatalogRow],
-    deviceRows: [ViewerDeviceCatalogRow],
-    sessions: [ViewerSessionSnapshot]
-  ) -> ViewerPerformanceTargetSelection {
-    guard selectedDeviceIDs.count == 1, let selectedDeviceID = selectedDeviceIDs.first else {
-      return .guidance(.selectOneDevice)
-    }
-    let expectedRecordingID: Int64?
-    switch source {
-    case .current(let runtimeLogicalID):
-      expectedRecordingID = recordingRows.first { $0.logicalID == runtimeLogicalID }?.rowID
-    case .historical(let recordingID, _):
-      expectedRecordingID = recordingID
-    }
-    guard catalogRecordingID == expectedRecordingID,
-      let device = deviceRows.first(where: { $0.logicalID == selectedDeviceID })
-    else { return .guidance(.deviceNotReady) }
-
-    do {
-      switch source {
-      case .current(let runtimeLogicalID):
-        guard
-          sessions.contains(where: {
-            $0.connectionID == selectedDeviceID && $0.state == .active
-          }),
-          let recording = recordingRows.first(where: { $0.logicalID == runtimeLogicalID }),
-          recording.rowID == device.recordingID
-        else { return .guidance(.deviceNotReady) }
-        let performanceSource = ViewerPerformanceSource.current(
-          runtimeLogicalID: runtimeLogicalID,
-          connectionID: selectedDeviceID
-        )
-        return .target(
-          try ViewerPerformanceDashboardTarget.current(
-            source: performanceSource,
-            recordingID: recording.rowID,
-            deviceSessionID: device.rowID,
-            deviceStartMonotonicNanoseconds: device.startedMonotonicNanoseconds
-          )
-        )
-
-      case .historical(let recordingID, let recordingLogicalID):
-        guard
-          let recording = recordingRows.first(where: {
-            $0.rowID == recordingID && $0.logicalID == recordingLogicalID
-          }), device.recordingID == recordingID
-        else { return .guidance(.sourceUnavailable) }
-        let performanceSource = try ViewerPerformanceSource.makeHistorical(
-          recordingID: recordingID,
-          deviceSessionID: device.rowID,
-          recordingLogicalID: recordingLogicalID,
-          deviceLogicalID: device.logicalID
-        )
-        let anchor: ViewerPerformanceAnchor
-        switch device.state {
-        case "closed":
-          guard let end = device.endedMonotonicNanoseconds else {
-            return .guidance(.sourceUnavailable)
-          }
-          anchor =
-            end == device.startedMonotonicNanoseconds
-            ? try .empty(
-              deviceStartMonotonicNanoseconds: device.startedMonotonicNanoseconds
-            )
-            : try .ended(
-              deviceStartMonotonicNanoseconds: device.startedMonotonicNanoseconds,
-              deviceEndMonotonicNanoseconds: end
-            )
-        case "recoveredAfterInterruption":
-          if device.endedMonotonicNanoseconds == device.startedMonotonicNanoseconds {
-            anchor = try .empty(
-              deviceStartMonotonicNanoseconds: device.startedMonotonicNanoseconds
-            )
-          } else {
-            guard let upper = recording.endedMonotonicNanoseconds else {
-              return .guidance(.sourceUnavailable)
-            }
-            anchor = try .interrupted(
-              deviceStartMonotonicNanoseconds: device.startedMonotonicNanoseconds,
-              frozenRecordingUpperMonotonicNanoseconds: upper
-            )
-          }
-        default:
-          return .guidance(.sourceUnavailable)
-        }
-        return .target(try .historical(source: performanceSource, anchor: anchor))
-      }
-    } catch {
-      return .guidance(.sourceUnavailable)
-    }
-  }
-}
-
 struct ViewerAnalysisModeDiagnostics: Equatable, Sendable {
   let transitionRevision: UInt64
   let pendingTransitionCount: Int
@@ -155,9 +57,6 @@ struct ViewerPerformanceDeviceOption: Identifiable, Equatable, Sendable {
 struct ViewerAnalysisEventDriver {
   typealias Handler = @MainActor @Sendable () -> Void
   typealias HandlerInstaller = @MainActor @Sendable (@escaping Handler) -> Void
-  typealias RematerializationHandler = @MainActor @Sendable (Task<Void, Never>) -> Void
-  typealias RematerializationHandlerInstaller =
-    @MainActor @Sendable (@escaping RematerializationHandler) -> Void
 
   let targetSelection: @MainActor @Sendable (UUID?) -> ViewerPerformanceTargetSelection
   let performanceDevices: @MainActor @Sendable () -> [ViewerPerformanceDeviceOption]
@@ -169,10 +68,8 @@ struct ViewerAnalysisEventDriver {
   let acceptExactReveal:
     @MainActor @Sendable (ViewerExplorerEventIdentity) async -> Bool
   let cancelExactReveal: @MainActor @Sendable () -> Task<Void, Never>
-  let rematerializeStore: @MainActor @Sendable () -> Task<Void, Never>
   let setSelectionHandler: HandlerInstaller
   let setRefreshHandler: HandlerInstaller
-  let setRematerializationHandler: RematerializationHandlerInstaller
 
   init(controller: ViewerEventExplorerController) {
     targetSelection = { [weak controller] deviceID in
@@ -211,17 +108,11 @@ struct ViewerAnalysisEventDriver {
     cancelExactReveal = { [weak controller] in
       controller?.cancelExactRevealAndWait() ?? Task {}
     }
-    rematerializeStore = { [weak controller] in
-      controller?.rematerializeAfterStoreReplacement() ?? Task {}
-    }
     setSelectionHandler = { [weak controller] handler in
       controller?.setAnalysisSelectionHandler(handler)
     }
     setRefreshHandler = { [weak controller] handler in
       controller?.setAnalysisRefreshHandler(handler)
-    }
-    setRematerializationHandler = { [weak controller] handler in
-      controller?.setAnalysisRematerializationHandler(handler)
     }
   }
 
@@ -242,10 +133,8 @@ struct ViewerAnalysisEventDriver {
     acceptExactReveal:
       (@MainActor @Sendable (ViewerExplorerEventIdentity) async -> Bool)? = nil,
     cancelExactReveal: @escaping @MainActor @Sendable () -> Task<Void, Never> = { Task {} },
-    rematerializeStore: @escaping @MainActor @Sendable () -> Task<Void, Never> = { Task {} },
     setSelectionHandler: @escaping HandlerInstaller = { _ in },
-    setRefreshHandler: @escaping HandlerInstaller = { _ in },
-    setRematerializationHandler: @escaping RematerializationHandlerInstaller = { _ in }
+    setRefreshHandler: @escaping HandlerInstaller = { _ in }
   ) {
     self.targetSelection = targetSelectionForDevice ?? { _ in targetSelection() }
     self.performanceDevices = performanceDevices
@@ -257,10 +146,8 @@ struct ViewerAnalysisEventDriver {
     self.acceptExactReveal =
       acceptExactReveal ?? { identity in reveal(identity) }
     self.cancelExactReveal = cancelExactReveal
-    self.rematerializeStore = rematerializeStore
     self.setSelectionHandler = setSelectionHandler
     self.setRefreshHandler = setRefreshHandler
-    self.setRematerializationHandler = setRematerializationHandler
   }
 }
 
@@ -315,9 +202,6 @@ final class ViewerAnalysisModeCoordinator: ObservableObject, CustomReflectable,
     }
     event.setRefreshHandler { [weak self] in
       self?.liveRefreshDidArrive()
-    }
-    event.setRematerializationHandler { [weak self] rematerialization in
-      self?.sharedSelectionRematerializationDidStart(rematerialization)
     }
   }
 
@@ -387,66 +271,6 @@ final class ViewerAnalysisModeCoordinator: ObservableObject, CustomReflectable,
     publish()
   }
 
-  func noteStoreChanged() {
-    guard !sealed, mode == .performance else { return }
-    performanceController.requestRefresh()
-  }
-
-  func noteStoreReplaced() {
-    guard !sealed else { return }
-    transitionRevision = Self.increment(transitionRevision)
-    let requestedRevision = transitionRevision
-    let expectedMode = mode
-    let prior = transitionTask
-    let eventRematerializationWait = event.rematerializeStore()
-    let performanceWait = performanceController.invalidateStoreGenerationAndWait()
-    let resolverWait = rawResolver.cancelActiveAndWait()
-    let exactRevealWait = event.cancelExactReveal()
-    guidance = nil
-    publish()
-    transitionTask = trackTransition { [weak self] in
-      await prior?.value
-      await performanceWait.value
-      await resolverWait.value
-      await exactRevealWait.value
-      await eventRematerializationWait.value
-      guard let self, self.accepts(requestedRevision, mode: expectedMode) else { return }
-      await self.event.activate().value
-      guard self.accepts(requestedRevision, mode: expectedMode) else { return }
-      switch expectedMode {
-      case .events:
-        self.performanceController.rebuildAfterStoreGenerationReplacement(
-          target: nil,
-          rangeKind: self.rangeKind
-        )
-      case .performance:
-        self.refreshPerformanceDeviceOptions()
-        self.performanceDeviceID = self.reconciledPerformanceDeviceID()
-        switch self.currentPerformanceTargetSelection() {
-        case .guidance(let guidance):
-          self.performanceController.rebuildAfterStoreGenerationReplacement(
-            target: nil,
-            rangeKind: self.rangeKind
-          )
-          guard self.accepts(requestedRevision, mode: .performance) else { return }
-          self.guidance = guidance
-          self.publish()
-        case .target(let target):
-          self.performanceController.rebuildAfterStoreGenerationReplacement(
-            target: target,
-            rangeKind: self.rangeKind
-          )
-          guard self.accepts(requestedRevision, mode: .performance),
-            self.currentPerformanceTargetSelection() == .target(target)
-          else { return }
-          self.performanceController.activate()
-          self.guidance = nil
-          self.publish()
-        }
-      }
-    }
-  }
-
   func openRawEvent(
     bucketIndex: Int,
     metric: ViewerPerformanceNumericMetric
@@ -493,12 +317,11 @@ final class ViewerAnalysisModeCoordinator: ObservableObject, CustomReflectable,
     transitionRevision = Self.increment(transitionRevision)
     event.setSelectionHandler {}
     event.setRefreshHandler {}
-    event.setRematerializationHandler { _ in }
     let transitionWait = transitionTask ?? Task {}
     let eventWait = event.deactivate()
     let exactRevealWait = event.cancelExactReveal()
     let performanceWait = performanceController.sealAndWait()
-    let resolverWait = rawResolver.sealAndWait()
+    let resolverWait = rawResolver.sealAndClear()
     return Task {
       async let transition: Void = transitionWait.value
       async let event: Void = eventWait.value
@@ -540,69 +363,6 @@ final class ViewerAnalysisModeCoordinator: ObservableObject, CustomReflectable,
       return
     }
     beginPerformanceTransition(clearsCurrentSelection: true)
-  }
-
-  private func sharedSelectionRematerializationDidStart(
-    _ rematerialization: Task<Void, Never>
-  ) {
-    guard !sealed else { return }
-    transitionRevision = Self.increment(transitionRevision)
-    let requestedRevision = transitionRevision
-    let expectedMode = mode
-    let prior = transitionTask
-    let performanceWait: Task<Void, Never>
-    let clearWait: Task<Void, Never>
-    switch expectedMode {
-    case .events:
-      performanceWait = Task {}
-      clearWait = Task {}
-    case .performance:
-      performanceWait = performanceController.deactivateAndWait()
-      clearWait = performanceController.replace(target: nil, rangeKind: rangeKind)
-    }
-    let resolverWait = rawResolver.cancelActiveAndWait()
-    let exactRevealWait = event.cancelExactReveal()
-    guidance = nil
-    publish()
-    transitionTask = trackTransition { [weak self] in
-      await prior?.value
-      await performanceWait.value
-      await clearWait.value
-      await resolverWait.value
-      await exactRevealWait.value
-      await rematerialization.value
-      guard let self, self.accepts(requestedRevision, mode: expectedMode) else { return }
-      await self.event.activate().value
-      guard self.accepts(requestedRevision, mode: expectedMode) else { return }
-      switch expectedMode {
-      case .events:
-        break
-      case .performance:
-        self.refreshPerformanceDeviceOptions()
-        self.performanceDeviceID = self.reconciledPerformanceDeviceID()
-        switch self.currentPerformanceTargetSelection() {
-        case .guidance(let guidance):
-          await self.performanceController.replace(
-            target: nil,
-            rangeKind: self.rangeKind
-          ).value
-          guard self.accepts(requestedRevision, mode: .performance) else { return }
-          self.guidance = guidance
-          self.publish()
-        case .target(let target):
-          await self.performanceController.replace(
-            target: target,
-            rangeKind: self.rangeKind
-          ).value
-          guard self.accepts(requestedRevision, mode: .performance),
-            self.currentPerformanceTargetSelection() == .target(target)
-          else { return }
-          self.performanceController.activate()
-          self.guidance = nil
-          self.publish()
-        }
-      }
-    }
   }
 
   private func liveRefreshDidArrive() {

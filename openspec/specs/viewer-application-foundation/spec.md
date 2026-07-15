@@ -162,21 +162,15 @@ This change's placeholder handoff owner SHALL close accepted handoffs cleanly; a
 
 ### Requirement: Foundation UI is truthful and recovery-oriented
 
-The main window SHALL show pairing/listener status, Copy, Refresh, Pause/Resume, the approval setting, pending approval actions, fixed identity/listener recovery actions, one bounded Devices strip, Session import/export actions, and Timeline/Inspector/Composer visibility controls. It SHALL NOT present a Sources or recorded-session sidebar. It SHALL label transport as `TLS encrypted; Viewer identity is not authenticated` and SHALL state that the pairing code and stable `vid` are visible to nearby Bonjour browsers. It SHALL NOT call either value a password, secret, authentication token, or secure connection proof.
+The main window SHALL show pairing/listener status, Copy, Refresh, Pause/Resume, the approval setting, pending approval actions, fixed identity/listener recovery actions, one bounded Devices strip, memory-Session import/export actions, and Timeline/Inspector/Composer visibility controls. It SHALL NOT present a Sources or recorded-session sidebar, local-database settings, database status, cleanup, retry, capacity, retention, or durable-recording state. It SHALL label transport as `TLS encrypted; Viewer identity is not authenticated` and SHALL state that the pairing code and stable `vid` are visible to nearby Bonjour browsers.
 
-All controls SHALL expose accessibility labels, help, keyboard focus, and disabled states derived from the single application model. Panel controls SHALL expose selected state without relying only on color. User-visible and diagnostic errors SHALL use closed safe categories and SHALL NOT include pairing code, Keychain labels, identity values, certificate data, endpoint/interface descriptions, wire bytes, App content, imported Event content, or arbitrary system error text.
+All controls SHALL expose accessibility labels, help, keyboard focus, and disabled states derived from the single application model. User-visible and diagnostic errors SHALL use closed safe categories and SHALL NOT include pairing code, identity material, endpoint/interface descriptions, wire bytes, App content, imported Event content, or arbitrary system error text.
 
 #### Scenario: Listener is ready
 
 - **WHEN** the exact service is registered
-- **THEN** pairing, Device, Session, and available workspace actions use their truthful enabled states
-- **AND** the TLS limitation remains visible
-
-#### Scenario: Runtime enters a safe failure
-
-- **WHEN** identity, listener, registration, admission, working Store, or Session transfer startup fails
-- **THEN** the window remains usable with category-specific recovery actions
-- **AND** no sensitive or untrusted diagnostic value is rendered
+- **THEN** pairing, Device, memory-Session, and available workspace actions use truthful enabled states
+- **AND** no database lifecycle or storage setting is presented
 
 ### Requirement: Viewer application metadata and privacy match local discovery
 
@@ -239,32 +233,19 @@ smaller value.
 
 ### Requirement: Viewer is a native multi-window macOS application
 
-The repository SHALL contain a manually maintained `Viewer/NearWireViewer.xcodeproj` with a native SwiftUI application named `NearWire`, module name `NearWireViewer`, one unit-test target, macOS 13 deployment, and Swift 5 language mode. It SHALL use the repository-local `NearWireCore` product and Apple frameworks only. It SHALL NOT add a nested package manifest, podspec, project generator, menu-bar agent, daemon, or root Swift Package dependency.
+The repository SHALL contain a manually maintained `Viewer/NearWireViewer.xcodeproj` with a native SwiftUI application named `NearWire`, module name `NearWireViewer`, one unit-test target, macOS 13 deployment, and Swift 5 language mode. It SHALL use the repository-local `NearWireCore` product and Apple frameworks only. It SHALL NOT add a nested package manifest, podspec, project generator, menu-bar agent, daemon, root Swift Package dependency, or local Session database.
 
-The application SHALL expose one singleton main Event window, one singleton auxiliary Performance window, one process-scoped working Session, and no supported second-listener window or historical Source browser. Opening the application SHALL start one runtime generation without a Start button. Either supported window MAY remain open or reopen while reusing that exact runtime generation. Closing the last window or terminating the application SHALL synchronously close admission, stop publication/listening, cancel pending attempts, close the working Store, and await one idempotent cleanup receipt for at most one second without leaving a hidden listener. Expiry of that wait SHALL NOT reopen admission. The retained cleanup owner MAY continue finite removal retries while the process remains alive, and termination SHALL NOT wait without a bound. The working Session SHALL NOT be reopened as Viewer history on a later process launch.
+The application SHALL expose one singleton main Event window, one singleton auxiliary Performance window, one process-lifetime memory Session, and no supported second-listener window or historical Source browser. Opening the application SHALL start one runtime generation without a Start button. Either window MAY remain open or reopen while reusing that exact runtime generation. Closing the last window or terminating the application SHALL synchronously close admission, stop publication/listening, cancel pending attempts, clear received memory content, and await one idempotent cleanup receipt for at most one second without leaving a hidden listener. Expiry of that wait SHALL NOT reopen admission.
 
 #### Scenario: Main and Performance windows open and close
 
 - **WHEN** the NearWire main window starts one successful runtime and the operator opens Performance
-- **THEN** exactly one Viewer runtime generation and one working Session serve both singleton windows
-- **AND** closing only one window preserves that generation while the other remains open
-- **AND** closing the last window stops that exact generation without a menu-bar, daemon, or retained historical Source lifetime
-
-#### Scenario: Application is built from the repository
-
-- **WHEN** the committed Viewer scheme is built and tested on macOS 13 compatibility settings
-- **THEN** it compiles in Swift 5 language mode from the manual Xcode project
-- **AND** no Viewer dependency appears in root `Package.swift` or `NearWire.podspec`
-
-#### Scenario: Shutdown cleanup does not complete promptly
-
-- **WHEN** application termination or identity reset closes a runtime whose owned handoff or working-Store cleanup does not complete within one second
-- **THEN** the bounded wait returns without reopening listener admission
-- **AND** the retained cleanup owner uses finite retries while the process remains alive, while an interrupted marked workspace is never reopened as history
+- **THEN** exactly one Viewer runtime generation and one memory Session serve both singleton windows
+- **AND** closing the last window stops that generation and clears its Session without a database, menu-bar item, daemon, or historical Source lifetime
 
 ### Requirement: Viewer follows the system language and supports one manual language preference
 
-The Viewer SHALL provide complete English and Simplified Chinese localization for Viewer-owned UI. A fresh or invalid preference SHALL use System and resolve from the current macOS language. Viewer Settings SHALL offer exactly System, English, and Simplified Chinese. A manual choice SHALL persist as one bounded enum value across launches and apply immediately to the main Event window, singleton Performance window, Settings, and inherited presentation surfaces without restarting the runtime, listener, working Session, Store, or window identity.
+The Viewer SHALL provide complete English and Simplified Chinese localization for Viewer-owned UI. A fresh or invalid preference SHALL use System and resolve from the current macOS language. Viewer Settings SHALL offer exactly System, English, and Simplified Chinese. A manual choice SHALL persist as one bounded enum value across launches and apply immediately to the main Event window, singleton Performance window, Settings, and inherited presentation surfaces without restarting the runtime, listener, working Session, or window identity.
 
 System mode SHALL react to relevant macOS locale-change publication. Any Chinese system locale, including Traditional Chinese locales, SHALL resolve to the supported Simplified Chinese presentation; every non-Chinese system locale SHALL resolve to English. English and Simplified Chinese manual choices SHALL use explicit supported locales. Missing or malformed preference data SHALL safely fall back to System; a missing translation SHALL fall back to the English development value. The preference SHALL contain no Event, Device, identity, or Session content.
 
@@ -294,7 +275,7 @@ System mode SHALL react to relevant macOS locale-change publication. Any Chinese
 
 ### Requirement: Viewer localization stays inside the Viewer product boundary
 
-Viewer SHALL localize its own labels, guidance, validation, errors, confirmations, menus, tooltips, state descriptions, formatted presentation, and accessibility text. It SHALL display App-provided names, Bundle IDs, nicknames, pairing codes, Event types, Event content, JSON keys/values, UUIDs, and other received values verbatim. Localization SHALL NOT mutate protocol values, wire behavior, query ordering, Store schema/content, Session JSON, exports, logs, SDK APIs, NearWireUI, or Demo UI.
+Viewer SHALL localize its own labels, guidance, validation, errors, confirmations, menus, tooltips, state descriptions, formatted presentation, and accessibility text. It SHALL display App-provided names, Bundle IDs, nicknames, pairing codes, Event types, Event content, JSON keys/values, UUIDs, and other received values verbatim. Localization SHALL NOT mutate protocol values, wire behavior, query ordering, Session JSON, exports, logs, SDK APIs, NearWireUI, or Demo UI.
 
 #### Scenario: Received content resembles a localization key
 

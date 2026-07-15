@@ -30,14 +30,14 @@ struct ViewerPerformanceChartProjection: Identifiable, Equatable, Sendable {
   ) throws -> [ViewerPerformanceChartProjection] {
     guard buckets.count <= ViewerPerformanceAggregationLimits.maximumBuckets,
       buckets.enumerated().allSatisfy({ $0.offset == $0.element.index })
-    else { throw ViewerPerformanceStoreFailure.limitExceeded }
+    else { throw ViewerPerformanceFailure.limitExceeded }
 
     let groups = ViewerPerformanceChartGroup.all
     let metrics = groups.flatMap(\.metrics)
     guard groups.count == ViewerPerformanceAggregationLimits.maximumCharts,
       metrics == ViewerPerformanceNumericMetric.allCases,
       Set(metrics).count == metrics.count
-    else { throw ViewerPerformanceStoreFailure.invalidCarrier }
+    else { throw ViewerPerformanceFailure.invalidCarrier }
 
     var totalMarkCount = 0
     var projections: [ViewerPerformanceChartProjection] = []
@@ -58,7 +58,7 @@ struct ViewerPerformanceChartProjection: Identifiable, Equatable, Sendable {
       let (nextMarkCount, additionOverflow) = totalMarkCount.addingReportingOverflow(markCount)
       guard !multiplicationOverflow, !additionOverflow,
         nextMarkCount <= ViewerPerformanceAggregationLimits.maximumTotalMarks
-      else { throw ViewerPerformanceStoreFailure.limitExceeded }
+      else { throw ViewerPerformanceFailure.limitExceeded }
       totalMarkCount = nextMarkCount
       projections.append(
         ViewerPerformanceChartProjection(
@@ -135,7 +135,7 @@ struct ViewerPerformanceChartProjection: Identifiable, Equatable, Sendable {
       let maximum = accumulator.maximum,
       minimum.isFinite, average.isFinite, maximum.isFinite,
       minimum >= 0, minimum <= average, average <= maximum
-    else { throw ViewerPerformanceStoreFailure.invalidCarrier }
+    else { throw ViewerPerformanceFailure.invalidCarrier }
   }
 }
 

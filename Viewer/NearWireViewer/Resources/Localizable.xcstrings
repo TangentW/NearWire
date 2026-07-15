@@ -119,6 +119,7 @@
       }
     },
     "%@ · sequence %lld · %@" : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -1268,84 +1269,18 @@
         }
       }
     },
-    "Cancelling export of %lld recorded Event(s)" : {
+    "Cancelling export of %lld retained Event(s)" : {
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Cancelling export of %lld recorded Event(s)"
+            "value" : "Cancelling export of %lld retained Event(s)"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "正在取消导出 %lld 个已记录事件"
-          }
-        }
-      }
-    },
-    "Candidates" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Candidates"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "候选项"
-          }
-        }
-      }
-    },
-    "Causality" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Causality"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "因果关系"
-          }
-        }
-      }
-    },
-    "Causality candidates were bounded; additional matches may exist." : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Causality candidates were bounded; additional matches may exist."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "因果关系候选项已受限，可能还存在其他匹配项。"
-          }
-        }
-      }
-    },
-    "Causality Unavailable" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Causality Unavailable"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "因果关系不可用"
+            "value" : "正在取消导出 %lld 个保留事件"
           }
         }
       }
@@ -1648,18 +1583,18 @@
         }
       }
     },
-    "Clear recorded Events from the current Session" : {
+    "Clear retained Events from the current Session" : {
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Clear recorded Events from the current Session"
+            "value" : "Clear retained Events from the current Session"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "清除当前会话中已记录的事件"
+            "value" : "清除当前会话中保留的事件"
           }
         }
       }
@@ -1727,23 +1662,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "已折叠"
-          }
-        }
-      }
-    },
-    "Committed %lld recorded Event(s) to the selected JSON file." : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Committed %lld recorded Event(s) to the selected JSON file."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "已将 %lld 个已记录事件写入所选 JSON 文件。"
           }
         }
       }
@@ -2652,39 +2570,6 @@
         }
       }
     },
-    "Earlier durable history is unavailable; the leading range remains disconnected." : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Earlier durable history is unavailable; the leading range remains disconnected."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "更早的持久化历史不可用，范围前段保持断开。"
-          }
-        }
-      }
-    },
-    "Edges" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Edges"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "关系边"
-          }
-        }
-      }
-    },
     "Effective: ↑ %lf/s  ↓ %lf/s" : {
       "localizations" : {
         "en" : {
@@ -3166,18 +3051,18 @@
         }
       }
     },
-    "Exporting %lld recorded Event(s)" : {
+    "Exporting %lld retained Event(s)" : {
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Exporting %lld recorded Event(s)"
+            "value" : "Exporting %lld retained Event(s)"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "正在导出 %lld 个已记录事件"
+            "value" : "正在导出 %lld 个保留事件"
           }
         }
       }
@@ -3348,6 +3233,7 @@
       }
     },
     "Full Text" : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -3359,23 +3245,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "全文"
-          }
-        }
-      }
-    },
-    "Full-text search requires recorded data — transient rows excluded." : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Full-text search requires recorded data — transient rows excluded."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "全文搜索需要已记录数据，瞬时行已排除。"
           }
         }
       }
@@ -3580,23 +3449,6 @@
         }
       }
     },
-    "Historical performance data cannot be read right now." : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Historical performance data cannot be read right now."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "目前无法读取历史性能数据。"
-          }
-        }
-      }
-    },
     "I Understand — Choose Destination" : {
       "localizations" : {
         "en" : {
@@ -3674,6 +3526,39 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "正在导入会话"
+          }
+        }
+      }
+    },
+    "in memory" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "in memory"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "内存中"
+          }
+        }
+      }
+    },
+    "In memory" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "In memory"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仅存于内存"
           }
         }
       }
@@ -3992,41 +3877,8 @@
         }
       }
     },
-    "Live — not recording" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Live — not recording"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "实时—未记录"
-          }
-        }
-      }
-    },
-    "Live connection" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Live connection"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "实时连接"
-          }
-        }
-      }
-    },
     "Live window only" : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -4043,6 +3895,7 @@
       }
     },
     "Live: ingress %llu, window %llu, conflicts %llu, diagnostic loss %llu, storage outages %llu, recoveries %llu" : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -4070,22 +3923,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "正在加载受限事件窗口"
-          }
-        }
-      }
-    },
-    "Loading causality" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Loading causality"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "正在加载因果关系"
           }
         }
       }
@@ -4334,6 +4171,38 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "仅内存"
+          }
+        }
+      }
+    },
+    "Memory window only" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Memory window only"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仅当前内存窗口"
+          }
+        }
+      }
+    },
+    "Memory: ingress %llu, window %llu, conflicts %llu, diagnostic loss %llu" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Memory: ingress %1$llu, window %2$llu, conflicts %3$llu, diagnostic loss %4$llu"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "内存：入口溢出 %1$llu，窗口溢出 %2$llu，冲突 %3$llu，诊断丢失 %4$llu"
           }
         }
       }
@@ -4615,23 +4484,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "没有可用设备"
-          }
-        }
-      }
-    },
-    "No Causality Selection" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "No Causality Selection"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "未选择因果关系"
           }
         }
       }
@@ -5005,39 +4857,6 @@
         }
       }
     },
-    "not recorded" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "not recorded"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "未记录"
-          }
-        }
-      }
-    },
-    "Not recorded" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Not recorded"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "未记录"
-          }
-        }
-      }
-    },
     "not selected" : {
       "extractionState" : "stale",
       "localizations" : {
@@ -5119,6 +4938,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "关闭"
+          }
+        }
+      }
+    },
+    "Offline" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Offline"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "离线"
           }
         }
       }
@@ -5498,22 +5333,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "性能不可用"
-          }
-        }
-      }
-    },
-    "Permanently removes recorded Events from the current Session." : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Permanently removes recorded Events from the current Session."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "从当前会话中永久移除已记录事件。"
           }
         }
       }
@@ -6117,158 +5936,6 @@
         }
       }
     },
-    "recorded" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "recorded"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "已记录"
-          }
-        }
-      }
-    },
-    "Recorded" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Recorded"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "已记录"
-          }
-        }
-      }
-    },
-    "Recorded App" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Recorded App"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "已记录 App"
-          }
-        }
-      }
-    },
-    "Recorded data is currently unavailable. Live data may still appear." : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Recorded data is currently unavailable. Live data may still appear."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "已记录数据目前不可用，但实时数据仍可能显示。"
-          }
-        }
-      }
-    },
-    "Recorded Data Required" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Recorded Data Required"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "需要已记录数据"
-          }
-        }
-      }
-    },
-    "Recorded Events" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Recorded Events"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "已记录事件"
-          }
-        }
-      }
-    },
-    "Recording" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Recording"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "正在记录"
-          }
-        }
-      }
-    },
-    "Recording deleted." : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Recording deleted."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "记录已删除。"
-          }
-        }
-      }
-    },
-    "Recording metadata saved." : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Recording metadata saved."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "记录元数据已保存。"
-          }
-        }
-      }
-    },
     "Refine the filters to stay within bounded query work." : {
       "extractionState" : "stale",
       "localizations" : {
@@ -6415,6 +6082,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "远端报告的丢弃"
+          }
+        }
+      }
+    },
+    "Removes retained Events from the current memory Session." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Removes retained Events from the current memory Session."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "从当前内存会话中移除保留的事件。"
           }
         }
       }
@@ -6873,23 +6556,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "搜索模式"
-          }
-        }
-      }
-    },
-    "Select a recorded Event to inspect bounded causality candidates." : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Select a recorded Event to inspect bounded causality candidates."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "选择已记录事件以检查受限的因果关系候选项。"
           }
         }
       }
@@ -7647,19 +7313,34 @@
         }
       }
     },
-    "The file is outside Viewer quota, retention, cleanup, and automatic deletion." : {
-      "extractionState" : "stale",
+    "The export includes Session timing and state, diagnostic gaps, Event metadata and content, and peer-provided App display name, identifier, and version; these can contain identifying or sensitive data." : {
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "The file is outside Viewer quota, retention, cleanup, and automatic deletion."
+            "value" : "The export includes Session timing and state, diagnostic gaps, Event metadata and content, and peer-provided App display name, identifier, and version; these can contain identifying or sensitive data."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "此文件不受 Viewer 配额、保留期、清理和自动删除策略管理。"
+            "value" : "导出内容包括会话时间与状态、诊断缺口、事件元数据和内容，以及 App 提供的显示名称、标识符和版本；这些信息可能包含身份信息或敏感数据。"
+          }
+        }
+      }
+    },
+    "Viewer does not manage, retain, clean up, or delete the exported file." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Viewer does not manage, retain, clean up, or delete the exported file."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Viewer 不会管理、保留、清理或删除导出的文件。"
           }
         }
       }
@@ -7866,23 +7547,6 @@
         }
       }
     },
-    "The recording text exceeds its supported byte or character limit." : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "The recording text exceeds its supported byte or character limit."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "记录文本超过支持的字节数或字符数限制。"
-          }
-        }
-      }
-    },
     "The replacement exceeds this field's active limit." : {
       "extractionState" : "stale",
       "localizations" : {
@@ -8070,34 +7734,34 @@
         }
       }
     },
-    "This export contains %lld recorded Event(s)." : {
+    "This export contains %lld Events retained in the current memory Session." : {
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "This export contains %lld recorded Event(s)."
+            "value" : "This export contains %lld Events retained in the current memory Session."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "本次导出包含 %lld 个已记录事件。"
+            "value" : "此导出包含当前内存会话中保留的 %lld 个事件。"
           }
         }
       }
     },
-    "This removes recorded Events, Event details, diagnostics, and Performance data from the current Session. Connected Devices stay connected and new Events continue to arrive." : {
+    "This removes retained Events, Event details, diagnostics, and Performance data from the current Session. Connected Devices stay connected and new Events continue to arrive." : {
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "This removes recorded Events, Event details, diagnostics, and Performance data from the current Session. Connected Devices stay connected and new Events continue to arrive."
+            "value" : "This removes retained Events, Event details, diagnostics, and Performance data from the current Session. Connected Devices stay connected and new Events continue to arrive."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "这会从当前会话中移除已记录事件、事件详情、诊断和性能数据。已连接设备保持连接，新事件仍会继续到达。"
+            "value" : "这会从当前会话中移除保留的事件、事件详情、诊断和性能数据。已连接设备保持连接，新事件仍会继续到达。"
           }
         }
       }
@@ -8231,40 +7895,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "使用 TLS 加密；Viewer 身份未经认证。"
-          }
-        }
-      }
-    },
-    "Transient Events do not have durable causality candidates." : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Transient Events do not have durable causality candidates."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "瞬时事件没有持久化的因果关系候选项。"
-          }
-        }
-      }
-    },
-    "Transient rows labeled Not recorded are excluded." : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Transient rows labeled Not recorded are excluded."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "标为“未记录”的瞬时行已排除。"
           }
         }
       }

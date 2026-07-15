@@ -3,9 +3,9 @@
 ## Scope
 
 NearWire presents one current Session for the lifetime of the Viewer process. The Viewer does not
-show a Sources sidebar, retain a catalog of previous launches, or reopen an earlier working
-Session. A private process-scoped Store supports bounded search, filtering, Event details,
-Performance analysis, and export while the process is running.
+show a Sources sidebar, retain a catalog of previous launches, or reopen an earlier Session. One
+bounded in-memory projection supports search, filtering, Event details, Performance analysis, and
+export while the process is running.
 
 The main workspace is arranged as follows:
 
@@ -39,26 +39,21 @@ operation is active.
 
 ## Current-Session lifetime
 
-Opening the Viewer creates a unique owner-only working directory under the user's temporary
-directory. The directory name contains the process identifier and a random nonce. A private marker
-binds exact cleanup to that directory. The runtime closes all SQLite connections before removing
-the marked directory at terminal shutdown.
+Opening the Viewer starts an empty memory Session. The production runtime creates no Source or
+Session database and performs no database recovery, retention, or cleanup. The workspace describes
+this lifetime once at the Session level rather than repeating an `In memory` badge on every Event.
+The normal `consumerAccepted` pipeline state is likewise omitted from Timeline rows; Event detail
+can still expose it as technical metadata. Closing the process clears received Session content.
 
-This working Store is an implementation detail, not a saved Source. Events can still be called
-`Recorded` inside the current process because the Store, rather than the bounded live projection,
-is authoritative for filtering and details. That label does not promise availability after the
-Viewer quits.
-
-If storage is temporarily unavailable, the current runtime remains useful through a bounded
-in-memory projection. A memory-only row is labeled `Not recorded`; it cannot be exported and is
-not later claimed as durable after it leaves the live window.
+The memory window retains at most 512 Events, 32 MiB of accounted Event data, and 16 Device-session
+metadata lanes. Older content can be evicted as newer Events arrive. Export contains only the
+snapshot still retained at the moment the operator starts the export.
 
 ## Time and ordering
 
 NearWire captures one Viewer wall time and one Viewer monotonic receive time when an Event commits
-at the protocol boundary. The live projection and working Store share that observation. Timeline
-ordering is `(Viewer receive monotonic time, Store Event row ID)`, so merged Device lanes do not
-depend on iPhone wall clocks.
+at the protocol boundary. Timeline ordering uses Viewer receive monotonic time plus the stable
+Event journal key, so merged Device lanes do not depend on iPhone wall clocks.
 
 The inspector shows App-created wall time, App-origin monotonic time, and Viewer receive wall time
 separately. NearWire does not rewrite one clock as another.
@@ -83,15 +78,17 @@ so a predecessor operation cannot repopulate the empty workspace after completio
 ## Complete-Session import and export
 
 Export writes a schema-versioned JSON document for the complete current Session. The document
-contains Session metadata, Device aliases, Events, gaps, annotations, dispositions, and safe
-causality metadata. It omits TLS keys, pairing material, session epochs, and transport endpoints.
+contains Session timing and state, Device aliases, Events, diagnostic gaps, dispositions, and the
+exact correlation/reply metadata carried by Events. It omits TLS keys, pairing material, session
+epochs, and transport endpoints.
 Export is snapshot-based and uses bounded reads and writes.
 
 The export file is unencrypted and outside Viewer workspace cleanup. `device-N` and
-`connection-N` are pseudonyms, not redaction. Session metadata and notes, annotations and
-diagnostic gaps, Event metadata and content, and peer-provided App display name, application
-identifier, and application version are exported verbatim. App hints remain unauthenticated.
-Those fields and the chosen destination can expose secrets or identifying data. The Viewer shows
+`connection-N` are pseudonyms, not redaction. Diagnostic gaps, Event metadata and content, and
+peer-provided App display name, application identifier, and application version are included. App
+hints remain unauthenticated. Legacy Session name, note, pin, and annotation fields may be accepted
+for format compatibility, but the memory-only Viewer does not materialize or re-export them. The
+included fields and chosen destination can expose secrets or identifying data. The Viewer shows
 this disclosure before export.
 
 Import accepts only the supported complete-Session schema. It uses a no-follow, read-only regular
@@ -112,7 +109,7 @@ combine with AND; multiple selected values within one dimension combine with OR.
 inputs have explicit byte, predicate, and Device-count limits. Invalid or excessive work returns
 fixed guidance instead of widening the query.
 
-`Pause` freezes presentation only. Networking, queue admission, current-Session recording, and
+`Pause` freezes presentation only. Networking, queue admission, current-Session retention, and
 Viewer-to-App sending continue. `Resume` starts a fresh bounded snapshot. Manual scrolling turns
 off auto-follow, and `Jump to Latest` restores the tail view.
 
@@ -123,9 +120,12 @@ signatures. Equivalent high-frequency snapshots are coalesced, data-only row cha
 animation disabled, and row identities remain stable. Selecting a tab or toggling a panel publishes
 layout state immediately. An Event arrival does not rebuild unrelated root regions.
 
-The Timeline retains at most 600 Event rows and 128 diagnostic gap markers. Page work uses frozen
-keyset cursors and bounded SQLite budgets. An evicted selection is cleared; an unrelated row is
-never selected in its place.
+The Timeline is derived from the 512-Event memory window and bounded diagnostic markers. An evicted
+selection is cleared; an unrelated row is never selected in its place.
+
+Each Timeline row leads with a single-line compact JSON content preview. The preview reads at most
+256 UTF-8 bytes and ends with an ellipsis when truncated, so large Event payloads are not repeatedly
+converted for display. Event type appears in the secondary metadata line without headline emphasis.
 
 ## Inspector and renderers
 

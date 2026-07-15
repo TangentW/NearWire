@@ -2,6 +2,15 @@ import Foundation
 @_spi(NearWireInternal) import NearWireCore
 @_spi(NearWireInternal) import NearWireTransport
 
+enum ViewerEventDisposition: String, Sendable {
+  case buffered
+  case transportAdmitted
+  case consumerAccepted
+  case expired
+  case overflowDisplaced
+  case sessionEnded
+}
+
 enum ViewerCommittedObservationError: Error, Equatable, Sendable {
   case invalidTimestamp
   case invalidAccounting
@@ -44,6 +53,29 @@ struct ViewerFrozenSessionMetadata: Equatable, Sendable {
     self.nickname = nickname
   }
 
+  init(
+    installationID: String,
+    installationAlias: String,
+    displayName: String,
+    applicationIdentifier: String?,
+    applicationVersion: String?,
+    nickname: String? = nil
+  ) throws {
+    guard Self.isBounded(installationID, maximumBytes: 512),
+      Self.isBounded(installationAlias, maximumBytes: 128),
+      Self.isBounded(displayName, maximumBytes: 512),
+      Self.isBounded(applicationIdentifier, maximumBytes: 512),
+      Self.isBounded(applicationVersion, maximumBytes: 256),
+      Self.isBounded(nickname, maximumBytes: 512)
+    else { throw ViewerCommittedObservationError.invalidSessionMetadata }
+    self.installationID = installationID
+    self.installationAlias = installationAlias
+    self.displayName = displayName
+    self.applicationIdentifier = applicationIdentifier
+    self.applicationVersion = applicationVersion
+    self.nickname = nickname
+  }
+
   private static func isBounded(_ value: String?, maximumBytes: Int) -> Bool {
     guard let value else { return true }
     return value.utf8.count <= maximumBytes
@@ -51,7 +83,7 @@ struct ViewerFrozenSessionMetadata: Equatable, Sendable {
   }
 }
 
-struct ViewerDurableEventProjection: Equatable, Sendable {
+struct ViewerCanonicalEventProjection: Equatable, Sendable {
   let eventID: EventID
   let eventType: EventType
   let canonicalContent: Data
@@ -62,12 +94,12 @@ struct ViewerDurableEventProjection: Equatable, Sendable {
   let schemaVersion: EventSchemaVersion
   let correlationID: EventID?
   let replyToID: EventID?
-  let initialDisposition: ViewerStoredDisposition?
+  let initialDisposition: ViewerEventDisposition?
 
   init(
     envelope: EventEnvelope,
     canonicalContent: Data,
-    initialDisposition: ViewerStoredDisposition?
+    initialDisposition: ViewerEventDisposition?
   ) throws {
     let milliseconds = (envelope.createdAt.timeIntervalSince1970 * 1_000).rounded()
     guard milliseconds.isFinite, let normalized = Int64(exactly: milliseconds) else {
@@ -95,7 +127,7 @@ struct ViewerCommittedEventObservation: Sendable {
   let viewerWallMilliseconds: Int64
   let viewerMonotonicNanoseconds: UInt64
   let deterministicEventBytes: Int
-  let durableProjection: ViewerDurableEventProjection
+  let canonicalProjection: ViewerCanonicalEventProjection
 
   init(
     observationID: UUID = UUID(),
@@ -107,7 +139,7 @@ struct ViewerCommittedEventObservation: Sendable {
     viewerMonotonicNanoseconds: UInt64,
     deterministicEventBytes: Int,
     canonicalContent: Data,
-    initialDisposition: ViewerStoredDisposition?
+    initialDisposition: ViewerEventDisposition?
   ) throws {
     guard deterministicEventBytes >= 0 else {
       throw ViewerCommittedObservationError.invalidAccounting
@@ -124,7 +156,7 @@ struct ViewerCommittedEventObservation: Sendable {
     self.viewerWallMilliseconds = viewerWallMilliseconds
     self.viewerMonotonicNanoseconds = viewerMonotonicNanoseconds
     self.deterministicEventBytes = deterministicEventBytes
-    durableProjection = try ViewerDurableEventProjection(
+    canonicalProjection = try ViewerCanonicalEventProjection(
       envelope: envelope,
       canonicalContent: canonicalContent,
       initialDisposition: initialDisposition
@@ -140,7 +172,7 @@ struct ViewerCommittedEventObservation: Sendable {
     viewerWallMilliseconds: Int64,
     viewerMonotonicNanoseconds: UInt64,
     deterministicEventBytes: Int,
-    initialDisposition: ViewerStoredDisposition?
+    initialDisposition: ViewerEventDisposition?
   ) throws {
     try self.init(
       observationID: observationID,
@@ -166,7 +198,7 @@ struct ViewerCommittedEventObservation: Sendable {
     viewerMonotonicNanoseconds: UInt64,
     deterministicEventBytes: Int,
     canonicalContent: Data,
-    initialDisposition: ViewerStoredDisposition?
+    initialDisposition: ViewerEventDisposition?
   ) throws {
     let expectedSource: EventEndpoint
     let expectedTarget: EventEndpoint
@@ -210,7 +242,7 @@ struct ViewerCommittedEventObservation: Sendable {
     viewerWallMilliseconds: Int64,
     viewerMonotonicNanoseconds: UInt64,
     deterministicEventBytes: Int,
-    initialDisposition: ViewerStoredDisposition?
+    initialDisposition: ViewerEventDisposition?
   ) throws {
     try self.init(
       observationID: observationID,
@@ -237,12 +269,9 @@ enum ViewerLiveEventOfferOutcome: Equatable, Sendable {
 }
 
 enum ViewerEventJournalOutcome: Equatable, Sendable {
-  case accepted
   case identical
   case presentationConflict
-  case journalConflict
   case untracked
-  case unavailable
   case sealed
 }
 
@@ -262,10 +291,10 @@ extension ViewerFrozenSessionMetadata: CustomReflectable, CustomStringConvertibl
   var customMirror: Mirror { Mirror(self, children: [:], displayStyle: .struct) }
 }
 
-extension ViewerDurableEventProjection: CustomReflectable, CustomStringConvertible,
+extension ViewerCanonicalEventProjection: CustomReflectable, CustomStringConvertible,
   CustomDebugStringConvertible
 {
-  var description: String { "ViewerDurableEventProjection(redacted)" }
+  var description: String { "ViewerCanonicalEventProjection(redacted)" }
   var debugDescription: String { description }
   var customMirror: Mirror { Mirror(self, children: [:], displayStyle: .struct) }
 }

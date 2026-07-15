@@ -38,7 +38,7 @@ enum ViewerPerformanceFreshness {
     guard eventMonotonicNanoseconds >= 0,
       horizonNanoseconds > 0,
       horizonNanoseconds <= UInt64(Int64.max)
-    else { throw ViewerPerformanceStoreFailure.invalidScope }
+    else { throw ViewerPerformanceFailure.invalidScope }
     let (deadline, overflow) = eventMonotonicNanoseconds.addingReportingOverflow(
       Int64(horizonNanoseconds)
     )
@@ -52,7 +52,7 @@ enum ViewerPerformanceFreshness {
   ) throws -> Bool {
     guard eventMonotonicNanoseconds >= 0,
       referenceMonotonicNanoseconds >= eventMonotonicNanoseconds
-    else { throw ViewerPerformanceStoreFailure.invalidScope }
+    else { throw ViewerPerformanceFailure.invalidScope }
     return UInt64(referenceMonotonicNanoseconds - eventMonotonicNanoseconds)
       < horizonNanoseconds
   }
@@ -89,7 +89,7 @@ struct ViewerPerformanceCardEvaluation: Equatable, Sendable {
       (latestEventKey == nil) == (horizonNanoseconds == nil),
       (latestEventKey == nil) == (freshnessDeadlineMonotonicNanoseconds == nil),
       !isFresh || latestEventKey != nil
-    else { throw ViewerPerformanceStoreFailure.invalidCarrier }
+    else { throw ViewerPerformanceFailure.invalidCarrier }
     self.latestEventKey = latestEventKey
     self.horizonNanoseconds = horizonNanoseconds
     self.freshnessDeadlineMonotonicNanoseconds = freshnessDeadlineMonotonicNanoseconds
@@ -132,7 +132,7 @@ struct ViewerPerformanceLatestEventSelector: Sendable {
   ) throws {
     guard deviceStartMonotonicNanoseconds >= 0,
       anchorMonotonicNanoseconds >= deviceStartMonotonicNanoseconds
-    else { throw ViewerPerformanceStoreFailure.invalidScope }
+    else { throw ViewerPerformanceFailure.invalidScope }
     let anchor = UInt64(anchorMonotonicNanoseconds)
     let saturatedLower =
       anchor >= ViewerPerformanceFreshness.lookbackNanoseconds
@@ -262,7 +262,7 @@ struct ViewerPerformanceContinuityTracker: Sendable {
   ) throws {
     if let previousMonotonicNanoseconds {
       guard event.viewerMonotonicNanoseconds >= previousMonotonicNanoseconds else {
-        throw ViewerPerformanceStoreFailure.invalidCarrier
+        throw ViewerPerformanceFailure.invalidCarrier
       }
       let currentInterval: UInt64?
       switch outcome {
@@ -366,7 +366,7 @@ struct ViewerPerformanceWallEnvelopeBuilder: Sendable {
     }
     if let previousEvent {
       guard ViewerPerformanceCanonicalOrder.eventPrecedes(previousEvent, event) else {
-        throw ViewerPerformanceStoreFailure.invalidCarrier
+        throw ViewerPerformanceFailure.invalidCarrier
       }
       if event.viewerWallMilliseconds < previousEvent.viewerWallMilliseconds {
         hasWallRegression = true
@@ -408,11 +408,9 @@ enum ViewerPerformanceUnplacedGapReason: UInt8, Equatable, Hashable, Sendable {
 struct ViewerPerformanceGapProjection: Equatable, Sendable {
   private let wallIndex: ViewerPerformanceWallEnvelopeIndex
   private(set) var details = ViewerPerformanceBoundedDetails()
-  private(set) var genericHasMoreRows = false
   private(set) var irrelevantCount: UInt64 = 0
   private(set) var observedApplicableOrUncertainCount: UInt64 = 0
-  private(set) var storeApplicableOrUncertainCount: UInt64?
-  private(set) var liveApplicableOrUncertainCount: UInt64 = 0
+  private(set) var applicableOrUncertainCount: UInt64 = 0
   private(set) var unplacedReasons: Set<ViewerPerformanceUnplacedGapReason> = []
   private var placedBuckets: [Bool]
   private var consumedLiveSlice = false
@@ -422,45 +420,15 @@ struct ViewerPerformanceGapProjection: Equatable, Sendable {
     placedBuckets = Array(repeating: false, count: wallIndex.bucketCount)
   }
 
-  mutating func consume(storePage: ViewerPerformanceGapPage) {
-    genericHasMoreRows = genericHasMoreRows || storePage.hasMoreRows
-    if let existing = storeApplicableOrUncertainCount,
-      existing != storePage.applicableOrUncertainCount
-    {
-      unplacedReasons.insert(.inconsistentReceipt)
-      storeApplicableOrUncertainCount = max(
-        existing,
-        storePage.applicableOrUncertainCount
-      )
-    } else {
-      storeApplicableOrUncertainCount = storePage.applicableOrUncertainCount
-    }
-    if storePage.hasMoreApplicableGaps {
-      unplacedReasons.insert(.applicableOverflow)
-    }
-    for gap in storePage.gaps { consume(gap) }
-    evaluateCombinedApplicableOverflow()
-  }
-
   mutating func consume(liveSlice: ViewerPerformanceLiveSlice) throws {
-    guard !consumedLiveSlice else { throw ViewerPerformanceStoreFailure.invalidCarrier }
+    guard !consumedLiveSlice else { throw ViewerPerformanceFailure.invalidCarrier }
     consumedLiveSlice = true
-    liveApplicableOrUncertainCount = liveSlice.applicableOrUncertainCount
+    applicableOrUncertainCount = liveSlice.applicableOrUncertainCount
     if liveSlice.hasMoreApplicableGaps {
       unplacedReasons.insert(.applicableOverflow)
     }
     for gap in liveSlice.gaps { consume(gap) }
-    evaluateCombinedApplicableOverflow()
-  }
-
-  var combinedApplicableOrUncertainCount: UInt64 {
-    max(
-      observedApplicableOrUncertainCount,
-      Self.saturatingAdd(
-        storeApplicableOrUncertainCount ?? 0,
-        liveApplicableOrUncertainCount
-      )
-    )
+    evaluateApplicableOverflow()
   }
 
   var hasUnplacedGap: Bool { !unplacedReasons.isEmpty }
@@ -472,7 +440,7 @@ struct ViewerPerformanceGapProjection: Equatable, Sendable {
   mutating func applyDiscontinuities(to buckets: inout [ViewerPerformanceBucket]) throws {
     guard buckets.count == placedBuckets.count,
       buckets.enumerated().allSatisfy({ $0.offset == $0.element.index })
-    else { throw ViewerPerformanceStoreFailure.invalidScope }
+    else { throw ViewerPerformanceFailure.invalidScope }
     if suppressesEveryInterbucketConnection {
       for index in buckets.indices { buckets[index].markAllDiscontinuous() }
       return
@@ -522,8 +490,8 @@ struct ViewerPerformanceGapProjection: Equatable, Sendable {
     placedBuckets[bucket] = true
   }
 
-  private mutating func evaluateCombinedApplicableOverflow() {
-    if combinedApplicableOrUncertainCount
+  private mutating func evaluateApplicableOverflow() {
+    if max(observedApplicableOrUncertainCount, applicableOrUncertainCount)
       > UInt64(ViewerPerformanceAggregationLimits.maximumDetailedGaps)
     {
       unplacedReasons.insert(.combinedApplicableOverflow)

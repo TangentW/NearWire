@@ -92,12 +92,10 @@ private enum ViewerLiveCompiledPredicate: Equatable, Sendable {
   case eventTypeEqualsAny(Set<String>)
   case eventTypePrefix(String)
   case contentContains(Data)
-  case fullText
   case applicationIdentifiers([Data])
   case applicationVersions([Data])
   case directions(Set<EventDirection>)
   case priorities(Set<EventPriority>)
-  case durableDeviceSessionIDs
   case wallTime(from: Int64?, through: Int64?)
   case json(path: ViewerJSONPath, equals: ViewerQueryScalar)
   case jsonAny(path: ViewerJSONPath, equalsAny: [ViewerQueryScalar])
@@ -109,31 +107,29 @@ private enum ViewerLiveCompiledPredicate: Equatable, Sendable {
 
   static func compile(_ predicate: ViewerEventPredicate) throws -> ViewerLiveCompiledPredicate {
     do {
-      _ = try ViewerEventQueryCompiler.compile(
-        ViewerEventQuery(recordingID: 1, predicates: [predicate])
-      )
       switch predicate {
       case .eventTypeEquals(let value):
-        return .eventTypeEquals(try ViewerEventQueryCompiler.canonicalEventType(value))
+        return .eventTypeEquals(try ViewerEventFilterRules.canonicalEventType(value))
       case .eventTypeEqualsAny(let values):
+        guard !values.isEmpty, values.count <= 16 else {
+          throw ViewerLiveEvaluationError.invalidRequest
+        }
         return .eventTypeEqualsAny(
-          Set(try values.map(ViewerEventQueryCompiler.canonicalEventType))
+          Set(try values.map(ViewerEventFilterRules.canonicalEventType))
         )
       case .eventTypePrefix(let value):
-        return .eventTypePrefix(try ViewerEventQueryCompiler.canonicalEventTypePrefix(value))
+        return .eventTypePrefix(try ViewerEventFilterRules.canonicalEventTypePrefix(value))
       case .contentContains(let value):
-        let normalized = try ViewerEventQueryCompiler.normalizedSearchText(
+        let normalized = try ViewerEventFilterRules.normalizedSearchText(
           value,
           maximumBytes: 512
         )
         return .contentContains(Data(normalized.utf8))
-      case .fullText:
-        return .fullText
       case .applicationIdentifiers(let values):
         return .applicationIdentifiers(
           try values.map {
             Data(
-              try ViewerEventQueryCompiler.normalizedSearchText($0, maximumBytes: 512).utf8
+              try ViewerEventFilterRules.normalizedSearchText($0, maximumBytes: 512).utf8
             )
           }
         )
@@ -141,7 +137,7 @@ private enum ViewerLiveCompiledPredicate: Equatable, Sendable {
         return .applicationVersions(
           try values.map {
             Data(
-              try ViewerEventQueryCompiler.normalizedSearchText($0, maximumBytes: 512).utf8
+              try ViewerEventFilterRules.normalizedSearchText($0, maximumBytes: 512).utf8
             )
           }
         )
@@ -153,8 +149,6 @@ private enum ViewerLiveCompiledPredicate: Equatable, Sendable {
         return .priorities([try priority(value)])
       case .priorities(let values):
         return .priorities(Set(try values.map(priority)))
-      case .deviceSessionIDs:
-        return .durableDeviceSessionIDs
       case .wallTime(let from, let through):
         return .wallTime(from: from, through: through)
       case .json(let path, let scalar):
@@ -167,7 +161,7 @@ private enum ViewerLiveCompiledPredicate: Equatable, Sendable {
       case .jsonExists(let path):
         return .jsonExists(path: try ViewerJSONPath(path))
       case .jsonStringContains(let path, let value):
-        let normalized = try ViewerEventQueryCompiler.normalizedSearchText(
+        let normalized = try ViewerEventFilterRules.normalizedSearchText(
           value,
           maximumBytes: 16 * 1_024
         )
@@ -191,7 +185,7 @@ private enum ViewerLiveCompiledPredicate: Equatable, Sendable {
     switch value {
     case .string(let string):
       return .string(
-        try ViewerEventQueryCompiler.normalizedSearchText(
+        try ViewerEventFilterRules.normalizedSearchText(
           string,
           maximumBytes: 16 * 1_024
         )
@@ -238,12 +232,12 @@ struct ViewerLiveEvaluationRequest: Sendable {
 }
 
 enum ViewerLiveTransientExclusion: Equatable, Sendable {
-  case fullTextRequiresRecordedData
+  case unsupportedFilter
 
   var guidance: String {
     switch self {
-    case .fullTextRequiresRecordedData:
-      return "Full-text search requires recorded data — transient rows excluded."
+    case .unsupportedFilter:
+      return "This filter is not available for the current Session."
     }
   }
 }
@@ -288,17 +282,6 @@ struct ViewerLiveEventEvaluator: Sendable {
       snapshot.accountedEventBytes <= ViewerLiveProjectionLimits.retainedBytes,
       snapshot.sessions.count <= ViewerLiveProjectionLimits.maximumSessions
     else { return .refineRequired }
-    if request.predicates.contains(.fullText) {
-      return .complete(
-        ViewerLiveEvaluationOutput(
-          snapshotGeneration: snapshot.generation,
-          matchedKeys: [],
-          transientExclusion: .fullTextRequiresRecordedData,
-          predicateCheckCount: 0,
-          jsonNodeVisitCount: 0
-        )
-      )
-    }
     guard snapshot.runtimeLogicalID == request.runtimeLogicalID else {
       return .complete(
         ViewerLiveEvaluationOutput(
@@ -363,11 +346,9 @@ struct ViewerLiveEventEvaluator: Sendable {
     case .eventTypePrefix(let value):
       return observation.envelope.type.rawValue.hasPrefix(value)
     case .contentContains(let value):
-      let result = observation.durableProjection.canonicalContent.range(of: value) != nil
+      let result = observation.canonicalProjection.canonicalContent.range(of: value) != nil
       try work.checkpoint()
       return result
-    case .fullText:
-      return false
     case .applicationIdentifiers(let values):
       guard let value = observation.session.applicationIdentifier else { return false }
       return values.contains(Data(value.utf8))
@@ -378,8 +359,6 @@ struct ViewerLiveEventEvaluator: Sendable {
       return values.contains(observation.key.direction)
     case .priorities(let values):
       return values.contains(observation.envelope.priority)
-    case .durableDeviceSessionIDs:
-      return false
     case .wallTime(let from, let through):
       if let from, observation.viewerWallMilliseconds < from { return false }
       if let through, observation.viewerWallMilliseconds > through { return false }
@@ -422,7 +401,7 @@ struct ViewerLiveEventEvaluator: Sendable {
     case .hasTerminalDisposition:
       let disposition =
         event.laterDisposition
-        ?? event.observation.durableProjection.initialDisposition
+        ?? event.observation.canonicalProjection.initialDisposition
       switch disposition {
       case .consumerAccepted, .expired, .overflowDisplaced, .sessionEnded:
         return true

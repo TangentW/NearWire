@@ -42,7 +42,6 @@ struct ViewerInspectorEventMetadata: Equatable, Sendable {
   let disposition: String?
   let correlationEventUUID: String?
   let replyToEventUUID: String?
-  let isRecorded: Bool
   let hasGap: Bool
   let hasDrop: Bool
   let hasPresentationConflict: Bool
@@ -53,75 +52,45 @@ struct ViewerCanonicalEventDetailBuffer: Sendable {
   let metadata: ViewerInspectorEventMetadata
   let content: Data
 
-  init(detail: ViewerStoredEventDetail) throws {
-    guard detail.contentJSON.count <= ViewerJSONInspectionLimits.maximumCanonicalBytes else {
+  init(metadata: ViewerInspectorEventMetadata, content: Data) throws {
+    guard content.count <= ViewerJSONInspectionLimits.maximumCanonicalBytes else {
       throw ViewerJSONInspectionError.inputTooLarge
     }
-    guard let wireSequence = UInt64(exactly: detail.summary.wireSequence),
-      let viewerMonotonic = UInt64(exactly: detail.summary.viewerMonotonicNanoseconds),
-      let originMonotonic = UInt64(exactly: detail.originMonotonicNanoseconds),
-      let ttl = UInt64(exactly: detail.ttlMilliseconds),
-      let schemaVersion = UInt16(exactly: detail.schemaVersion)
-    else { throw ViewerJSONInspectionError.invalidRequest }
-    metadata = ViewerInspectorEventMetadata(
-      eventUUID: detail.summary.eventUUID,
-      eventType: detail.summary.eventType,
-      deviceLogicalID: detail.deviceLogicalID,
-      deviceAlias: detail.installationAlias,
-      connectionAlias: detail.connectionAlias,
-      direction: detail.summary.direction,
-      wireSequence: wireSequence,
-      priority: detail.summary.priority,
-      createdWallMilliseconds: detail.summary.createdWallMilliseconds,
-      viewerWallMilliseconds: detail.summary.viewerWallMilliseconds,
-      viewerMonotonicNanoseconds: viewerMonotonic,
-      originMonotonicNanoseconds: originMonotonic,
-      ttlMilliseconds: ttl,
-      schemaVersion: schemaVersion,
-      disposition: detail.summary.resolvedDisposition,
-      correlationEventUUID: detail.correlationEventUUID,
-      replyToEventUUID: detail.replyToEventUUID,
-      isRecorded: true,
-      hasGap: false,
-      hasDrop: false,
-      hasPresentationConflict: false,
-      sessionEnded: false
-    )
-    content = detail.contentJSON
+    self.metadata = metadata
+    self.content = content
   }
 
   init(liveEvent: ViewerLiveEventSnapshot) throws {
     let observation = liveEvent.observation
-    let content = observation.durableProjection.canonicalContent
+    let content = observation.canonicalProjection.canonicalContent
     guard content.count <= ViewerJSONInspectionLimits.maximumCanonicalBytes else {
       throw ViewerJSONInspectionError.inputTooLarge
     }
-    metadata = ViewerInspectorEventMetadata(
+    let metadata = ViewerInspectorEventMetadata(
       eventUUID: observation.envelope.id.rawValue,
       eventType: observation.envelope.type.rawValue,
       deviceLogicalID: observation.key.connectionID,
       deviceAlias: observation.session.installationAlias,
-      connectionAlias: "Live connection",
+      connectionAlias: observation.key.connectionID.uuidString,
       direction: observation.envelope.direction.rawValue,
       wireSequence: observation.key.wireSequence,
       priority: observation.envelope.priority.rawValue,
-      createdWallMilliseconds: observation.durableProjection.createdWallMilliseconds,
+      createdWallMilliseconds: observation.canonicalProjection.createdWallMilliseconds,
       viewerWallMilliseconds: observation.viewerWallMilliseconds,
       viewerMonotonicNanoseconds: observation.viewerMonotonicNanoseconds,
       originMonotonicNanoseconds: observation.envelope.monotonicTimestampNanoseconds,
       ttlMilliseconds: observation.envelope.ttl.milliseconds,
       schemaVersion: observation.envelope.schemaVersion.rawValue,
       disposition: liveEvent.laterDisposition?.rawValue
-        ?? observation.durableProjection.initialDisposition?.rawValue,
+        ?? observation.canonicalProjection.initialDisposition?.rawValue,
       correlationEventUUID: observation.envelope.causality.correlationID?.rawValue,
       replyToEventUUID: observation.envelope.causality.replyTo?.rawValue,
-      isRecorded: false,
       hasGap: liveEvent.hasGap,
       hasDrop: liveEvent.hasDrop,
       hasPresentationConflict: liveEvent.hasPresentationConflict,
       sessionEnded: liveEvent.sessionEnded
     )
-    self.content = content
+    try self.init(metadata: metadata, content: content)
   }
 
   var contentByteCount: Int { content.count }

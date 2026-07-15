@@ -2564,14 +2564,14 @@ private final class FlowJournalBox: ViewerSessionJournaling, @unchecked Sendable
   struct UplinkCommit: Equatable {
     let eventID: EventID
     let wireSequence: UInt64
-    let disposition: ViewerStoredDisposition
+    let disposition: ViewerEventDisposition
     let viewerWallMilliseconds: Int64
     let viewerMonotonicNanoseconds: UInt64
   }
 
   struct UplinkTerminal: Equatable {
     let wireSequence: UInt64
-    let disposition: ViewerStoredDisposition
+    let disposition: ViewerEventDisposition
   }
 
   private let lock = NSLock()
@@ -2605,7 +2605,7 @@ private final class FlowJournalBox: ViewerSessionJournaling, @unchecked Sendable
     outcome: @escaping @Sendable (ViewerEventJournalOutcome) -> Void
   ) {
     guard observation.key.direction == .appToViewer else {
-      outcome(.accepted)
+      outcome(.untracked)
       return
     }
     lock.lock()
@@ -2613,13 +2613,13 @@ private final class FlowJournalBox: ViewerSessionJournaling, @unchecked Sendable
       UplinkCommit(
         eventID: observation.envelope.id,
         wireSequence: observation.key.wireSequence,
-        disposition: observation.durableProjection.initialDisposition ?? .buffered,
+        disposition: observation.canonicalProjection.initialDisposition ?? .buffered,
         viewerWallMilliseconds: observation.viewerWallMilliseconds,
         viewerMonotonicNanoseconds: observation.viewerMonotonicNanoseconds
       )
     )
     lock.unlock()
-    outcome(.accepted)
+    outcome(.untracked)
   }
 
   func uplinkTerminated(
@@ -2627,7 +2627,7 @@ private final class FlowJournalBox: ViewerSessionJournaling, @unchecked Sendable
     connectionID: UUID,
     direction: EventDirection,
     wireSequence: UInt64,
-    disposition: ViewerStoredDisposition,
+    disposition: ViewerEventDisposition,
     monotonicNanoseconds: UInt64
   ) {
     lock.lock()

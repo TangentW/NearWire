@@ -20,24 +20,6 @@ struct ViewerPreparedIdentity: @unchecked Sendable {
 struct ViewerRuntimeDependencies: @unchecked Sendable {
   static let live: ViewerRuntimeDependencies = {
     let store = ViewerIdentityStore.live
-    let workspacePaths = ViewerStorePaths.processWorkspace()
-    let storeRuntime = ViewerStoreRuntime(paths: workspacePaths, startupMode: .asynchronous)
-    let workspaceLifetime = ViewerWorkingStoreLifetime(
-      close: {
-        await storeRuntime.closeStorageAfterQuiescence()
-        var retryDelay: UInt64 = 10_000_000
-        for attempt in 0..<4 {
-          do {
-            try workspacePaths.removeProcessWorkspace()
-            return
-          } catch {
-            guard attempt < 3 else { return }
-            try? await Task.sleep(nanoseconds: retryDelay)
-            retryDelay = min(retryDelay * 2, 1_000_000_000)
-          }
-        }
-      }
-    )
     let managerGenerations = ViewerManagerGenerationSource()
     return ViewerRuntimeDependencies(
       loadIdentity: {
@@ -63,28 +45,9 @@ struct ViewerRuntimeDependencies: @unchecked Sendable {
           managerGeneration: managerGenerations.next(),
           scheduler: .live,
           preferences: ViewerDevicePreferences(),
-          uplinkSink: { _, _ in },
-          durableJournal: storeRuntime,
-          storeGateway: storeRuntime.explorerGateway
+          uplinkSink: { _, _ in }
         )
-      },
-      loadStorageConfiguration: {
-        storeRuntime.loadConfiguration()
-      },
-      saveStorageConfiguration: { value in
-        storeRuntime.saveConfiguration(value)
-      },
-      loadStoreStatus: {
-        storeRuntime.status()
-      },
-      observeStoreStatus: { handler in
-        storeRuntime.observeStatus(handler)
-      },
-      runStoreCleanup: {
-        storeRuntime.runCleanup()
-      },
-      retryStore: { storeRuntime.retryStorage() },
-      closeWorkingStore: { await workspaceLifetime.closeAndWait() }
+      }
     )
   }()
 
@@ -95,13 +58,6 @@ struct ViewerRuntimeDependencies: @unchecked Sendable {
   let cleanupTimeoutNanoseconds: UInt64
   let scheduler: ViewerAdmissionScheduler
   let makeRuntimeComponents: @Sendable (UUID) -> ViewerRuntimeComponents
-  let loadStorageConfiguration: @Sendable () -> ViewerStorageConfiguration
-  let saveStorageConfiguration: @Sendable (ViewerStorageConfiguration) -> Void
-  let loadStoreStatus: @Sendable () -> ViewerStoreStatus
-  let observeStoreStatus: @Sendable (@escaping @Sendable () -> Void) -> Void
-  let runStoreCleanup: @Sendable () -> Void
-  let retryStore: @Sendable () -> Void
-  let closeWorkingStore: @Sendable () async -> Void
 
   init(
     loadIdentity: @escaping @Sendable () throws -> ViewerPreparedIdentity,
@@ -110,25 +66,7 @@ struct ViewerRuntimeDependencies: @unchecked Sendable {
     generatePairingCode: @escaping @Sendable () throws -> PairingCode,
     cleanupTimeoutNanoseconds: UInt64 = ViewerAdmissionManager.cleanupTimeoutNanoseconds,
     scheduler: ViewerAdmissionScheduler = .live,
-    makeRuntimeComponents: (@Sendable (UUID) -> ViewerRuntimeComponents)? = nil,
-    loadStorageConfiguration: @escaping @Sendable () -> ViewerStorageConfiguration = { .default },
-    saveStorageConfiguration: @escaping @Sendable (ViewerStorageConfiguration) -> Void = { _ in },
-    loadStoreStatus: @escaping @Sendable () -> ViewerStoreStatus = {
-      ViewerStoreStatus(
-        state: .unavailable,
-        capacityBytes: ViewerStorageConfiguration.defaultCapacityBytes,
-        logicalQuotaBytes: 0,
-        allocatedFootprintBytes: 0,
-        oldestHistoryMilliseconds: nil,
-        pinnedQuotaBytes: 0,
-        estimatedRetainedDurationMilliseconds: nil,
-        lastCleanupCategory: .none
-      )
-    },
-    observeStoreStatus: @escaping @Sendable (@escaping @Sendable () -> Void) -> Void = { _ in },
-    runStoreCleanup: @escaping @Sendable () -> Void = {},
-    retryStore: @escaping @Sendable () -> Void = {},
-    closeWorkingStore: @escaping @Sendable () async -> Void = {}
+    makeRuntimeComponents: (@Sendable (UUID) -> ViewerRuntimeComponents)? = nil
   ) {
     self.loadIdentity = loadIdentity
     self.resetTLSIdentity = resetTLSIdentity
@@ -147,43 +85,6 @@ struct ViewerRuntimeDependencies: @unchecked Sendable {
         )
       }
     }
-    self.loadStorageConfiguration = loadStorageConfiguration
-    self.saveStorageConfiguration = saveStorageConfiguration
-    self.loadStoreStatus = loadStoreStatus
-    self.observeStoreStatus = observeStoreStatus
-    self.runStoreCleanup = runStoreCleanup
-    self.retryStore = retryStore
-    self.closeWorkingStore = closeWorkingStore
-  }
-}
-
-final class ViewerWorkingStoreLifetime: @unchecked Sendable {
-  private let lock = NSLock()
-  private let closeOperation: @Sendable () async -> Void
-  private var closeTask: Task<Void, Never>?
-
-  init(close: @escaping @Sendable () async -> Void) {
-    closeOperation = close
-  }
-
-  func closeAndWait() async {
-    let task = sharedCloseTask()
-    await task.value
-  }
-
-  private func sharedCloseTask() -> Task<Void, Never> {
-    lock.lock()
-    defer { lock.unlock() }
-    let task: Task<Void, Never>
-    if let closeTask {
-      task = closeTask
-    } else {
-      let operation = closeOperation
-      let created = Task.detached(priority: .utility) { await operation() }
-      closeTask = created
-      task = created
-    }
-    return task
   }
 }
 
@@ -376,92 +277,5 @@ final class ViewerSessionSnapshotCoalescer: @unchecked Sendable {
     if !continues { taskScheduled = false }
     lock.unlock()
     if continues { scheduleDrain() }
-  }
-}
-
-final class ViewerStoreStatusRefreshCoordinator: @unchecked Sendable {
-  typealias Load = @Sendable () -> ViewerStoreStatus
-  typealias Delivery = @MainActor @Sendable (ViewerStoreStatus) -> Void
-
-  private let lock = NSLock()
-  private let queue = DispatchQueue(label: "com.nearwire.viewer.store-status-refresh")
-  private let completionGroup = DispatchGroup()
-  private let load: Load
-  private let delivery: Delivery
-  private var active = true
-  private var running = false
-  private var dirty = false
-
-  init(load: @escaping Load, delivery: @escaping Delivery) {
-    self.load = load
-    self.delivery = delivery
-  }
-
-  func request() {
-    lock.lock()
-    guard active else {
-      lock.unlock()
-      return
-    }
-    guard !running else {
-      dirty = true
-      lock.unlock()
-      return
-    }
-    running = true
-    completionGroup.enter()
-    lock.unlock()
-    scheduleLoad()
-  }
-
-  func deactivateAndWait() -> Task<Void, Never> {
-    lock.lock()
-    active = false
-    dirty = false
-    lock.unlock()
-    let group = completionGroup
-    return Task {
-      await withCheckedContinuation { continuation in
-        group.notify(queue: .global(qos: .utility)) { continuation.resume() }
-      }
-    }
-  }
-
-  var pendingWorkCountForTesting: Int {
-    lock.lock()
-    defer { lock.unlock() }
-    return running ? 1 : 0
-  }
-
-  var hasDirtySuccessorForTesting: Bool {
-    lock.lock()
-    defer { lock.unlock() }
-    return dirty
-  }
-
-  private func scheduleLoad() {
-    queue.async { [self] in
-      let value = load()
-      Task { @MainActor [self] in self.deliverAndContinue(value) }
-    }
-  }
-
-  @MainActor
-  private func deliverAndContinue(_ value: ViewerStoreStatus) {
-    lock.lock()
-    let shouldDeliver = active
-    lock.unlock()
-    if shouldDeliver { delivery(value) }
-
-    lock.lock()
-    if active, dirty {
-      dirty = false
-      lock.unlock()
-      scheduleLoad()
-    } else {
-      running = false
-      lock.unlock()
-      completionGroup.leave()
-    }
   }
 }

@@ -520,7 +520,7 @@ private struct ViewerDevicesPresentation: Equatable {
       },
       selectedDeviceIDs: explorer.selectedDeviceIDs,
       pendingApps: application.pendingApps,
-      canExport: explorer.canManageSelectedRecording && !operationIsRunning,
+      canExport: explorer.canExportCurrentSession && !operationIsRunning,
       canImport: explorer.canImportCurrentSession && application.pendingApps.isEmpty,
       workspaceOperationState: operation
     )
@@ -613,7 +613,7 @@ private struct ViewerDevicesStrip: View {
         .disabled(importIsDisabled)
         .help("Replace the inactive current Session from a complete NearWire JSON export")
         Button {
-          explorer.prepareExport(.completeRecording)
+          explorer.prepareExport(.completeSession)
           showsExport = true
         } label: {
           Label("Export Session", systemImage: "square.and.arrow.up")
@@ -1099,7 +1099,7 @@ private struct ViewerOfflineDeviceDetail: View {
             ViewerLocalization.string(row.state.capitalized, locale: locale)
           )
           offlineDetailRow(
-            "Recorded Events",
+            "Retained Events",
             ViewerLocalization.string(
               row.isMaterialized ? "Available" : "Not available",
               locale: locale
