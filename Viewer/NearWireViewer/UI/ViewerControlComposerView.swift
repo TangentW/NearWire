@@ -2,6 +2,7 @@
 import SwiftUI
 
 struct ViewerControlComposerView: View {
+  @Environment(\.locale) private var locale
   @ObservedObject var controller: ViewerControlComposerController
 
   var body: some View {
@@ -77,7 +78,17 @@ struct ViewerControlComposerView: View {
           }
           .buttonStyle(.plain)
           .accessibilityLabel(
-            "\(row.title), \(controller.selectedTargetIDs.contains(row.id) ? "selected" : "not selected")"
+            ViewerLocalization.format(
+              "%@, %@",
+              locale: locale,
+              arguments: [
+                row.title,
+                ViewerLocalization.string(
+                  controller.selectedTargetIDs.contains(row.id) ? "selected" : "not selected",
+                  locale: locale
+                ),
+              ]
+            )
           )
           .accessibilityHint("Adds or removes this active App from the next local queue attempt.")
         }
@@ -105,8 +116,11 @@ struct ViewerControlComposerView: View {
       ViewerBoundedTextInput(
         text: controller.eventType,
         style: .singleLine,
-        accessibilityLabel: "Control Event type",
-        accessibilityHelp: "Reserved nearwire.* platform Event types are rejected.",
+        accessibilityLabel: ViewerLocalization.string("Control Event type", locale: locale),
+        accessibilityHelp: ViewerLocalization.string(
+          "Reserved nearwire.* platform Event types are rejected.",
+          locale: locale
+        ),
         onEdit: { range, replacement in
           controller.replaceCharacters(.eventType, range: range, replacement: replacement)
         }
@@ -116,7 +130,7 @@ struct ViewerControlComposerView: View {
         Text("JSON content").font(.caption).foregroundStyle(.secondary)
         Spacer()
         Text(
-          "Up to \(ByteCountFormatter.string(fromByteCount: Int64(controller.maximumContentBytes), countStyle: .binary))"
+          "Up to \(ByteCountFormatStyle(style: .binary, locale: locale).format(Int64(controller.maximumContentBytes)))"
         )
         .font(.caption2.monospacedDigit())
         .foregroundStyle(.secondary)
@@ -124,8 +138,14 @@ struct ViewerControlComposerView: View {
       ViewerBoundedTextInput(
         text: controller.contentJSON,
         style: .multiline,
-        accessibilityLabel: "Control Event JSON content",
-        accessibilityHelp: "Standard editing is allowed and every edit is bounded before storage.",
+        accessibilityLabel: ViewerLocalization.string(
+          "Control Event JSON content",
+          locale: locale
+        ),
+        accessibilityHelp: ViewerLocalization.string(
+          "Standard editing is allowed and every edit is bounded before storage.",
+          locale: locale
+        ),
         monospaced: true,
         onEdit: { range, replacement in
           controller.replaceCharacters(.content, range: range, replacement: replacement)
@@ -133,7 +153,7 @@ struct ViewerControlComposerView: View {
       )
       .frame(minHeight: 110)
       if let message = controller.inputValidationMessage {
-        Label(message, systemImage: "exclamationmark.triangle")
+        Label(LocalizedStringKey(message), systemImage: "exclamationmark.triangle")
           .font(.caption)
           .foregroundStyle(.red)
       }
@@ -163,9 +183,12 @@ struct ViewerControlComposerView: View {
           ViewerBoundedTextInput(
             text: controller.ttlText,
             style: .singleLine,
-            accessibilityLabel: "TTL milliseconds",
-            accessibilityHelp:
-              "One through nine ASCII digits, no sign or spaces, maximum \(controller.maximumTTLMilliseconds).",
+            accessibilityLabel: ViewerLocalization.string("TTL milliseconds", locale: locale),
+            accessibilityHelp: ViewerLocalization.format(
+              "One through nine ASCII digits, no sign or spaces, maximum %llu.",
+              locale: locale,
+              arguments: [controller.maximumTTLMilliseconds]
+            ),
             onEdit: { range, replacement in
               controller.replaceCharacters(.ttl, range: range, replacement: replacement)
             }
@@ -222,7 +245,7 @@ struct ViewerControlComposerView: View {
         .font(.caption)
         .foregroundStyle(.green)
     case .failed(let failure):
-      Label(failure.message, systemImage: "exclamationmark.triangle")
+      Label(LocalizedStringKey(failure.message), systemImage: "exclamationmark.triangle")
         .font(.caption)
         .foregroundStyle(.red)
     }
@@ -232,11 +255,22 @@ struct ViewerControlComposerView: View {
     HStack {
       Label(row.title, systemImage: outcomeIcon(row.outcome)).lineLimit(1)
       Spacer()
-      Text(row.statusText).font(.caption).foregroundStyle(outcomeColor(row.outcome))
+      Text(LocalizedStringKey(row.statusText))
+        .font(.caption)
+        .foregroundStyle(outcomeColor(row.outcome))
     }
     .font(.caption)
     .accessibilityElement(children: .combine)
-    .accessibilityLabel("\(row.title), \(row.statusText)")
+    .accessibilityLabel(
+      ViewerLocalization.format(
+        "%@, %@",
+        locale: locale,
+        arguments: [
+          row.title,
+          ViewerLocalization.string(row.statusText, locale: locale),
+        ]
+      )
+    )
   }
 
   private var priorityBinding: Binding<EventPriority> {

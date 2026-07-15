@@ -5,9 +5,10 @@ import SwiftUI
 struct NearWireViewerApp: App {
   @NSApplicationDelegateAdaptor(ViewerAppDelegate.self) private var appDelegate
   @StateObject private var model = ViewerApplicationModel()
+  @StateObject private var language = ViewerLanguageController()
 
   var body: some Scene {
-    Window("NearWire", id: "main") {
+    Window(Text(verbatim: "NearWire"), id: "main") {
       ViewerMainWindowContent(model: model)
         .frame(
           minWidth: ViewerWorkspaceLayout.minimumWindowWidth,
@@ -27,12 +28,16 @@ struct NearWireViewerApp: App {
       } message: {
         Text("This replaces both the installation identifier and TLS identity.")
       }
+      .viewerLanguageEnvironment(language)
     }
     .commands {
       CommandGroup(replacing: .newItem) {}
     }
 
-    Window("Performance", id: "performance") {
+    Window(
+      Text(verbatim: ViewerLocalization.string("Performance", locale: language.effectiveLocale)),
+      id: "performance"
+    ) {
       ViewerPerformanceWindowRootView(model: model)
         .frame(
           minWidth: ViewerPerformanceWindowLayout.minimumWidth,
@@ -45,11 +50,17 @@ struct NearWireViewerApp: App {
             isRunningUnitTests: ViewerLaunchContext.isRunningUnitTests
           )
         }
+        .viewerLanguageEnvironment(language)
     }
     .defaultSize(
       width: ViewerPerformanceWindowLayout.defaultWidth,
       height: ViewerPerformanceWindowLayout.defaultHeight
     )
+
+    Settings {
+      ViewerLanguageSettingsView(controller: language)
+        .viewerLanguageEnvironment(language)
+    }
   }
 }
 

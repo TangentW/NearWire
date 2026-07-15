@@ -185,7 +185,7 @@ struct ViewerRootView: View {
         Button("Refresh") { model.refreshPairingCode() }
           .disabled(pairingCode == nil)
           .accessibilityLabel("Refresh pairing code")
-        Button(isPaused ? "Resume New Devices" : "Pause New Devices") {
+        Button(LocalizedStringKey(isPaused ? "Resume New Devices" : "Pause New Devices")) {
           model.togglePaused()
         }
         .disabled(pairingCode == nil)
@@ -250,7 +250,7 @@ struct ViewerRootView: View {
           .font(.system(.title, design: .monospaced, weight: .semibold))
           .textSelection(.enabled)
           .accessibilityLabel("Pairing code \(code)")
-        Text(paused ? "Paused" : "Listening")
+        Text(LocalizedStringKey(paused ? "Paused" : "Listening"))
           .foregroundStyle(paused ? .orange : .green)
       }
     case .stopping:
@@ -258,8 +258,8 @@ struct ViewerRootView: View {
     case .failed(let error):
       HStack {
         VStack(alignment: .leading) {
-          Text(error.title).foregroundStyle(.red)
-          Text(error.recovery).font(.caption).foregroundStyle(.secondary)
+          Text(LocalizedStringKey(error.title)).foregroundStyle(.red)
+          Text(LocalizedStringKey(error.recovery)).font(.caption).foregroundStyle(.secondary)
         }
         Button("Retry") { model.retry() }
         if error == .identityUnavailable {
@@ -383,6 +383,7 @@ struct ViewerRootView: View {
 }
 
 private struct ViewerWorkspaceVisibilityControls: View {
+  @Environment(\.locale) private var locale
   @ObservedObject var analysis: ViewerAnalysisModeCoordinator
   @Binding var visibility: ViewerWorkspaceVisibility
 
@@ -437,13 +438,25 @@ private struct ViewerWorkspaceVisibilityControls: View {
         )
     }
     .buttonStyle(.bordered)
-    .help("\(isVisible.wrappedValue ? "Hide" : "Show") \(title)")
-    .accessibilityLabel("\(isVisible.wrappedValue ? "Hide" : "Show") \(title)")
-    .accessibilityValue(isVisible.wrappedValue ? "Expanded" : "Collapsed")
+    .help(visibilityDescription(title: title, isVisible: isVisible.wrappedValue))
+    .accessibilityLabel(visibilityDescription(title: title, isVisible: isVisible.wrappedValue))
+    .accessibilityValue(Text(LocalizedStringKey(isVisible.wrappedValue ? "Expanded" : "Collapsed")))
+  }
+
+  private func visibilityDescription(title: String, isVisible: Bool) -> String {
+    ViewerLocalization.format(
+      "%@ %@",
+      locale: locale,
+      arguments: [
+        ViewerLocalization.string(isVisible ? "Hide" : "Show", locale: locale),
+        ViewerLocalization.string(title, locale: locale),
+      ]
+    )
   }
 }
 
 private struct ViewerWorkspaceVisibilityControlsPlaceholder: View {
+  @Environment(\.locale) private var locale
   @Binding var visibility: ViewerWorkspaceVisibility
 
   var body: some View {
@@ -457,16 +470,25 @@ private struct ViewerWorkspaceVisibilityControlsPlaceholder: View {
       } label: {
         Image(systemName: "rectangle.bottomhalf.inset.filled")
       }
-      .help("\(visibility.composer ? "Hide" : "Show") Viewer to App Composer")
-      .accessibilityLabel(
-        "\(visibility.composer ? "Hide" : "Show") Viewer to App Composer"
-      )
-      .accessibilityValue(visibility.composer ? "Expanded" : "Collapsed")
+      .help(composerVisibilityDescription)
+      .accessibilityLabel(composerVisibilityDescription)
+      .accessibilityValue(Text(LocalizedStringKey(visibility.composer ? "Expanded" : "Collapsed")))
     }
     .controlSize(.small)
     .buttonStyle(.bordered)
     .disabled(true)
     .accessibilityLabel("Workspace panels unavailable while runtime starts")
+  }
+
+  private var composerVisibilityDescription: String {
+    ViewerLocalization.format(
+      "%@ %@",
+      locale: locale,
+      arguments: [
+        ViewerLocalization.string(visibility.composer ? "Hide" : "Show", locale: locale),
+        ViewerLocalization.string("Viewer to App Composer", locale: locale),
+      ]
+    )
   }
 }
 
@@ -543,6 +565,7 @@ private final class ViewerDevicesPresentationObserver: ObservableObject {
 }
 
 private struct ViewerDevicesStrip: View {
+  @Environment(\.locale) private var locale
   let application: ViewerApplicationModel
   let explorer: ViewerEventExplorerController
   @StateObject private var presentation: ViewerDevicesPresentationObserver
@@ -609,8 +632,8 @@ private struct ViewerDevicesStrip: View {
       ScrollView(.horizontal, showsIndicators: true) {
         HStack(spacing: 8) {
           deviceScopeButton(
-            title: "All Devices",
-            subtitle: "Merged timeline",
+            title: ViewerLocalization.string("All Devices", locale: locale),
+            subtitle: ViewerLocalization.string("Merged timeline", locale: locale),
             systemImage: "rectangle.3.group",
             selected: presentation.value.selectedDeviceIDs.isEmpty,
             focused: false
@@ -702,7 +725,7 @@ private struct ViewerDevicesStrip: View {
   private func deviceButton(_ row: ViewerDevicesPresentation.DeviceChip) -> some View {
     deviceScopeButton(
       title: row.title,
-      subtitle: "\(row.subtitle) · \(row.state.capitalized)",
+      subtitle: "\(row.subtitle) · \(ViewerLocalization.string(row.state.capitalized, locale: locale))",
       systemImage: row.state == "active" ? "iphone.radiowaves.left.and.right" : "iphone",
       selected: presentation.value.selectedDeviceIDs.contains(row.id),
       focused: focusedDeviceID == row.id
@@ -783,10 +806,10 @@ private struct ViewerDevicesStrip: View {
       } else {
         Image(systemName: systemImage).foregroundStyle(color)
       }
-      Text(title).font(.caption).foregroundStyle(color)
+      Text(LocalizedStringKey(title)).font(.caption).foregroundStyle(color)
       Spacer()
       if let actionTitle, let action {
-        Button(actionTitle, action: action).controlSize(.small)
+        Button(LocalizedStringKey(actionTitle), action: action).controlSize(.small)
       }
     }
     .padding(.horizontal, 10)
@@ -837,9 +860,18 @@ private struct ViewerDevicesStrip: View {
     }
     .buttonStyle(.plain)
     .accessibilityLabel(
-      "\(title), \(subtitle)\(focused ? ", focused for Device Details" : "")"
+      ViewerLocalization.format(
+        "%@, %@%@",
+        locale: locale,
+        arguments: [
+          title,
+          subtitle,
+          focused
+            ? ViewerLocalization.string(", focused for Device Details", locale: locale) : "",
+        ]
+      )
     )
-    .accessibilityValue(selected ? "Selected" : "Not selected")
+    .accessibilityValue(Text(LocalizedStringKey(selected ? "Selected" : "Not selected")))
   }
 
   private var hasFocusedDevice: Bool {
@@ -866,6 +898,7 @@ private struct ViewerDevicesStripPlaceholder: View {
 }
 
 private struct ViewerDeviceDetail: View {
+  @Environment(\.locale) private var locale
   @ObservedObject var model: ViewerApplicationModel
   let initialSession: ViewerSessionSnapshot
   @State private var nickname: String
@@ -901,9 +934,19 @@ private struct ViewerDeviceDetail: View {
         GroupBox("Identity") {
           Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 8) {
             detailRow("Installation", session.installationAlias)
-            detailRow("Bundle ID", session.route.applicationIdentifier ?? "Not supplied")
-            detailRow("App version", session.applicationVersion ?? "Not supplied")
-            detailRow("State", session.state.rawValue.capitalized)
+            detailRow(
+              "Bundle ID",
+              session.route.applicationIdentifier
+                ?? ViewerLocalization.string("Not supplied", locale: locale)
+            )
+            detailRow(
+              "App version",
+              session.applicationVersion ?? ViewerLocalization.string("Not supplied", locale: locale)
+            )
+            detailRow(
+              "State",
+              ViewerLocalization.string(session.state.rawValue.capitalized, locale: locale)
+            )
           }
           .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -943,7 +986,9 @@ private struct ViewerDeviceDetail: View {
           }
         }
         if let validationMessage {
-          Text(validationMessage).foregroundStyle(.red).accessibilityLabel(validationMessage)
+          Text(LocalizedStringKey(validationMessage))
+            .foregroundStyle(.red)
+            .accessibilityLabel(Text(LocalizedStringKey(validationMessage)))
         }
         GroupBox("Queues and throughput") {
           Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 8) {
@@ -963,8 +1008,22 @@ private struct ViewerDeviceDetail: View {
                 oldestWaitNanoseconds: session.downlinkOldestWaitNanoseconds
               )
             )
-            detailRow("Current ingress", "\(session.ingressEventsPerSecond) events/s")
-            detailRow("Current egress", "\(session.egressEventsPerSecond) events/s")
+            detailRow(
+              "Current ingress",
+              ViewerLocalization.format(
+                "%lld events/s",
+                locale: locale,
+                arguments: [session.ingressEventsPerSecond]
+              )
+            )
+            detailRow(
+              "Current egress",
+              ViewerLocalization.format(
+                "%lld events/s",
+                locale: locale,
+                arguments: [session.egressEventsPerSecond]
+              )
+            )
           }
           .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -989,7 +1048,7 @@ private struct ViewerDeviceDetail: View {
 
   private func detailRow(_ label: String, _ value: String) -> some View {
     GridRow {
-      Text(label).foregroundStyle(.secondary)
+      Text(LocalizedStringKey(label)).foregroundStyle(.secondary)
       Text(value).textSelection(.enabled)
     }
   }
@@ -1001,13 +1060,22 @@ private struct ViewerDeviceDetail: View {
   ) -> String {
     let wait =
       oldestWaitNanoseconds.map {
-        String(format: "%.3f s oldest", Double($0) / 1_000_000_000)
-      } ?? "no pending wait"
-    return "\(count) events, \(bytes) bytes, \(wait)"
+        ViewerLocalization.format(
+          "%.3f s oldest",
+          locale: locale,
+          arguments: [Double($0) / 1_000_000_000]
+        )
+      } ?? ViewerLocalization.string("no pending wait", locale: locale)
+    return ViewerLocalization.format(
+      "%lld events, %lld bytes, %@",
+      locale: locale,
+      arguments: [count, bytes, wait]
+    )
   }
 }
 
 private struct ViewerOfflineDeviceDetail: View {
+  @Environment(\.locale) private var locale
   let row: ViewerExplorerDevicePresentationRow
 
   var body: some View {
@@ -1020,16 +1088,31 @@ private struct ViewerOfflineDeviceDetail: View {
             .foregroundStyle(.secondary)
         }
         Spacer()
-        Label(row.state.capitalized, systemImage: "iphone.slash")
+        Label(LocalizedStringKey(row.state.capitalized), systemImage: "iphone.slash")
           .foregroundStyle(.secondary)
       }
       GroupBox("Current Session") {
         Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 10) {
           offlineDetailRow("Application", row.subtitle)
-          offlineDetailRow("State", row.state.capitalized)
-          offlineDetailRow("Recorded Events", row.isMaterialized ? "Available" : "Not available")
-          offlineDetailRow("Gap diagnostics", row.hasGap ? "Present" : "None")
-          offlineDetailRow("Drop diagnostics", row.hasDrop ? "Present" : "None")
+          offlineDetailRow(
+            "State",
+            ViewerLocalization.string(row.state.capitalized, locale: locale)
+          )
+          offlineDetailRow(
+            "Recorded Events",
+            ViewerLocalization.string(
+              row.isMaterialized ? "Available" : "Not available",
+              locale: locale
+            )
+          )
+          offlineDetailRow(
+            "Gap diagnostics",
+            ViewerLocalization.string(row.hasGap ? "Present" : "None", locale: locale)
+          )
+          offlineDetailRow(
+            "Drop diagnostics",
+            ViewerLocalization.string(row.hasDrop ? "Present" : "None", locale: locale)
+          )
         }
         .frame(maxWidth: .infinity, alignment: .leading)
       }
@@ -1045,7 +1128,7 @@ private struct ViewerOfflineDeviceDetail: View {
 
   private func offlineDetailRow(_ label: String, _ value: String) -> some View {
     GridRow {
-      Text(label).foregroundStyle(.secondary)
+      Text(LocalizedStringKey(label)).foregroundStyle(.secondary)
       Text(value).textSelection(.enabled)
     }
   }
@@ -1136,7 +1219,7 @@ struct ViewerAnalysisWorkspacePane: View {
 
   private func paneHeader(title: String, systemImage: String) -> some View {
     HStack {
-      Label(title, systemImage: systemImage).font(.headline)
+      Label(LocalizedStringKey(title), systemImage: systemImage).font(.headline)
       Spacer()
     }
     .padding(.horizontal, 14)
@@ -1155,8 +1238,10 @@ struct ViewerEmptyState: View {
         .font(.system(size: 30))
         .foregroundStyle(.secondary)
         .accessibilityHidden(true)
-      Text(title).font(.headline)
-      Text(description).multilineTextAlignment(.center).foregroundStyle(.secondary)
+      Text(LocalizedStringKey(title)).font(.headline)
+      Text(LocalizedStringKey(description))
+        .multilineTextAlignment(.center)
+        .foregroundStyle(.secondary)
     }
     .padding(24)
     .frame(maxWidth: .infinity, maxHeight: .infinity)

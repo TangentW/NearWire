@@ -157,6 +157,7 @@ final class ViewerTimelinePresentationObserver: ObservableObject {
 }
 
 struct ViewerExplorerTimelineView: View {
+  @Environment(\.locale) private var locale
   let explorer: ViewerEventExplorerController
   @StateObject private var presentationObserver: ViewerTimelinePresentationObserver
   @State private var showsFilters = false
@@ -275,8 +276,11 @@ struct ViewerExplorerTimelineView: View {
     ViewerBoundedTextInput(
       text: presentation.searchText,
       style: .singleLine,
-      accessibilityLabel: "Search Event content",
-      accessibilityHelp: "Standard editing is bounded before this filter value is stored.",
+      accessibilityLabel: ViewerLocalization.string("Search Event content", locale: locale),
+      accessibilityHelp: ViewerLocalization.string(
+        "Standard editing is bounded before this filter value is stored.",
+        locale: locale
+      ),
       onEdit: { range, replacement in
         explorer.replaceFilterCharacters(.search, range: range, replacement: replacement)
       },
@@ -408,7 +412,9 @@ struct ViewerExplorerTimelineView: View {
           .foregroundStyle(gaps.storeUnavailable ? .orange : .secondary)
         }
         if let failure = presentation.gapPageFailure {
-          Text(failure.operatorMessage).font(.caption).foregroundStyle(.orange)
+          Text(LocalizedStringKey(failure.operatorMessage))
+            .font(.caption)
+            .foregroundStyle(.orange)
         }
         ScrollView {
           LazyVStack(alignment: .leading, spacing: 7) {
@@ -416,7 +422,7 @@ struct ViewerExplorerTimelineView: View {
               VStack(alignment: .leading, spacing: 2) {
                 Text("\(gap.namespace) · \(gap.reason)").font(.caption).fontWeight(.medium)
                 Text(
-                  "\(gap.count) records · \(gap.directions) · \(ViewerExplorerFormatting.date(gap.firstViewerWallMilliseconds)) – \(ViewerExplorerFormatting.date(gap.lastViewerWallMilliseconds))"
+                  "\(gap.count) records · \(ViewerLocalization.string(gap.directions, locale: locale)) · \(ViewerExplorerFormatting.date(gap.firstViewerWallMilliseconds, locale: locale)) – \(ViewerExplorerFormatting.date(gap.lastViewerWallMilliseconds, locale: locale))"
                 )
                 .font(.caption2)
                 .foregroundStyle(.secondary)
@@ -444,7 +450,7 @@ struct ViewerExplorerTimelineView: View {
   }
 
   private func banner(_ message: String, systemImage: String, color: Color) -> some View {
-    Label(message, systemImage: systemImage)
+    Label(LocalizedStringKey(message), systemImage: systemImage)
       .font(.caption)
       .foregroundStyle(color)
       .frame(maxWidth: .infinity, alignment: .leading)
@@ -460,6 +466,7 @@ struct ViewerExplorerTimelineView: View {
 }
 
 private struct ViewerExplorerTimelineRowView: View {
+  @Environment(\.locale) private var locale
   let row: ViewerExplorerTimelinePresentationRow
 
   var body: some View {
@@ -467,15 +474,15 @@ private struct ViewerExplorerTimelineRowView: View {
       HStack(alignment: .firstTextBaseline) {
         Text(row.eventType).font(.headline).lineLimit(1)
         Spacer()
-        Text(ViewerExplorerFormatting.time(row.viewerWallMilliseconds))
+        Text(ViewerExplorerFormatting.time(row.viewerWallMilliseconds, locale: locale))
           .font(.caption.monospacedDigit())
           .foregroundStyle(.secondary)
       }
       HStack(spacing: 7) {
         Label(row.deviceAlias, systemImage: "iphone")
-        Text(row.direction)
-        Text(row.priority)
-        Text(ByteCountFormatter.string(fromByteCount: row.contentByteCount, countStyle: .binary))
+        Text(LocalizedStringKey(row.direction))
+        Text(LocalizedStringKey(row.priority.capitalized))
+        Text(ViewerExplorerFormatting.bytes(row.contentByteCount, locale: locale))
       }
       .font(.caption)
       .foregroundStyle(.secondary)
@@ -495,19 +502,44 @@ private struct ViewerExplorerTimelineRowView: View {
   }
 
   private var accessibilitySummary: String {
-    let recording = row.isTransient ? "not recorded" : "recorded"
+    let recording = ViewerLocalization.string(
+      row.isTransient ? "not recorded" : "recorded",
+      locale: locale
+    )
     var states = [recording]
-    if let disposition = row.disposition { states.append("disposition \(disposition)") }
-    if row.hasGap { states.append("gap") }
-    if row.hasDrop { states.append("drop") }
-    if row.hasPresentationConflict { states.append("presentation conflict") }
-    if row.sessionEnded { states.append("session ended") }
-    return
-      "\(row.eventType), \(row.deviceAlias), \(row.direction), \(row.priority), \(states.joined(separator: ", ")), \(ViewerExplorerFormatting.date(row.viewerWallMilliseconds))"
+    if let disposition = row.disposition {
+      states.append(
+        ViewerLocalization.format(
+          "disposition %@",
+          locale: locale,
+          arguments: [disposition]
+        )
+      )
+    }
+    if row.hasGap { states.append(ViewerLocalization.string("gap", locale: locale)) }
+    if row.hasDrop { states.append(ViewerLocalization.string("drop", locale: locale)) }
+    if row.hasPresentationConflict {
+      states.append(ViewerLocalization.string("presentation conflict", locale: locale))
+    }
+    if row.sessionEnded {
+      states.append(ViewerLocalization.string("session ended", locale: locale))
+    }
+    return ViewerLocalization.format(
+      "%@, %@, %@, %@, %@, %@",
+      locale: locale,
+      arguments: [
+        row.eventType,
+        row.deviceAlias,
+        ViewerLocalization.string(row.direction, locale: locale),
+        ViewerLocalization.string(row.priority.capitalized, locale: locale),
+        states.joined(separator: ", "),
+        ViewerExplorerFormatting.date(row.viewerWallMilliseconds, locale: locale),
+      ]
+    )
   }
 
   private func badge(_ text: String, color: Color) -> some View {
-    Text(text)
+    Text(LocalizedStringKey(text))
       .font(.caption2)
       .foregroundStyle(color)
       .padding(.horizontal, 5)
@@ -519,6 +551,7 @@ private struct ViewerExplorerTimelineRowView: View {
 struct ViewerExportSheet: View {
   @ObservedObject var explorer: ViewerEventExplorerController
   @Binding var isPresented: Bool
+  @Environment(\.locale) private var locale
 
   var body: some View {
     VStack(alignment: .leading, spacing: 18) {
@@ -526,7 +559,7 @@ struct ViewerExportSheet: View {
         Text("Export JSON").font(.title2).fontWeight(.semibold)
         Spacer()
         if case .disclosure(let mode, _, _) = explorer.exportState {
-          Text(mode.title).font(.caption).foregroundStyle(.secondary)
+          Text(LocalizedStringKey(mode.title)).font(.caption).foregroundStyle(.secondary)
         }
       }
       Divider()
@@ -539,7 +572,7 @@ struct ViewerExportSheet: View {
             .disabled(isCancellingExport)
         }
         Spacer()
-        Button(closeTitle) { close() }
+        Button(LocalizedStringKey(closeTitle)) { close() }
           .disabled(isExporting)
       }
     }
@@ -642,7 +675,7 @@ struct ViewerExportSheet: View {
   }
 
   private func disclosureLine(_ text: String) -> some View {
-    Label(text, systemImage: "circle.fill")
+    Label(LocalizedStringKey(text), systemImage: "circle.fill")
       .font(.body)
       .symbolRenderingMode(.hierarchical)
   }
@@ -670,8 +703,11 @@ struct ViewerExportSheet: View {
       panel.canCreateDirectories = true
       panel.isExtensionHidden = false
       panel.nameFieldStringValue = "NearWire-Export.json"
-      panel.title = "Export NearWire JSON"
-      panel.message = "Choose a destination for the unencrypted JSON export."
+      panel.title = ViewerLocalization.string("Export NearWire JSON", locale: locale)
+      panel.message = ViewerLocalization.string(
+        "Choose a destination for the unencrypted JSON export.",
+        locale: locale
+      )
       panel.begin { response in
         completion(response == .OK ? panel.url : nil)
       }
@@ -773,6 +809,7 @@ enum ViewerExplorerInspectorTab: String, CaseIterable {
 }
 
 struct ViewerExplorerInspectorView: View {
+  @Environment(\.locale) private var locale
   let explorer: ViewerEventExplorerController
   @StateObject private var presentationObserver: ViewerInspectorPresentationObserver
   @Binding private var tab: ViewerExplorerInspectorTab
@@ -850,7 +887,7 @@ struct ViewerExplorerInspectorView: View {
   @ViewBuilder
   private var inspectorTabOptions: some View {
     ForEach(ViewerExplorerInspectorTab.allCases, id: \.self) {
-      Text($0.rawValue).tag($0)
+      Text(LocalizedStringKey($0.rawValue)).tag($0)
     }
   }
 
@@ -875,23 +912,41 @@ struct ViewerExplorerInspectorView: View {
           metadataRow("Event UUID", value.eventUUID)
           metadataRow("Device", value.deviceAlias)
           metadataRow("Connection", value.connectionAlias)
-          metadataRow("Direction", value.direction)
+          metadataRow("Direction", ViewerLocalization.string(value.direction, locale: locale))
           metadataRow("Sequence", String(value.wireSequence))
-          metadataRow("Priority", value.priority)
-          metadataRow("Created", ViewerExplorerFormatting.date(value.createdWallMilliseconds))
           metadataRow(
-            "Viewer received", ViewerExplorerFormatting.date(value.viewerWallMilliseconds))
+            "Priority",
+            ViewerLocalization.string(value.priority.capitalized, locale: locale)
+          )
+          metadataRow(
+            "Created",
+            ViewerExplorerFormatting.date(value.createdWallMilliseconds, locale: locale)
+          )
+          metadataRow(
+            "Viewer received",
+            ViewerExplorerFormatting.date(value.viewerWallMilliseconds, locale: locale)
+          )
           metadataRow("TTL", "\(value.ttlMilliseconds) ms")
           metadataRow("Schema", String(value.schemaVersion))
-          metadataRow("Disposition", value.disposition ?? "None")
-          metadataRow("Correlation", value.correlationEventUUID ?? "None")
-          metadataRow("Reply to", value.replyToEventUUID ?? "None")
+          metadataRow(
+            "Disposition",
+            value.disposition ?? ViewerLocalization.string("None", locale: locale)
+          )
+          metadataRow(
+            "Correlation",
+            value.correlationEventUUID ?? ViewerLocalization.string("None", locale: locale)
+          )
+          metadataRow(
+            "Reply to",
+            value.replyToEventUUID ?? ViewerLocalization.string("None", locale: locale)
+          )
           metadataRow(
             "Content",
-            ByteCountFormatter.string(
-              fromByteCount: Int64(explorer.inspectorContentByteCount),
-              countStyle: .binary
-            ))
+            ViewerExplorerFormatting.bytes(
+              Int64(explorer.inspectorContentByteCount),
+              locale: locale
+            )
+          )
           metadataRow("Diagnostics", diagnosticSummary(value))
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -988,7 +1043,7 @@ struct ViewerExplorerInspectorView: View {
     if let preparation = explorer.rendererPreparation {
       if let guidance = preparation.fallbackGuidance {
         VStack(spacing: 0) {
-          Label(guidance, systemImage: "info.circle")
+          Label(LocalizedStringKey(guidance), systemImage: "info.circle")
             .font(.caption)
             .foregroundStyle(.secondary)
             .padding(10)
@@ -1035,10 +1090,22 @@ struct ViewerExplorerInspectorView: View {
         Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 8) {
           metadataRow("Type", timeline.eventType)
           metadataRow("Device", timeline.deviceAlias)
-          metadataRow("Direction", timeline.direction)
-          metadataRow("Priority", timeline.priority)
-          metadataRow("Received", ViewerExplorerFormatting.date(timeline.viewerWallMilliseconds))
-          metadataRow("Disposition", timeline.disposition)
+          metadataRow(
+            "Direction",
+            ViewerLocalization.string(timeline.direction, locale: locale)
+          )
+          metadataRow(
+            "Priority",
+            ViewerLocalization.string(timeline.priority.capitalized, locale: locale)
+          )
+          metadataRow(
+            "Received",
+            ViewerExplorerFormatting.date(timeline.viewerWallMilliseconds, locale: locale)
+          )
+          metadataRow(
+            "Disposition",
+            ViewerLocalization.string(timeline.disposition, locale: locale)
+          )
         }
         .padding(14)
       }
@@ -1083,7 +1150,9 @@ struct ViewerExplorerInspectorView: View {
           ForEach(graph.nodes, id: \.rowID) { node in
             VStack(alignment: .leading, spacing: 3) {
               Text(node.eventType).font(.headline)
-              Text("\(node.direction) · sequence \(node.wireSequence) · \(node.eventUUID)")
+              Text(
+                "\(ViewerLocalization.string(node.direction, locale: locale)) · sequence \(node.wireSequence) · \(node.eventUUID)"
+              )
                 .font(.caption)
                 .foregroundStyle(.secondary)
             }
@@ -1092,10 +1161,21 @@ struct ViewerExplorerInspectorView: View {
         Section("Edges") {
           ForEach(Array(graph.edges.enumerated()), id: \.offset) { _, edge in
             VStack(alignment: .leading, spacing: 3) {
-              Text(edge.kind == .replyTo ? "Reply to" : "Correlation").fontWeight(.medium)
+              Text(LocalizedStringKey(edge.kind == .replyTo ? "Reply to" : "Correlation"))
+                .fontWeight(.medium)
               Text(edge.referencedEventUUID).font(.caption)
               Text(
-                "\(edge.candidateRowIDs.count) candidate(s)\(edge.hasMore ? ", more omitted" : "")\(edge.cyclicCandidateRowIDs.isEmpty ? "" : ", cycle observed")"
+                ViewerLocalization.format(
+                  "%lld candidate(s)%@%@",
+                  locale: locale,
+                  arguments: [
+                    edge.candidateRowIDs.count,
+                    edge.hasMore
+                      ? ViewerLocalization.string(", more omitted", locale: locale) : "",
+                    edge.cyclicCandidateRowIDs.isEmpty
+                      ? "" : ViewerLocalization.string(", cycle observed", locale: locale),
+                  ]
+                )
               )
               .font(.caption2)
               .foregroundStyle(.secondary)
@@ -1113,22 +1193,29 @@ struct ViewerExplorerInspectorView: View {
 
   private func metadataRow(_ label: String, _ value: String) -> some View {
     GridRow {
-      Text(label).foregroundStyle(.secondary)
+      Text(LocalizedStringKey(label)).foregroundStyle(.secondary)
       Text(value).lineLimit(4)
     }
   }
 
   private func diagnosticSummary(_ value: ViewerInspectorEventMetadata) -> String {
     var values: [String] = []
-    if value.hasGap { values.append("gap") }
-    if value.hasDrop { values.append("drop") }
-    if value.hasPresentationConflict { values.append("presentation conflict") }
-    if value.sessionEnded { values.append("session ended") }
-    return values.isEmpty ? "None" : values.joined(separator: ", ")
+    if value.hasGap { values.append(ViewerLocalization.string("gap", locale: locale)) }
+    if value.hasDrop { values.append(ViewerLocalization.string("drop", locale: locale)) }
+    if value.hasPresentationConflict {
+      values.append(ViewerLocalization.string("presentation conflict", locale: locale))
+    }
+    if value.sessionEnded {
+      values.append(ViewerLocalization.string("session ended", locale: locale))
+    }
+    return values.isEmpty
+      ? ViewerLocalization.string("None", locale: locale)
+      : values.joined(separator: ", ")
   }
 }
 
 struct ViewerExplorerFilterSheet: View {
+  @Environment(\.locale) private var locale
   let explorer: ViewerEventExplorerController
   @StateObject private var presentationObserver: ViewerFilterPresentationObserver
   @Binding var isPresented: Bool
@@ -1225,7 +1312,7 @@ struct ViewerExplorerFilterSheet: View {
                 selection: valueBinding(\.jsonMode) { $0.jsonMode = $1 }
               ) {
                 ForEach(ViewerExplorerJSONFilterMode.allCases, id: \.self) {
-                  Text(jsonModeTitle($0)).tag($0)
+                  Text(LocalizedStringKey(jsonModeTitle($0))).tag($0)
                 }
               }
               .frame(maxWidth: 360, alignment: .leading)
@@ -1239,7 +1326,7 @@ struct ViewerExplorerFilterSheet: View {
                   selection: valueBinding(\.jsonScalarKind) { $0.jsonScalarKind = $1 }
                 ) {
                   ForEach(ViewerExplorerJSONScalarKind.allCases, id: \.self) {
-                    Text($0.rawValue.capitalized).tag($0)
+                    Text(LocalizedStringKey($0.rawValue.capitalized)).tag($0)
                   }
                 }
                 .frame(maxWidth: 360, alignment: .leading)
@@ -1285,7 +1372,7 @@ struct ViewerExplorerFilterSheet: View {
       .frame(maxHeight: .infinity)
       .accessibilityIdentifier("nearwire.filters.scroll")
       if let message = presentation.validationMessage {
-        Label(message, systemImage: "exclamationmark.triangle")
+        Label(LocalizedStringKey(message), systemImage: "exclamationmark.triangle")
           .font(.caption)
           .foregroundStyle(.red)
       }
@@ -1313,12 +1400,15 @@ struct ViewerExplorerFilterSheet: View {
     value keyPath: KeyPath<ViewerFilterPresentationSignature, String>
   ) -> some View {
     VStack(alignment: .leading, spacing: 4) {
-      Text(label).font(.caption).foregroundStyle(.secondary)
+      Text(LocalizedStringKey(label)).font(.caption).foregroundStyle(.secondary)
       ViewerBoundedTextInput(
         text: presentation[keyPath: keyPath],
         style: .singleLine,
-        accessibilityLabel: label,
-        accessibilityHelp: "Standard editing is bounded before this filter value is stored.",
+        accessibilityLabel: ViewerLocalization.string(label, locale: locale),
+        accessibilityHelp: ViewerLocalization.string(
+          "Standard editing is bounded before this filter value is stored.",
+          locale: locale
+        ),
         onEdit: { range, replacement in
           explorer.replaceFilterCharacters(field, range: range, replacement: replacement)
         }
@@ -1338,7 +1428,7 @@ struct ViewerExplorerFilterSheet: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.top, 2)
     } label: {
-      Text(title).font(.headline)
+      Text(LocalizedStringKey(title)).font(.headline)
     }
     .frame(maxWidth: .infinity, alignment: .leading)
     .accessibilityIdentifier("nearwire.filters.section.\(identifier)")
@@ -1361,7 +1451,7 @@ struct ViewerExplorerFilterSheet: View {
     draftKeyPath: WritableKeyPath<ViewerExplorerFilterDraft, Set<String>>
   ) -> some View {
     return Toggle(
-      title,
+      LocalizedStringKey(title),
       isOn: Binding(
         get: { presentation[keyPath: keyPath].contains(value) },
         set: { selected in
@@ -1436,8 +1526,10 @@ private struct ViewerExplorerEmptyState: View {
         .font(.system(size: 30))
         .foregroundStyle(.secondary)
         .accessibilityHidden(true)
-      Text(title).font(.headline)
-      Text(description).multilineTextAlignment(.center).foregroundStyle(.secondary)
+      Text(LocalizedStringKey(title)).font(.headline)
+      Text(LocalizedStringKey(description))
+        .multilineTextAlignment(.center)
+        .foregroundStyle(.secondary)
     }
     .padding(24)
     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1445,14 +1537,20 @@ private struct ViewerExplorerEmptyState: View {
 }
 
 private enum ViewerExplorerFormatting {
-  static func date(_ milliseconds: Int64) -> String {
-    Date(timeIntervalSince1970: TimeInterval(milliseconds) / 1_000)
-      .formatted(date: .abbreviated, time: .standard)
+  static func date(_ milliseconds: Int64, locale: Locale) -> String {
+    Date.FormatStyle(date: .abbreviated, time: .standard)
+      .locale(locale)
+      .format(Date(timeIntervalSince1970: TimeInterval(milliseconds) / 1_000))
   }
 
-  static func time(_ milliseconds: Int64) -> String {
-    Date(timeIntervalSince1970: TimeInterval(milliseconds) / 1_000)
-      .formatted(date: .omitted, time: .standard)
+  static func time(_ milliseconds: Int64, locale: Locale) -> String {
+    Date.FormatStyle(date: .omitted, time: .standard)
+      .locale(locale)
+      .format(Date(timeIntervalSince1970: TimeInterval(milliseconds) / 1_000))
+  }
+
+  static func bytes(_ count: Int64, locale: Locale) -> String {
+    ByteCountFormatStyle(style: .binary, locale: locale).format(count)
   }
 }
 

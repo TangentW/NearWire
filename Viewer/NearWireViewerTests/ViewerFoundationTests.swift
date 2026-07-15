@@ -76,6 +76,299 @@ private final class ViewerWorkspaceControlProbe: ViewerWorkspaceSessionControlli
   }
 }
 
+final class ViewerLocalizationTests: XCTestCase {
+  private var defaults: UserDefaults!
+  private var suiteName: String!
+
+  override func setUp() {
+    super.setUp()
+    suiteName = "ViewerLocalizationTests.\(UUID().uuidString)"
+    defaults = UserDefaults(suiteName: suiteName)
+    defaults.removePersistentDomain(forName: suiteName)
+  }
+
+  override func tearDown() {
+    defaults.removePersistentDomain(forName: suiteName)
+    defaults = nil
+    suiteName = nil
+    super.tearDown()
+  }
+
+  @MainActor
+  func testLanguagePreferenceDefaultsToSystemAndPersistsManualChoice() {
+    let controller = ViewerLanguageController(
+      defaults: defaults,
+      systemLocaleProvider: { Locale(identifier: "zh-Hans-CN") }
+    )
+    XCTAssertEqual(controller.preference, .system)
+    XCTAssertEqual(controller.effectiveLocale.identifier, "zh-Hans")
+
+    controller.select(.english)
+    XCTAssertEqual(controller.preference, .english)
+    XCTAssertEqual(controller.effectiveLocale.identifier, "en")
+    XCTAssertEqual(defaults.string(forKey: ViewerLanguageController.defaultsKey), "english")
+
+    let restored = ViewerLanguageController(defaults: defaults)
+    XCTAssertEqual(restored.preference, .english)
+  }
+
+  @MainActor
+  func testInvalidStoredPreferenceFallsBackToSystemAndSystemLocaleCanRefresh() {
+    defaults.set("unsupported-value", forKey: ViewerLanguageController.defaultsKey)
+    var locale = Locale(identifier: "en-US")
+    let controller = ViewerLanguageController(
+      defaults: defaults,
+      systemLocaleProvider: { locale }
+    )
+    XCTAssertEqual(controller.preference, .system)
+    XCTAssertEqual(defaults.string(forKey: ViewerLanguageController.defaultsKey), "system")
+    XCTAssertEqual(controller.effectiveLocale.identifier, "en")
+
+    locale = Locale(identifier: "zh-Hans-CN")
+    controller.refreshSystemLocale()
+    XCTAssertEqual(controller.effectiveLocale.identifier, "zh-Hans")
+
+    let traditionalChineseController = ViewerLanguageController(
+      defaults: defaults,
+      systemLocaleProvider: { Locale(identifier: "zh-Hant-TW") }
+    )
+    XCTAssertEqual(traditionalChineseController.effectiveLocale.identifier, "zh-Hans")
+  }
+
+  @MainActor
+  func testMalformedPreferenceTypeIsReplacedByCanonicalSystemValue() {
+    defaults.set(Data([0x01, 0x02]), forKey: ViewerLanguageController.defaultsKey)
+    let controller = ViewerLanguageController(
+      defaults: defaults,
+      systemLocaleProvider: { Locale(identifier: "en-US") }
+    )
+
+    XCTAssertEqual(controller.preference, .system)
+    XCTAssertEqual(defaults.string(forKey: ViewerLanguageController.defaultsKey), "system")
+  }
+
+  func testSupportedLocaleResolutionUsesSimplifiedChineseForEveryChineseLocale() {
+    XCTAssertEqual(
+      ViewerLocalization.localizationIdentifier(for: Locale(identifier: "zh-Hans-CN")),
+      "zh-Hans"
+    )
+    XCTAssertEqual(
+      ViewerLocalization.localizationIdentifier(for: Locale(identifier: "zh-Hans-HK")),
+      "zh-Hans"
+    )
+    XCTAssertEqual(
+      ViewerLocalization.localizationIdentifier(for: Locale(identifier: "zh-CN")),
+      "zh-Hans"
+    )
+    XCTAssertEqual(
+      ViewerLocalization.localizationIdentifier(for: Locale(identifier: "zh-Hant-TW")),
+      "zh-Hans"
+    )
+    XCTAssertEqual(
+      ViewerLocalization.localizationIdentifier(for: Locale(identifier: "zh-HK")),
+      "zh-Hans"
+    )
+    XCTAssertEqual(
+      ViewerLocalization.localizationIdentifier(for: Locale(identifier: "fr-FR")),
+      "en"
+    )
+  }
+
+  func testStringCatalogHasCompleteEnglishAndSimplifiedChineseCoverage() throws {
+    let englishStrings = try compiledLocalization("en")
+    let simplifiedChineseStrings = try compiledLocalization("zh-Hans")
+    XCTAssertGreaterThanOrEqual(englishStrings.count, 500)
+    XCTAssertEqual(Set(englishStrings.keys), Set(simplifiedChineseStrings.keys))
+
+    for (key, english) in englishStrings {
+      let simplifiedChinese = try XCTUnwrap(simplifiedChineseStrings[key], key)
+      XCTAssertFalse(english.isEmpty, key)
+      XCTAssertFalse(simplifiedChinese.isEmpty, key)
+      XCTAssertEqual(
+        formatPlaceholders(in: english),
+        formatPlaceholders(in: simplifiedChinese),
+        key
+      )
+    }
+  }
+
+  func testCatalogCoversRepresentativeViewerSurfaces() throws {
+    let englishStrings = try compiledLocalization("en")
+    let simplifiedChineseStrings = try compiledLocalization("zh-Hans")
+    let representativeKeys = [
+      "Connect an iPhone App",
+      "Devices",
+      "Event Timeline",
+      "Event Inspector",
+      "Control Event JSON content",
+      "Performance",
+      "Viewer language",
+      "The requested bounded view is no longer valid.",
+      "Viewer identity is unavailable",
+      "%@ performance chart. Aggregated average lines and min–max envelopes. %lld buckets.",
+    ]
+    for key in representativeKeys {
+      XCTAssertEqual(englishStrings[key], key)
+      XCTAssertNotNil(simplifiedChineseStrings[key], key)
+    }
+    XCTAssertEqual(simplifiedChineseStrings["Event Timeline"], "事件时间线")
+    XCTAssertEqual(simplifiedChineseStrings["Performance"], "性能")
+  }
+
+  func testLocalizedFormattingDoesNotTreatApplicationContentAsAViewerKey() throws {
+    let chineseStrings = try compiledLocalization("zh-Hans")
+    XCTAssertNil(chineseStrings["app.custom.payload"])
+    XCTAssertEqual(
+      ViewerLocalization.string(
+        "app.custom.payload",
+        locale: Locale(identifier: "zh-Hans"),
+        bundle: .main
+      ),
+      "app.custom.payload"
+    )
+    XCTAssertEqual(
+      ViewerLocalization.string(
+        "Event Timeline",
+        locale: Locale(identifier: "zh-Hans"),
+        bundle: .main
+      ),
+      "事件时间线"
+    )
+    let chinese = try XCTUnwrap(chineseStrings["%lld events/s"])
+    XCTAssertEqual(
+      String(format: chinese, locale: Locale(identifier: "zh-Hans"), 12),
+      "12 个事件/秒"
+    )
+  }
+
+  @MainActor
+  func testSystemNotificationAndManualSelectionRepublishSharedSceneRootsOnce() {
+    var systemLocale = Locale(identifier: "en-US")
+    let controller = ViewerLanguageController(
+      defaults: defaults,
+      systemLocaleProvider: { systemLocale }
+    )
+    var publicationCount = 0
+    let publication = controller.objectWillChange.sink { publicationCount += 1 }
+    defer { publication.cancel() }
+
+    let eventHost = NSHostingView(
+      rootView: Text("Event Timeline").viewerLanguageEnvironment(controller)
+    )
+    let performanceHost = NSHostingView(
+      rootView: Text("Performance").viewerLanguageEnvironment(controller)
+    )
+    let settingsHost = NSHostingView(
+      rootView: ViewerLanguageSettingsView(controller: controller)
+        .viewerLanguageEnvironment(controller)
+    )
+    eventHost.frame = NSRect(x: 0, y: 0, width: 240, height: 80)
+    performanceHost.frame = NSRect(x: 0, y: 0, width: 240, height: 80)
+    settingsHost.frame = NSRect(x: 0, y: 0, width: 440, height: 240)
+    [eventHost, performanceHost, settingsHost].forEach {
+      $0.layoutSubtreeIfNeeded()
+      $0.displayIfNeeded()
+    }
+
+    systemLocale = Locale(identifier: "zh-Hant-TW")
+    NotificationCenter.default.post(name: NSLocale.currentLocaleDidChangeNotification, object: nil)
+    RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
+    [eventHost, performanceHost, settingsHost].forEach {
+      $0.layoutSubtreeIfNeeded()
+      $0.displayIfNeeded()
+    }
+
+    XCTAssertEqual(controller.effectiveLocale.identifier, "zh-Hans")
+    XCTAssertEqual(publicationCount, 1)
+
+    controller.select(.english)
+    RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
+    eventHost.layoutSubtreeIfNeeded()
+    XCTAssertEqual(controller.effectiveLocale.identifier, "en")
+  }
+
+  func testViewerSourceBoundaryCoversFixedLocalizationCallsAndAppKitPanels() throws {
+    let englishStrings = try compiledLocalization("en")
+    let viewerSourceRoot = URL(fileURLWithPath: #filePath)
+      .deletingLastPathComponent()
+      .deletingLastPathComponent()
+      .appendingPathComponent("NearWireViewer", isDirectory: true)
+    let sourceURLs = try XCTUnwrap(
+      FileManager.default.enumerator(
+        at: viewerSourceRoot,
+        includingPropertiesForKeys: [.isRegularFileKey],
+        options: [.skipsHiddenFiles]
+      )?.allObjects as? [URL]
+    ).filter { $0.pathExtension == "swift" }
+    XCTAssertFalse(sourceURLs.isEmpty)
+
+    let localizedCall = try NSRegularExpression(
+      pattern: #"ViewerLocalization\.(?:string|format)\(\s*\"([^\"\n]+)\""#
+    )
+    let swiftUILiteral = try NSRegularExpression(
+      pattern: #"(?:Text|Button|Label|Toggle|Picker|GroupBox|accessibilityLabel|help)\s*\(\s*\"([^\"\n]+)\""#
+    )
+    let hardCodedPanelText = try NSRegularExpression(
+      pattern: #"\b(?:panel|alert)\.(?:title|message|informativeText|prompt)\s*=\s*\""#
+    )
+    var missingKeys: [String] = []
+    var hardCodedPanels: [String] = []
+
+    for url in sourceURLs {
+      let source = try String(contentsOf: url, encoding: .utf8)
+      let sourceRange = NSRange(source.startIndex..., in: source)
+      for expression in [localizedCall, swiftUILiteral] {
+        expression.enumerateMatches(in: source, range: sourceRange) { match, _, _ in
+          guard
+            let match,
+            let range = Range(match.range(at: 1), in: source)
+          else { return }
+          let rawLiteral = String(source[range])
+          guard !rawLiteral.contains(#"\("#) else { return }
+          let key = rawLiteral
+            .replacingOccurrences(of: #"\""#, with: "\"")
+            .replacingOccurrences(of: #"\\"#, with: #"\"#)
+          if englishStrings[key] == nil {
+            missingKeys.append("\(url.lastPathComponent): \(key)")
+          }
+        }
+      }
+      if hardCodedPanelText.firstMatch(in: source, range: sourceRange) != nil {
+        hardCodedPanels.append(url.lastPathComponent)
+      }
+    }
+
+    XCTAssertEqual(missingKeys, [], "Fixed Viewer UI strings missing from the catalog: \(missingKeys)")
+    XCTAssertEqual(
+      hardCodedPanels,
+      [],
+      "AppKit panels must use ViewerLocalization for fixed text: \(hardCodedPanels)"
+    )
+  }
+
+  private func compiledLocalization(_ language: String) throws -> [String: String] {
+    let path = try XCTUnwrap(
+      Bundle.main.path(
+        forResource: "Localizable",
+        ofType: "strings",
+        inDirectory: nil,
+        forLocalization: language
+      ),
+      language
+    )
+    return try XCTUnwrap(NSDictionary(contentsOfFile: path) as? [String: String], language)
+  }
+
+  private func formatPlaceholders(in value: String) -> [String] {
+    let pattern = #"%(?:[0-9]+\$)?[-+#0 ]*(?:\*|[0-9]+)?(?:\.\*|\.[0-9]+)?(?:hh|h|ll|l|q|L|z|t|j)?[diuoxXfFeEgGaAcCsSp@%]"#
+    let expression = try! NSRegularExpression(pattern: pattern)
+    let range = NSRange(value.startIndex..<value.endIndex, in: value)
+    return expression.matches(in: value, range: range).compactMap {
+      Range($0.range, in: value).map { String(value[$0]) }
+    }
+  }
+}
+
 final class ViewerWorkspacePresentationTests: XCTestCase {
   @MainActor
   func testTimelineOnlyMutationDoesNotPublishInspectorPresentation() async {
@@ -8620,6 +8913,7 @@ final class ViewerFoundationTests: XCTestCase {
         explorer: controller,
         isPresented: .constant(true)
       )
+      .environment(\.locale, Locale(identifier: "en"))
     )
     controller.updateFilterDraft {
       $0.fromDate = Date(timeIntervalSince1970: 1)
@@ -8670,6 +8964,24 @@ final class ViewerFoundationTests: XCTestCase {
     } else {
       XCTFail("The minimum-size filter sheet could not be rendered offscreen.")
     }
+
+    let chineseHostingView = NSHostingView(
+      rootView: ViewerExplorerFilterSheet(
+        explorer: controller,
+        isPresented: .constant(true)
+      )
+      .environment(\.locale, Locale(identifier: "zh-Hans"))
+    )
+    chineseHostingView.frame = NSRect(x: 0, y: 0, width: 620, height: 660)
+    chineseHostingView.layoutSubtreeIfNeeded()
+    chineseHostingView.displayIfNeeded()
+    let chineseEditors = descendantViews(of: ViewerOperatorTextView.self, in: chineseHostingView)
+    XCTAssertEqual(
+      Set(chineseEditors.compactMap { $0.accessibilityLabel() }),
+      Set(["事件类型", "应用标识", "应用版本", "JSON 路径", "比较值"])
+    )
+    let chineseFrames = chineseEditors.map { $0.convert($0.bounds, to: chineseHostingView) }
+    XCTAssertTrue(chineseFrames.allSatisfy { $0.width >= 120 })
     controller.model.sealAndClear()
   }
 
@@ -8833,7 +9145,10 @@ final class ViewerFoundationTests: XCTestCase {
       runtimeLogicalID: runtimeID,
       sessionControl: owner
     )
-    let hostingView = NSHostingView(rootView: ViewerControlComposerView(controller: controller))
+    let hostingView = NSHostingView(
+      rootView: ViewerControlComposerView(controller: controller)
+        .environment(\.locale, Locale(identifier: "en"))
+    )
     hostingView.frame = NSRect(x: 0, y: 0, width: 620, height: 900)
     hostingView.layoutSubtreeIfNeeded()
 
@@ -8846,6 +9161,20 @@ final class ViewerFoundationTests: XCTestCase {
     XCTAssertTrue(editors.allSatisfy(\.acceptsFirstResponder))
     XCTAssertGreaterThan(hostingView.fittingSize.width, 0)
     XCTAssertGreaterThan(hostingView.fittingSize.height, 0)
+
+    let chineseHostingView = NSHostingView(
+      rootView: ViewerControlComposerView(controller: controller)
+        .environment(\.locale, Locale(identifier: "zh-Hans"))
+    )
+    chineseHostingView.frame = NSRect(x: 0, y: 0, width: 620, height: 900)
+    chineseHostingView.layoutSubtreeIfNeeded()
+    let chineseEditors = descendantViews(of: ViewerOperatorTextView.self, in: chineseHostingView)
+    XCTAssertEqual(chineseEditors.count, 3)
+    XCTAssertEqual(
+      chineseEditors.compactMap { $0.accessibilityLabel() },
+      ["控制事件类型", "控制事件 JSON 内容", "TTL（毫秒）"]
+    )
+    XCTAssertTrue(chineseEditors.allSatisfy(\.acceptsFirstResponder))
     controller.sealAndClear()
   }
 

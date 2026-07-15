@@ -12,6 +12,12 @@ Open `NearWire.xcworkspace` or `Viewer/NearWireViewer.xcodeproj` in Xcode 16 or 
 
 The application has one supported main window. Opening it starts identity preparation and listener publication automatically. Closing the last window synchronously closes publication, admission, and handoff transfer, then waits at most one second for one owned cleanup receipt before terminating. That receipt covers claim-in-progress work, attempts already cancelling because of policy or timeout, late returned channels, and accepted placeholder handoffs. A timed-out wait never reopens admission and does not discard cleanup ownership. There is no menu-bar agent, daemon, launch-at-login behavior, or second listener window.
 
+## Language Selection
+
+The Viewer interface is available in English and Simplified Chinese. The default `System` preference maps every Chinese macOS preferred language, including Traditional Chinese locales, to the supported Simplified Chinese interface; non-Chinese languages use English. `NearWire > Settings` also offers explicit `English` and `简体中文` choices. A manual choice is stored in the Viewer UserDefaults domain and applies immediately to the main Event window, the singleton Performance window, and Settings without restarting the runtime or reconnecting Apps.
+
+Viewer-owned labels, actions, status and recovery text, accessibility descriptions, dates, numbers, and byte counts follow the effective Viewer language. App-provided Event types and content, device and application names, protocol identifiers, exported data, file contents, and user-entered values remain byte-for-byte presentation data and are never translated. The localization catalog is maintained in `Viewer/NearWireViewer/Resources/Localizable.xcstrings`; Core, SDK, NearWireUI, and Demo remain outside this Viewer-only language preference.
+
 ### Stable-Signer Update Gate
 
 The cross-update Keychain gate is one conditional XCTest, not a separate script. It requires two valid, unrelated code-signing identities. List the available identities with `security find-identity -v -p codesigning`, then set `IDENTITY_A` and `IDENTITY_B` to their full SHA-1 values and set `TEAM_A` and `TEAM_B` to the corresponding team identifiers. The two identities must produce different designated requirements.

@@ -143,41 +143,54 @@ struct ViewerPerformanceChartGroupPresentation: Equatable, Sendable {
 enum ViewerPerformanceFormatting {
   static func cardValue(
     _ state: ViewerPerformanceCardState,
-    for key: PerformanceMetricKey
+    for key: PerformanceMetricKey,
+    locale: Locale = Locale(identifier: "en")
   ) -> String {
     switch state {
     case .measured(let measured):
-      return measurement(measured, for: key)
+      return measurement(measured, for: key, locale: locale)
     case .invalidSnapshot:
-      return "Invalid snapshot"
+      return localized("Invalid snapshot", locale: locale)
     case .unavailable(let reason):
-      return unavailable(reason)
+      return unavailable(reason, locale: locale)
     case .notCollected:
-      return "Not collected"
+      return localized("Not collected", locale: locale)
     case .noRecentSample:
-      return "No recent sample"
+      return localized("No recent sample", locale: locale)
     }
   }
 
-  static func availability(_ value: ViewerPerformanceAvailabilityPresentation) -> String {
+  static func availability(
+    _ value: ViewerPerformanceAvailabilityPresentation,
+    locale: Locale = Locale(identifier: "en")
+  ) -> String {
     switch value {
-    case .measured: return "Measured"
-    case .invalidSnapshot: return "Invalid snapshot"
-    case .unavailable(let reason): return unavailable(reason)
-    case .notCollected: return "Not collected"
+    case .measured: return localized("Measured", locale: locale)
+    case .invalidSnapshot: return localized("Invalid snapshot", locale: locale)
+    case .unavailable(let reason): return unavailable(reason, locale: locale)
+    case .notCollected: return localized("Not collected", locale: locale)
     }
   }
 
-  static func availabilityDetail(_ counts: ViewerPerformanceAvailabilityCounts) -> String {
+  static func availabilityDetail(
+    _ counts: ViewerPerformanceAvailabilityCounts,
+    locale: Locale = Locale(identifier: "en")
+  ) -> String {
     var values: [String] = []
-    append(counts.measured, "measured", to: &values)
-    append(counts.invalid, "invalid", to: &values)
-    append(counts.permissionDenied, "permission denied", to: &values)
-    append(counts.temporarilyUnavailable, "temporarily unavailable", to: &values)
-    append(counts.disabled, "disabled", to: &values)
-    append(counts.unsupported, "unsupported", to: &values)
-    append(counts.notCollected, "not collected", to: &values)
-    return values.isEmpty ? "No samples in range" : values.joined(separator: " · ")
+    append(counts.measured, "measured", locale: locale, to: &values)
+    append(counts.invalid, "invalid", locale: locale, to: &values)
+    append(counts.permissionDenied, "permission denied", locale: locale, to: &values)
+    append(
+      counts.temporarilyUnavailable,
+      "temporarily unavailable",
+      locale: locale,
+      to: &values
+    )
+    append(counts.disabled, "disabled", locale: locale, to: &values)
+    append(counts.unsupported, "unsupported", locale: locale, to: &values)
+    append(counts.notCollected, "not collected", locale: locale, to: &values)
+    return values.isEmpty ? localized("No samples in range", locale: locale) : values.joined(
+      separator: " · ")
   }
 
   static func chartValue(_ value: Double, metric: ViewerPerformanceNumericMetric) -> Double {
@@ -186,96 +199,104 @@ enum ViewerPerformanceFormatting {
 
   static func chartAxisValue(
     _ value: Double,
-    group: ViewerPerformanceChartGroupKind
+    group: ViewerPerformanceChartGroupKind,
+    locale: Locale = Locale(identifier: "en")
   ) -> String {
     switch group {
     case .memory:
-      return bytes(UInt64(max(0, value.rounded())))
+      return bytes(UInt64(max(0, value.rounded())), locale: locale)
     case .throughput:
-      return "\(bytes(UInt64(max(0, value.rounded()))))/s"
+      return "\(bytes(UInt64(max(0, value.rounded())), locale: locale))/s"
     case .battery, .cpu:
-      return "\(decimal(value))%"
+      return "\(decimal(value, locale: locale))%"
     case .display:
-      return "\(decimal(value)) fps"
+      return "\(decimal(value, locale: locale)) fps"
     case .queueAndDrops:
-      return decimal(value)
+      return decimal(value, locale: locale)
     }
   }
 
-  static func elapsedTime(_ seconds: Double) -> String {
+  static func elapsedTime(
+    _ seconds: Double,
+    locale: Locale = Locale(identifier: "en")
+  ) -> String {
     guard seconds.isFinite, seconds >= 0 else { return "0s" }
-    if seconds < 60 { return "\(decimal(seconds))s" }
-    return "\(decimal(seconds / 60))m"
+    if seconds < 60 { return "\(decimal(seconds, locale: locale))s" }
+    return "\(decimal(seconds / 60, locale: locale))m"
   }
 
   private static func measurement(
     _ state: ViewerPerformanceMetricState,
-    for key: PerformanceMetricKey
+    for key: PerformanceMetricKey,
+    locale: Locale
   ) -> String {
     switch state {
     case .numeric(let value):
       switch key {
       case .processCPUPercent, .deviceGPUUtilization:
-        return "\(decimal(value))%"
+        return "\(decimal(value, locale: locale))%"
       case .deviceBatteryLevel:
-        return "\(decimal(value * 100))%"
+        return "\(decimal(value * 100, locale: locale))%"
       case .displayEstimatedFramesPerSecond, .displayMaximumFramesPerSecond:
-        return "\(decimal(value)) fps"
+        return "\(decimal(value, locale: locale)) fps"
       case .devicePowerWatts:
-        return "\(decimal(value)) W"
+        return "\(decimal(value, locale: locale)) W"
       case .deviceTemperatureCelsius:
-        return "\(decimal(value)) °C"
+        return "\(decimal(value, locale: locale)) °C"
       default:
-        return decimal(value)
+        return decimal(value, locale: locale)
       }
     case .unsigned(let value):
       switch key {
       case .processMemoryFootprintBytes:
-        return bytes(value)
+        return bytes(value, locale: locale)
       case .transportUplinkBytesPerSecond, .transportDownlinkBytesPerSecond:
-        return "\(bytes(value))/s"
+        return "\(bytes(value, locale: locale))/s"
       default:
         return "\(value)"
       }
     case .batteryState(let value):
       switch value {
-      case .unknown: return "Unknown"
-      case .unplugged: return "Unplugged"
-      case .charging: return "Charging"
-      case .full: return "Full"
+      case .unknown: return localized("Unknown", locale: locale)
+      case .unplugged: return localized("Unplugged", locale: locale)
+      case .charging: return localized("Charging", locale: locale)
+      case .full: return localized("Full", locale: locale)
       }
     case .thermalState(let value):
       switch value {
-      case .unknown: return "Unknown"
-      case .nominal: return "Nominal"
-      case .fair: return "Fair"
-      case .serious: return "Serious"
-      case .critical: return "Critical"
+      case .unknown: return localized("Unknown", locale: locale)
+      case .nominal: return localized("Nominal", locale: locale)
+      case .fair: return localized("Fair", locale: locale)
+      case .serious: return localized("Serious", locale: locale)
+      case .critical: return localized("Critical", locale: locale)
       }
     case .boolean(let value):
-      return value ? "On" : "Off"
+      return localized(value ? "On" : "Off", locale: locale)
     case .unavailable(let reason):
-      return unavailable(reason)
+      return unavailable(reason, locale: locale)
     case .notCollected:
-      return "Not collected"
+      return localized("Not collected", locale: locale)
     }
   }
 
-  private static func unavailable(_ reason: UnavailablePerformanceMetricReason) -> String {
+  private static func unavailable(
+    _ reason: UnavailablePerformanceMetricReason,
+    locale: Locale
+  ) -> String {
     switch reason {
-    case .unsupported: return "Unsupported"
-    case .disabled: return "Disabled"
-    case .permissionDenied: return "Permission denied"
-    case .temporarilyUnavailable: return "Temporarily unavailable"
+    case .unsupported: return localized("Unsupported", locale: locale)
+    case .disabled: return localized("Disabled", locale: locale)
+    case .permissionDenied: return localized("Permission denied", locale: locale)
+    case .temporarilyUnavailable: return localized("Temporarily unavailable", locale: locale)
     }
   }
 
-  private static func decimal(_ value: Double) -> String {
+  private static func decimal(_ value: Double, locale: Locale) -> String {
     let format = value.rounded() == value ? "%.0f" : "%.1f"
-    return String(format: format, locale: Locale(identifier: "en_US_POSIX"), value)
+    return String(format: format, locale: locale, value)
   }
 
-  private static func bytes(_ value: UInt64) -> String {
+  private static func bytes(_ value: UInt64, locale: Locale) -> String {
     let units = ["B", "KiB", "MiB", "GiB", "TiB"]
     var amount = Double(value)
     var unitIndex = 0
@@ -283,12 +304,26 @@ enum ViewerPerformanceFormatting {
       amount /= 1_024
       unitIndex += 1
     }
-    return "\(decimal(amount)) \(units[unitIndex])"
+    return "\(decimal(amount, locale: locale)) \(units[unitIndex])"
   }
 
-  private static func append(_ count: UInt64, _ label: String, to values: inout [String]) {
+  private static func append(
+    _ count: UInt64,
+    _ label: String,
+    locale: Locale,
+    to values: inout [String]
+  ) {
     guard count > 0 else { return }
-    values.append("\(count) \(label)")
+    values.append(
+      ViewerLocalization.format(
+        "%llu %@",
+        locale: locale,
+        arguments: [count, localized(label, locale: locale)]
+      ))
+  }
+
+  private static func localized(_ key: String, locale: Locale) -> String {
+    ViewerLocalization.string(key, locale: locale)
   }
 }
 
@@ -302,17 +337,24 @@ enum ViewerPerformanceAccessibilityFormatting {
   }
 
   static func chartLabel(
-    _ projection: ViewerPerformanceChartProjection
+    _ projection: ViewerPerformanceChartProjection,
+    locale: Locale = Locale(identifier: "en")
   ) -> String {
     let descriptor = ViewerPerformanceChartGroupPresentation.descriptor(for: projection.group)
-    return
-      "\(descriptor.title) performance chart. Aggregated average lines and min–max envelopes. \(projection.bucketCount) buckets."
+    return ViewerLocalization.format(
+      "%@ performance chart. Aggregated average lines and min–max envelopes. %lld buckets.",
+      locale: locale,
+      arguments: [
+        ViewerLocalization.string(descriptor.title, locale: locale), projection.bucketCount,
+      ]
+    )
   }
 
   static func bucketLabel(
     _ bucketIndex: Int,
     projection: ViewerPerformanceChartProjection,
-    buckets: [ViewerPerformanceBucket]
+    buckets: [ViewerPerformanceBucket],
+    locale: Locale = Locale(identifier: "en")
   ) -> String? {
     guard buckets.count == projection.bucketCount,
       buckets.indices.contains(bucketIndex),
@@ -320,10 +362,20 @@ enum ViewerPerformanceAccessibilityFormatting {
       let chartLower = projection.lowerMonotonicNanoseconds
     else { return nil }
     let bucket = buckets[bucketIndex]
-    let span =
-      "Aggregated bucket \(bucketIndex + 1) of \(projection.bucketCount). Viewer time +\(ViewerPerformanceFormatting.elapsedTime(elapsedSeconds(bucket.lowerMonotonicNanoseconds, from: chartLower))) to +\(ViewerPerformanceFormatting.elapsedTime(elapsedSeconds(bucket.upperMonotonicNanoseconds, from: chartLower)))."
+    let span = ViewerLocalization.format(
+      "Aggregated bucket %lld of %lld. Viewer time +%@ to +%@.",
+      locale: locale,
+      arguments: [
+        bucketIndex + 1,
+        projection.bucketCount,
+        ViewerPerformanceFormatting.elapsedTime(
+          elapsedSeconds(bucket.lowerMonotonicNanoseconds, from: chartLower), locale: locale),
+        ViewerPerformanceFormatting.elapsedTime(
+          elapsedSeconds(bucket.upperMonotonicNanoseconds, from: chartLower), locale: locale),
+      ]
+    )
     let series = projection.metrics.map { metric in
-      seriesLabel(metric, bucket: bucket, group: projection.group)
+      seriesLabel(metric, bucket: bucket, group: projection.group, locale: locale)
     }
     return ([span] + series).joined(separator: " ")
   }
@@ -331,36 +383,60 @@ enum ViewerPerformanceAccessibilityFormatting {
   private static func seriesLabel(
     _ metric: ViewerPerformanceNumericMetric,
     bucket: ViewerPerformanceBucket,
-    group: ViewerPerformanceChartGroupKind
+    group: ViewerPerformanceChartGroupKind,
+    locale: Locale
   ) -> String {
     let descriptor = ViewerPerformanceMetricPresentation.descriptor(for: metric.key)
     let accumulator = bucket.numeric.accumulator(for: metric)
     let availability = bucket.availability.counts(for: metric.key)
-    let continuity = accumulator.isDiscontinuous ? "discontinuous" : "continuous"
-    let availabilityState = ViewerPerformanceFormatting.availability(availability.presentation)
-    let availabilityDetail = ViewerPerformanceFormatting.availabilityDetail(availability)
+    let continuity = ViewerLocalization.string(
+      accumulator.isDiscontinuous ? "discontinuous" : "continuous", locale: locale)
+    let availabilityState = ViewerPerformanceFormatting.availability(
+      availability.presentation, locale: locale)
+    let availabilityDetail = ViewerPerformanceFormatting.availabilityDetail(
+      availability, locale: locale)
     let statistics: String
     if let minimum = accumulator.minimum,
       let average = accumulator.average,
       let maximum = accumulator.maximum
     {
-      statistics =
-        "minimum \(value(minimum, metric: metric, group: group)), average \(value(average, metric: metric, group: group)), maximum \(value(maximum, metric: metric, group: group)), \(accumulator.measurementCount) samples"
+      statistics = ViewerLocalization.format(
+        "minimum %@, average %@, maximum %@, %llu samples",
+        locale: locale,
+        arguments: [
+          value(minimum, metric: metric, group: group, locale: locale),
+          value(average, metric: metric, group: group, locale: locale),
+          value(maximum, metric: metric, group: group, locale: locale),
+          accumulator.measurementCount,
+        ]
+      )
     } else {
-      statistics = "no measured samples"
+      statistics = ViewerLocalization.string("no measured samples", locale: locale)
     }
-    return
-      "\(descriptor.title), unit \(descriptor.unit): \(statistics); \(continuity); availability \(availabilityState), \(availabilityDetail)."
+    return ViewerLocalization.format(
+      "%@, unit %@: %@; %@; availability %@, %@.",
+      locale: locale,
+      arguments: [
+        ViewerLocalization.string(descriptor.title, locale: locale),
+        ViewerLocalization.string(descriptor.unit, locale: locale),
+        statistics,
+        continuity,
+        availabilityState,
+        availabilityDetail,
+      ]
+    )
   }
 
   private static func value(
     _ value: Double,
     metric: ViewerPerformanceNumericMetric,
-    group: ViewerPerformanceChartGroupKind
+    group: ViewerPerformanceChartGroupKind,
+    locale: Locale
   ) -> String {
     ViewerPerformanceFormatting.chartAxisValue(
       ViewerPerformanceFormatting.chartValue(value, metric: metric),
-      group: group
+      group: group,
+      locale: locale
     )
   }
 
@@ -490,6 +566,7 @@ struct ViewerPerformanceUnavailableView: View {
 }
 
 struct ViewerPerformanceWindowContent: View {
+  @Environment(\.locale) private var locale
   @ObservedObject var coordinator: ViewerAnalysisModeCoordinator
   let showViewer: () -> Void
 
@@ -523,7 +600,7 @@ struct ViewerPerformanceWindowContent: View {
       Divider().frame(height: 24)
       VStack(alignment: .leading, spacing: 2) {
         Picker("Device", selection: deviceBinding) {
-          Text(emptyDeviceTitle).tag(Optional<UUID>.none)
+          Text(LocalizedStringKey(emptyDeviceTitle)).tag(Optional<UUID>.none)
           ForEach(coordinator.performanceDeviceOptions) { device in
             Text(deviceMenuTitle(device))
               .tag(Optional(device.id))
@@ -536,12 +613,14 @@ struct ViewerPerformanceWindowContent: View {
         .accessibilityLabel("Performance Device")
         .accessibilityIdentifier("nearwire.performance.device-picker")
         if let selectedDevice {
-          Text("\(selectedDevice.subtitle) · \(selectedDevice.state.capitalized)")
+          Text(
+            "\(selectedDevice.subtitle) · \(ViewerLocalization.string(selectedDevice.state.capitalized, locale: locale))"
+          )
             .font(.caption)
             .foregroundStyle(.secondary)
             .lineLimit(1)
         } else {
-          Text(deviceGuidance)
+          Text(LocalizedStringKey(deviceGuidance))
             .font(.caption)
             .foregroundStyle(.secondary)
             .lineLimit(2)
@@ -602,7 +681,15 @@ struct ViewerPerformanceWindowContent: View {
   }
 
   private func deviceAccessibilityLabel(_ device: ViewerPerformanceDeviceOption) -> String {
-    "\(device.title), \(device.subtitle), \(device.state)"
+    ViewerLocalization.format(
+      "%@, %@, %@",
+      locale: locale,
+      arguments: [
+        device.title,
+        device.subtitle,
+        ViewerLocalization.string(device.state.capitalized, locale: locale),
+      ]
+    )
   }
 }
 
@@ -645,6 +732,7 @@ struct ViewerPerformanceDashboardView: View {
 
 @MainActor
 struct ViewerPerformanceDashboardContent: View {
+  @Environment(\.locale) private var locale
   @ObservedObject var model: ViewerPerformanceDashboardModel
   let guidance: ViewerAnalysisGuidance?
   let rangeKind: ViewerPerformanceRangeKind
@@ -725,7 +813,7 @@ struct ViewerPerformanceDashboardContent: View {
       )
     ) {
       ForEach(ViewerPerformanceRangeKind.allCases, id: \.self) { range in
-        Text(rangeTitle(range)).tag(range)
+        Text(LocalizedStringKey(rangeTitle(range))).tag(range)
       }
     }
     .pickerStyle(.segmented)
@@ -782,8 +870,8 @@ struct ViewerPerformanceDashboardContent: View {
   ) -> some View {
     Label {
       VStack(alignment: .leading, spacing: 2) {
-        Text(title).font(.callout.weight(.semibold))
-        Text(detail).font(.caption).foregroundStyle(.secondary)
+        Text(LocalizedStringKey(title)).font(.callout.weight(.semibold))
+        Text(LocalizedStringKey(detail)).font(.caption).foregroundStyle(.secondary)
       }
     } icon: {
       Image(systemName: systemImage).foregroundStyle(.secondary)
@@ -828,9 +916,13 @@ struct ViewerPerformanceDashboardContent: View {
     cards: ViewerPerformanceCardEvaluation
   ) -> some View {
     let descriptor = ViewerPerformanceMetricPresentation.descriptor(for: key)
-    let value = ViewerPerformanceFormatting.cardValue(cards.state(for: key), for: key)
+    let value = ViewerPerformanceFormatting.cardValue(
+      cards.state(for: key),
+      for: key,
+      locale: locale
+    )
     return VStack(alignment: .leading, spacing: 9) {
-      Label(descriptor.title, systemImage: descriptor.systemImage)
+      Label(LocalizedStringKey(descriptor.title), systemImage: descriptor.systemImage)
         .font(.caption)
         .foregroundStyle(.secondary)
         .lineLimit(2)
@@ -838,7 +930,7 @@ struct ViewerPerformanceDashboardContent: View {
         .font(.system(.title3, design: .rounded, weight: .semibold))
         .lineLimit(2)
         .minimumScaleFactor(0.75)
-      Text(descriptor.unit)
+      Text(LocalizedStringKey(descriptor.unit))
         .font(.caption2)
         .foregroundStyle(.secondary)
     }
@@ -850,7 +942,17 @@ struct ViewerPerformanceDashboardContent: View {
         .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
     }
     .accessibilityElement(children: .ignore)
-    .accessibilityLabel("\(descriptor.title), \(value), unit \(descriptor.unit)")
+    .accessibilityLabel(
+      ViewerLocalization.format(
+        "%@, %@, unit %@",
+        locale: locale,
+        arguments: [
+          ViewerLocalization.string(descriptor.title, locale: locale),
+          value,
+          ViewerLocalization.string(descriptor.unit, locale: locale),
+        ]
+      )
+    )
   }
 
   @ViewBuilder
@@ -908,8 +1010,8 @@ struct ViewerPerformanceDashboardContent: View {
         .foregroundStyle(.secondary)
         .accessibilityHidden(true)
       VStack(alignment: .leading, spacing: 3) {
-        Text(title).font(.headline)
-        Text(detail).font(.caption).foregroundStyle(.secondary)
+        Text(LocalizedStringKey(title)).font(.headline)
+        Text(LocalizedStringKey(detail)).font(.caption).foregroundStyle(.secondary)
       }
     }
     .padding(16)
@@ -952,10 +1054,10 @@ struct ViewerPerformanceDashboardContent: View {
     let descriptor = ViewerPerformanceChartGroupPresentation.descriptor(for: projection.group)
     return VStack(alignment: .leading, spacing: 10) {
       HStack(alignment: .firstTextBaseline) {
-        Label(descriptor.title, systemImage: descriptor.systemImage)
+        Label(LocalizedStringKey(descriptor.title), systemImage: descriptor.systemImage)
           .font(.headline)
         Spacer()
-        Text(descriptor.unit)
+        Text(LocalizedStringKey(descriptor.unit))
           .font(.caption)
           .foregroundStyle(.secondary)
       }
@@ -1045,7 +1147,7 @@ struct ViewerPerformanceDashboardContent: View {
             AxisTick()
             AxisValueLabel {
               if let seconds = value.as(Double.self) {
-                Text(ViewerPerformanceFormatting.elapsedTime(seconds))
+                Text(ViewerPerformanceFormatting.elapsedTime(seconds, locale: locale))
               }
             }
           }
@@ -1059,7 +1161,8 @@ struct ViewerPerformanceDashboardContent: View {
                 Text(
                   ViewerPerformanceFormatting.chartAxisValue(
                     number,
-                    group: projection.group
+                    group: projection.group,
+                    locale: locale
                   )
                 )
               }
@@ -1104,7 +1207,12 @@ struct ViewerPerformanceDashboardContent: View {
         .frame(minHeight: 210, idealHeight: 230)
         .accessibilityRepresentation {
           VStack(alignment: .leading, spacing: 0) {
-            Text(ViewerPerformanceAccessibilityFormatting.chartLabel(projection))
+            Text(
+              ViewerPerformanceAccessibilityFormatting.chartLabel(
+                projection,
+                locale: locale
+              )
+            )
             ForEach(
               ViewerPerformanceAccessibilityFormatting.bucketIndices(for: projection),
               id: \.self
@@ -1112,7 +1220,8 @@ struct ViewerPerformanceDashboardContent: View {
               if let label = ViewerPerformanceAccessibilityFormatting.bucketLabel(
                 bucketIndex,
                 projection: projection,
-                buckets: buckets
+                buckets: buckets,
+                locale: locale
               ) {
                 Text(label)
               }
@@ -1269,7 +1378,26 @@ struct ViewerPerformanceDashboardContent: View {
           VStack(alignment: .leading, spacing: 2) {
             Text("Selected aggregate").font(.callout.weight(.semibold))
             Text(
-              "Viewer +\(ViewerPerformanceFormatting.elapsedTime(elapsedNanoseconds(bucket.lowerMonotonicNanoseconds, from: projection.lowerMonotonicNanoseconds))) – +\(ViewerPerformanceFormatting.elapsedTime(elapsedNanoseconds(bucket.upperMonotonicNanoseconds, from: projection.lowerMonotonicNanoseconds)))"
+              ViewerLocalization.format(
+                "Viewer +%@ – +%@",
+                locale: locale,
+                arguments: [
+                  ViewerPerformanceFormatting.elapsedTime(
+                    elapsedNanoseconds(
+                      bucket.lowerMonotonicNanoseconds,
+                      from: projection.lowerMonotonicNanoseconds
+                    ),
+                    locale: locale
+                  ),
+                  ViewerPerformanceFormatting.elapsedTime(
+                    elapsedNanoseconds(
+                      bucket.upperMonotonicNanoseconds,
+                      from: projection.lowerMonotonicNanoseconds
+                    ),
+                    locale: locale
+                  ),
+                ]
+              )
             )
             .font(.caption)
             .foregroundStyle(.secondary)
@@ -1282,7 +1410,9 @@ struct ViewerPerformanceDashboardContent: View {
           Menu {
             ForEach(projection.metrics, id: \.self) { metric in
               Button(
-                ViewerPerformanceMetricPresentation.descriptor(for: metric.key).title
+                LocalizedStringKey(
+                  ViewerPerformanceMetricPresentation.descriptor(for: metric.key).title
+                )
               ) {
                 _ = setCrosshair(
                   crosshair.viewerMonotonicNanoseconds,
@@ -1293,7 +1423,7 @@ struct ViewerPerformanceDashboardContent: View {
             }
           } label: {
             Label(
-              selectedMetricTitle(crosshair.selectedMetric),
+              LocalizedStringKey(selectedMetricTitle(crosshair.selectedMetric)),
               systemImage: "line.3.horizontal.decrease.circle"
             )
           }
@@ -1349,7 +1479,7 @@ struct ViewerPerformanceDashboardContent: View {
         .foregroundStyle(isSelected ? .primary : .secondary)
         .accessibilityHidden(true)
       VStack(alignment: .leading, spacing: 3) {
-        Text(descriptor.title).font(.caption.weight(.semibold))
+        Text(LocalizedStringKey(descriptor.title)).font(.caption.weight(.semibold))
         if let minimum = accumulator.minimum,
           let average = accumulator.average,
           let maximum = accumulator.maximum
@@ -1362,7 +1492,7 @@ struct ViewerPerformanceDashboardContent: View {
           Text("No measured samples").font(.caption)
         }
         Text(
-          "\(accumulator.isDiscontinuous ? "Discontinuous" : "Continuous") · \(ViewerPerformanceFormatting.availability(availability.presentation)) · \(nonmeasurementSummary(accumulator.nonmeasurements))"
+          "\(ViewerLocalization.string(accumulator.isDiscontinuous ? "Discontinuous" : "Continuous", locale: locale)) · \(ViewerPerformanceFormatting.availability(availability.presentation, locale: locale)) · \(nonmeasurementSummary(accumulator.nonmeasurements))"
         )
         .font(.caption2)
         .foregroundStyle(.secondary)
@@ -1383,7 +1513,8 @@ struct ViewerPerformanceDashboardContent: View {
   ) -> String {
     ViewerPerformanceFormatting.chartAxisValue(
       ViewerPerformanceFormatting.chartValue(value, metric: metric),
-      group: group
+      group: group,
+      locale: locale
     )
   }
 
@@ -1392,7 +1523,14 @@ struct ViewerPerformanceDashboardContent: View {
   ) -> String {
     var values: [String] = []
     func append(_ value: UInt64, _ title: String) {
-      if value > 0 { values.append("\(value) \(title)") }
+      guard value > 0 else { return }
+      values.append(
+        ViewerLocalization.format(
+          "%llu %@",
+          locale: locale,
+          arguments: [value, ViewerLocalization.string(title, locale: locale)]
+        )
+      )
     }
     append(counts.invalid, "invalid")
     append(counts.permissionDenied, "permission denied")
@@ -1400,7 +1538,9 @@ struct ViewerPerformanceDashboardContent: View {
     append(counts.disabled, "disabled")
     append(counts.unsupported, "unsupported")
     append(counts.notCollected, "not collected")
-    return values.isEmpty ? "No nonmeasurements" : values.joined(separator: " · ")
+    return values.isEmpty
+      ? ViewerLocalization.string("No nonmeasurements", locale: locale)
+      : values.joined(separator: " · ")
   }
 
   private func chartDomain(_ projection: ViewerPerformanceChartProjection) -> ClosedRange<Double> {
@@ -1439,7 +1579,7 @@ struct ViewerPerformanceDashboardContent: View {
       }
       Divider().gridCellColumns(4)
       ForEach(PerformanceMetricGroup.allCases, id: \.self) { group in
-        Text(ViewerPerformanceMetricPresentation.groupTitle(group))
+        Text(LocalizedStringKey(ViewerPerformanceMetricPresentation.groupTitle(group)))
           .font(.caption.weight(.semibold))
           .foregroundStyle(.secondary)
           .gridCellColumns(4)
@@ -1454,7 +1594,7 @@ struct ViewerPerformanceDashboardContent: View {
   private var availabilityList: some View {
     VStack(alignment: .leading, spacing: 12) {
       ForEach(PerformanceMetricGroup.allCases, id: \.self) { group in
-        Text(ViewerPerformanceMetricPresentation.groupTitle(group))
+        Text(LocalizedStringKey(ViewerPerformanceMetricPresentation.groupTitle(group)))
           .font(.caption.weight(.semibold))
           .foregroundStyle(.secondary)
         ForEach(group.keys, id: \.self) { key in
@@ -1467,10 +1607,10 @@ struct ViewerPerformanceDashboardContent: View {
   private func availabilityTableRow(_ key: PerformanceMetricKey) -> some View {
     let content = availabilityContent(key)
     return GridRow {
-      Label(content.descriptor.title, systemImage: content.descriptor.systemImage)
-      Text(content.descriptor.unit).foregroundStyle(.secondary)
-      Text(content.state)
-      Text(content.detail).font(.caption).foregroundStyle(.secondary)
+      Label(LocalizedStringKey(content.descriptor.title), systemImage: content.descriptor.systemImage)
+      Text(LocalizedStringKey(content.descriptor.unit)).foregroundStyle(.secondary)
+      Text(LocalizedStringKey(content.state))
+      Text(LocalizedStringKey(content.detail)).font(.caption).foregroundStyle(.secondary)
     }
     .accessibilityElement(children: .ignore)
     .accessibilityLabel(content.accessibilityLabel)
@@ -1480,14 +1620,14 @@ struct ViewerPerformanceDashboardContent: View {
     let content = availabilityContent(key)
     return VStack(alignment: .leading, spacing: 4) {
       HStack(alignment: .firstTextBaseline) {
-        Label(content.descriptor.title, systemImage: content.descriptor.systemImage)
+        Label(LocalizedStringKey(content.descriptor.title), systemImage: content.descriptor.systemImage)
         Spacer(minLength: 12)
-        Text(content.descriptor.unit)
+        Text(LocalizedStringKey(content.descriptor.unit))
           .font(.caption)
           .foregroundStyle(.secondary)
       }
-      Text(content.state).font(.callout.weight(.medium))
-      Text(content.detail).font(.caption).foregroundStyle(.secondary)
+      Text(LocalizedStringKey(content.state)).font(.callout.weight(.medium))
+      Text(LocalizedStringKey(content.detail)).font(.caption).foregroundStyle(.secondary)
     }
     .padding(.vertical, 3)
     .accessibilityElement(children: .ignore)
@@ -1498,15 +1638,25 @@ struct ViewerPerformanceDashboardContent: View {
     let descriptor = ViewerPerformanceMetricPresentation.descriptor(for: key)
     let entry = model.availability.first { $0.key == key }
     let state =
-      entry.map { ViewerPerformanceFormatting.availability($0.presentation) }
-      ?? "Waiting for data"
+      entry.map { ViewerPerformanceFormatting.availability($0.presentation, locale: locale) }
+      ?? ViewerLocalization.string("Waiting for data", locale: locale)
     let detail =
-      entry.map { ViewerPerformanceFormatting.availabilityDetail($0.counts) }
-      ?? "No completed range"
+      entry.map { ViewerPerformanceFormatting.availabilityDetail($0.counts, locale: locale) }
+      ?? ViewerLocalization.string("No completed range", locale: locale)
     return AvailabilityContent(
       descriptor: descriptor,
       state: state,
-      detail: detail
+      detail: detail,
+      accessibilityLabel: ViewerLocalization.format(
+        "%@, unit %@, %@, %@",
+        locale: locale,
+        arguments: [
+          ViewerLocalization.string(descriptor.title, locale: locale),
+          ViewerLocalization.string(descriptor.unit, locale: locale),
+          state,
+          detail,
+        ]
+      )
     )
   }
 
@@ -1514,9 +1664,6 @@ struct ViewerPerformanceDashboardContent: View {
     let descriptor: ViewerPerformanceMetricPresentation
     let state: String
     let detail: String
-
-    var accessibilityLabel: String {
-      "\(descriptor.title), unit \(descriptor.unit), \(state), \(detail)"
-    }
+    let accessibilityLabel: String
   }
 }
