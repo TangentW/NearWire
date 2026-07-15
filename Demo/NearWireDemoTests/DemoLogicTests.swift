@@ -1,3 +1,6 @@
+import NearWire
+import NearWirePerformance
+import SwiftUI
 import XCTest
 
 @testable import NearWireDemo
@@ -64,5 +67,36 @@ final class DemoLogicTests: XCTestCase {
     XCTAssertEqual(buffer.values.count, 50)
     XCTAssertEqual(buffer.values.first?.type, "demo.1")
     XCTAssertEqual(buffer.values.last?.type, "demo.50")
+  }
+
+  @MainActor
+  func testRecoveryConfigurationAndSceneLifecycleDoNotStartAnInitialConnection() async {
+    let nearWire = NearWireDemoApp.makeNearWire()
+    let recovery = nearWire.configuration.reconnectionPolicy
+    XCTAssertTrue(recovery.isEnabled)
+    XCTAssertEqual(recovery.maximumAttempts, 6)
+    XCTAssertEqual(recovery.initialDelay, .milliseconds(500))
+    XCTAssertEqual(recovery.maximumDelay, .seconds(4))
+
+    let model = DemoApplicationModel(
+      nearWire: nearWire,
+      performanceMonitor: NearWirePerformanceMonitor(nearWire: nearWire)
+    )
+
+    await model.applyScenePhase(.background)
+    var status = await nearWire.connectionStatus
+    XCTAssertEqual(status.state, .idle)
+    XCTAssertTrue(status.isSuspended)
+
+    await model.applyScenePhase(.inactive)
+    status = await nearWire.connectionStatus
+    XCTAssertTrue(status.isSuspended)
+
+    await model.applyScenePhase(.active)
+    status = await nearWire.connectionStatus
+    XCTAssertEqual(status.state, .idle)
+    XCTAssertFalse(status.isSuspended)
+
+    await nearWire.shutdown()
   }
 }

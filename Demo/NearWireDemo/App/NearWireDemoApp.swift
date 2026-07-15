@@ -12,7 +12,7 @@ struct NearWireDemoApp: App {
   @StateObject private var model: DemoApplicationModel
 
   init() {
-    let nearWire = NearWire()
+    let nearWire = Self.makeNearWire()
     self.nearWire = nearWire
     _model = StateObject(
       wrappedValue: DemoApplicationModel(
@@ -20,6 +20,21 @@ struct NearWireDemoApp: App {
         performanceMonitor: NearWirePerformanceMonitor(nearWire: nearWire)
       )
     )
+  }
+
+  static func makeNearWire() -> NearWire {
+    do {
+      let recovery = try NearWireReconnectionPolicy(
+        maximumAttempts: 6,
+        initialDelay: .milliseconds(500),
+        maximumDelay: .seconds(4)
+      )
+      return NearWire(
+        configuration: try NearWireConfiguration(reconnectionPolicy: recovery)
+      )
+    } catch {
+      preconditionFailure("The fixed NearWire Demo recovery configuration is invalid.")
+    }
   }
 
   var body: some Scene {

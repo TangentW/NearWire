@@ -423,13 +423,57 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
 
   func updateSessionSnapshots(_ snapshots: [ViewerSessionSnapshot]) {
     guard !sealed, sessionSnapshots != snapshots else { return }
+    let previousSnapshots = sessionSnapshots
+    let previousSelection = selectedDevices
+    selectedDevices = migratedDeviceSelection(
+      selectedDevices,
+      from: previousSnapshots,
+      to: snapshots
+    )
     sessionSnapshots = snapshots
     let liveSessions = live.snapshot().sessions
     selectedDevices.removeAll { id in
       !snapshots.contains { $0.connectionID == id }
         && !liveSessions.contains { $0.connectionID == id }
     }
-    publish()
+    if selectedDevices != previousSelection {
+      refresh(reason: .deviceSelection)
+      analysisSelectionHandler()
+    } else {
+      publish()
+    }
+  }
+
+  private func migratedDeviceSelection(
+    _ selection: [UUID],
+    from previousSnapshots: [ViewerSessionSnapshot],
+    to snapshots: [ViewerSessionSnapshot]
+  ) -> [UUID] {
+    let previousByConnectionID = Dictionary(
+      uniqueKeysWithValues: previousSnapshots.compactMap { snapshot in
+        snapshot.connectionID.map { ($0, snapshot) }
+      }
+    )
+    var migrated: [UUID] = []
+    migrated.reserveCapacity(selection.count)
+    for selectedID in selection {
+      let replacementID: UUID?
+      if let predecessor = previousByConnectionID[selectedID], predecessor.state != .recent,
+        !snapshots.contains(where: {
+          $0.connectionID == selectedID && $0.state != .recent
+        })
+      {
+        replacementID = snapshots.first(where: {
+          $0.connectionID != nil && $0.connectionID != selectedID
+            && $0.state != .recent && $0.route == predecessor.route
+        })?.connectionID
+      } else {
+        replacementID = nil
+      }
+      let resolvedID = replacementID ?? selectedID
+      if !migrated.contains(resolvedID) { migrated.append(resolvedID) }
+    }
+    return migrated.sorted { $0.uuidString < $1.uuidString }
   }
 
   func selectAllDevices() {

@@ -39,6 +39,19 @@ final class DemoApplicationModel: ObservableObject {
     startPerformanceObservationIfNeeded()
   }
 
+  func applyScenePhase(_ phase: ScenePhase) async {
+    switch phase {
+    case .active:
+      await driver.resumeConnection()
+    case .background:
+      await driver.suspendConnection()
+    case .inactive:
+      break
+    @unknown default:
+      break
+    }
+  }
+
   func updateMessage(_ value: String) {
     messageText = DemoTextLimit.truncated(value)
   }

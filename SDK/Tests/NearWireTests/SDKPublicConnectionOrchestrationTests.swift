@@ -781,7 +781,7 @@ final class SDKPublicConnectionOrchestrationTests: XCTestCase {
     XCTAssertEqual(session.driver.cancelCount, 1)
   }
 
-  func testSuspendAndExplicitResumeUseFreshRouteWithDisabledPolicy() async throws {
+  func testSuspendQueueAndExplicitResumeUseFreshRouteWithDisabledPolicy() async throws {
     let probe = SDKPublicConnectionProbe()
     let first = SDKPublicSessionController()
     let second = SDKPublicSessionController()
@@ -798,6 +798,11 @@ final class SDKPublicConnectionOrchestrationTests: XCTestCase {
     XCTAssertTrue(suspended.isSuspended)
     let suspendedLifecycle = await owner.lifecycleSnapshot
     XCTAssertTrue(suspendedLifecycle.hasIntent)
+    let queued = try await owner.send(
+      type: "lifecycle.queued-while-suspended",
+      content: ["value": 1]
+    )
+    XCTAssertTrue(queued.isBuffered)
 
     await owner.resumeConnection()
     await second.driver.waitUntilStarted()
@@ -809,6 +814,14 @@ final class SDKPublicConnectionOrchestrationTests: XCTestCase {
     XCTAssertEqual(probe.snapshot.releases, 1)
     let resumedStatus = await owner.connectionStatus
     XCTAssertFalse(resumedStatus.isSuspended)
+    await sdkWaitUntil { second.driver.sentData.count >= 3 }
+    let eventFrame = try decodeSingleFrame(try XCTUnwrap(second.driver.sentData.last))
+    let eventMessage = try second.codec.decode(frame: eventFrame, phase: .active)
+    let event = try second.codec.decode(WireEventPayload.self, from: eventMessage)
+    XCTAssertEqual(event.record.envelope.type.rawValue, "lifecycle.queued-while-suspended")
+    XCTAssertEqual(event.record.envelope.sessionEpoch, second.acknowledgement.sessionEpoch)
+    let diagnostics = try await owner.bufferDiagnostics()
+    XCTAssertEqual(diagnostics.eventCount, 0)
   }
 
   func testEnabledRecoveryUsesConfiguredDelayAndFreshRoute() async throws {
@@ -1629,6 +1642,14 @@ final class SDKPublicConnectionOrchestrationTests: XCTestCase {
     try await driveAdmission(session: session)
     try await sendInitialPolicy(session: session)
     try await connect.value
+  }
+
+  private func decodeSingleFrame(_ data: Data) throws -> WireFrame {
+    var decoder = WireFrameDecoder()
+    var frames: [WireFrame] = []
+    try decoder.consume(data) { frames.append($0) }
+    XCTAssertEqual(frames.count, 1)
+    return try XCTUnwrap(frames.first)
   }
 
   private func driveAdmission(session: SDKPublicSessionController) async throws {

@@ -353,24 +353,58 @@ final class ViewerFlowControlTests: XCTestCase {
     _ = admission.stop()
   }
 
-  func testExactRouteReplacementRevokesOldCapabilityWithoutTransferringOwnership() throws {
+  @MainActor
+  func testExactRouteReplacementMigratesSelectionAndShowsFreshEpochEvent() async throws {
+    let runtimeLogicalID = UUID()
     let snapshots = FlowSnapshotBox()
+    let delivered = FlowEventBox()
+    let liveWindow = ViewerLiveEventWindow(
+      runtimeLogicalID: runtimeLogicalID,
+      refreshScheduler: ViewerLiveRefreshScheduler(
+        now: { 0 },
+        scheduleOnMain: { _, action in
+          Task { @MainActor in action() }
+        }
+      )
+    )
+    let journal = ViewerCompositeSessionJournal(
+      runtimeLogicalID: runtimeLogicalID,
+      liveWindow: liveWindow
+    )
     let manager = ViewerMultiDeviceSessionManager(
-      runtimeLogicalID: UUID(),
+      runtimeLogicalID: runtimeLogicalID,
       managerGeneration: 1,
       preferences: try isolatedPreferences(),
-      onSnapshots: { snapshots.set($0) }
+      onSnapshots: { snapshots.set($0) },
+      uplinkSink: { _, event in delivered.append(event) },
+      journal: journal
     )
+    let explorer = ViewerEventExplorerController(
+      inputs: ViewerRuntimeExplorerInputs(
+        runtimeLogicalID: runtimeLogicalID,
+        liveObservations: liveWindow,
+        workspaceControl: journal
+      )
+    )
+    explorer.start()
+    defer { _ = explorer.sealAndClear() }
     let admission = ViewerAdmissionManager(onPending: { _ in }, handoffOwner: manager)
     let generation = UUID()
     let viewerID = try EndpointID(rawValue: "viewer-route-replacement")
+    let appID = try EndpointID(rawValue: "replacement-app")
+    let appHello = try WireHello(
+      productVersion: WireProductVersion("1.0"),
+      role: .app,
+      installationID: appID,
+      applicationIdentifier: "com.example.replacement-app"
+    )
     admission.activateGeneration(generation)
 
     func connect() throws -> FlowIncomingConnection {
       let connection = FlowIncomingConnection()
       admission.admit(connection, generation: generation, viewerInstallationID: viewerID)
       connection.emit(.stateChanged(.ready))
-      connection.emit(.received(try appHelloFrame(id: "replacement-app")))
+      connection.emit(.received(try WirePreHandshakeCodec().encode(appHello)))
       return connection
     }
 
@@ -380,6 +414,9 @@ final class ViewerFlowControlTests: XCTestCase {
     let firstConnectionID = try XCTUnwrap(
       snapshots.value.first(where: { $0.state != .recent })?.connectionID
     )
+    explorer.updateSessionSnapshots(snapshots.value)
+    explorer.toggleDevice(firstConnectionID)
+    XCTAssertEqual(explorer.selectedDeviceIDs, Set([firstConnectionID]))
 
     let replacementConnection = try connect()
     waitUntil {
@@ -391,8 +428,21 @@ final class ViewerFlowControlTests: XCTestCase {
     let replacementConnectionID = try XCTUnwrap(
       snapshots.value.first(where: { $0.state != .recent })?.connectionID
     )
+    explorer.updateSessionSnapshots(snapshots.value)
     XCTAssertNotEqual(firstCapability, replacementCapability)
     XCTAssertNotEqual(firstConnectionID, replacementConnectionID)
+    XCTAssertEqual(explorer.selectedDeviceIDs, Set([replacementConnectionID]))
+    let historicalExplorer = ViewerEventExplorerController(
+      inputs: ViewerRuntimeExplorerInputs(
+        runtimeLogicalID: runtimeLogicalID,
+        liveObservations: liveWindow,
+        workspaceControl: journal
+      )
+    )
+    defer { _ = historicalExplorer.sealAndClear() }
+    historicalExplorer.updateSessionSnapshots(snapshots.value)
+    historicalExplorer.toggleDevice(firstConnectionID)
+    XCTAssertEqual(historicalExplorer.selectedDeviceIDs, Set([firstConnectionID]))
     XCTAssertFalse(
       manager.send(
         try EventDraft(type: EventType.user("replacement.old"), content: .null),
@@ -410,13 +460,84 @@ final class ViewerFlowControlTests: XCTestCase {
       [.noLongerConnected, .notActive]
     )
 
-    let shutdown = manager.beginShutdown()
-    let stopped = expectation(description: "Replacement cleanup")
-    Task {
-      await shutdown.value
-      stopped.fulfill()
+    let viewerHello = try WireHello(
+      productVersion: WireProductVersion("0.1.0"),
+      role: .viewer,
+      installationID: viewerID
+    )
+    let codec = try WireSessionCodec(
+      negotiation: WireNegotiator.negotiate(local: appHello, remote: viewerHello)
+    )
+    let acknowledgementMessage = try codec.decode(
+      frame: try decodeFrame(replacementConnection.channel.sentPayloads[1]),
+      phase: .awaitingApproval
+    )
+    let acknowledgement = try codec.decode(
+      WireHelloAcknowledgement.self,
+      from: acknowledgementMessage
+    )
+    replacementConnection.emit(
+      .received(
+        try codec.encode(
+          WireFlowPolicyAccepted(
+            policy: try WireFlowPolicy(
+              appUplinkEventsPerSecond: 20,
+              appDownlinkEventsPerSecond: 10
+            )
+          ),
+          phase: .negotiatingPolicy
+        )
+      )
+    )
+    waitUntil {
+      snapshots.value.first(where: { $0.connectionID == replacementConnectionID })?.state
+        == .active
     }
-    wait(for: [stopped], timeout: 3)
+    historicalExplorer.updateSessionSnapshots(snapshots.value)
+    XCTAssertFalse(historicalExplorer.selectedDeviceIDs.contains(replacementConnectionID))
+
+    let freshEnvelope = try EventEnvelope(
+      id: EventID(),
+      type: EventType.user("replacement.fresh-event"),
+      content: .object(["fresh": .bool(true)]),
+      createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+      monotonicTimestampNanoseconds: 1_000,
+      source: EventEndpoint(role: .app, id: appID),
+      target: EventEndpoint(role: .viewer, id: viewerID),
+      direction: .appToViewer,
+      sessionEpoch: acknowledgement.sessionEpoch,
+      sequence: EventSequence(0),
+      priority: .normal,
+      ttl: .default,
+      causality: EventCausality()
+    )
+    replacementConnection.emit(
+      .received(
+        try codec.encode(
+          WireEventPayload(
+            record: try WireEventRecord(
+              envelope: freshEnvelope,
+              remainingTTLNanoseconds: 10_000_000_000
+            )
+          ),
+          phase: .active
+        )
+      )
+    )
+    waitUntil { delivered.value.count == 1 }
+    liveWindow.waitForProjectionForTesting()
+    for _ in 0..<1_000 where !explorer.timelineRows.contains(where: {
+      $0.eventType == "replacement.fresh-event"
+    }) {
+      await Task.yield()
+    }
+    XCTAssertEqual(delivered.value.first?.envelope.type.rawValue, "replacement.fresh-event")
+    XCTAssertEqual(delivered.value.first?.envelope.sessionEpoch, acknowledgement.sessionEpoch)
+    XCTAssertTrue(
+      explorer.timelineRows.contains { $0.eventType == "replacement.fresh-event" }
+    )
+
+    await manager.beginShutdown().value
     XCTAssertEqual(manager.ownedSessionCount, 0)
     XCTAssertEqual(manager.displacedSessionCount, 0)
     _ = admission.stop()

@@ -6,6 +6,8 @@ import SwiftUI
 #endif
 
 struct DemoRootView: View {
+  @Environment(\.scenePhase) private var scenePhase
+
   let nearWire: NearWire
   @ObservedObject var model: DemoApplicationModel
 
@@ -28,6 +30,7 @@ struct DemoRootView: View {
       .navigationTitle("NearWire Demo")
     }
     .task { model.activate() }
+    .task(id: scenePhase) { await model.applyScenePhase(scenePhase) }
     .alert("Reset Demo?", isPresented: $showsResetConfirmation) {
       Button("Cancel", role: .cancel) {}
       Button("Reset", role: .destructive) {

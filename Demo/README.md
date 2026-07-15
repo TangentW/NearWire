@@ -76,6 +76,16 @@ Message and banner text is limited to 512 UTF-8 bytes. The control summary keeps
 
 NearWire Events are a local real-time debugging channel. The Demo does not claim acknowledgement, remote delivery, exactly-once processing, background persistence, or recovery after process termination.
 
+## Background and foreground recovery
+
+The Demo forwards its SwiftUI scene lifecycle to the SDK. Entering the background asks NearWire to suspend and clean up the current route; returning active asks it to discover the Viewer and establish a fresh TLS session from the in-memory connection intent. Initial connection is still explicit, and selecting Disconnect or Reset clears that intent, so foreground activation cannot connect by itself afterward.
+
+While backgrounded, the Connection panel marks recovery as Paused. After returning active, it progresses through Reconnecting (with the attempt number) to Connected; a permanent failure or exhausted retry budget ends at Disconnected and requires a new explicit pairing-code connection.
+
+The Demo also enables six bounded recovery attempts, beginning after 500 milliseconds and capping the delay at four seconds. This covers a route failure that iOS reports only after the App has already returned active. The budget is finite and stops after a permanent failure, exhaustion, manual disconnect, or process termination.
+
+iOS may suspend the process and terminate its local peer-to-peer route. NearWire does not keep the Demo online in background, request background execution, or persist the pairing code. Recovery starts only while the same App process is alive and runnable. Events still eligible in the bounded local queue may drain on the fresh session; bytes already accepted by the old transport are not replayed, and local enqueue still does not prove Viewer receipt.
+
 ## Exercise performance snapshots
 
 Select **Start Performance** to start the optional `NearWirePerformanceMonitor`. It publishes the built-in performance snapshot Event through the same bounded keep-latest path used by ordinary NearWire Events. Open the selected device's Performance page in the Viewer to inspect the resulting series. Select **Stop Performance** when sampling is no longer needed.

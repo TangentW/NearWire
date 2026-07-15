@@ -73,6 +73,14 @@ struct DemoDriver: Sendable {
     await nearWire.disconnect()
   }
 
+  func suspendConnection() async {
+    await nearWire.suspendConnection()
+  }
+
+  func resumeConnection() async {
+    await nearWire.resumeConnection()
+  }
+
   func shutdown() async {
     await nearWire.shutdown()
   }
