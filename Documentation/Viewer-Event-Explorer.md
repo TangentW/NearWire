@@ -123,16 +123,19 @@ layout state immediately. An Event arrival does not rebuild unrelated root regio
 The Timeline is derived from the 512-Event memory window and bounded diagnostic markers. An evicted
 selection is cleared; an unrelated row is never selected in its place.
 
-Each Timeline row leads with a single-line compact JSON content preview. The preview reads at most
-256 UTF-8 bytes and ends with an ellipsis when truncated, so large Event payloads are not repeatedly
-converted for display. Event type appears in the secondary metadata line without headline emphasis.
+Each Timeline row places Event type, exceptional status badges, and Viewer receive time on one
+compact top line. A content summary derived from at most 256 UTF-8 bytes appears below it, wraps to
+at most three lines, and tail-truncates any remainder. Device/source, direction, priority, payload
+size, and normal acceptance state remain available in Inspector metadata instead of being repeated
+on every row.
 
 ## Inspector and renderers
 
-The inspector owns one selected Event. Raw JSON is paged in bounded chunks, Pretty JSON has bounded
-input and derived output, and the tree renderer limits visible nodes and expansion width. Built-in
-renderers cover log, table, chart, and timeline-shaped Events; incompatible content falls back to
-Generic JSON with fixed guidance.
+The inspector owns one selected Event and exposes Metadata, Raw, Pretty, and Preview. Raw JSON is
+paged in bounded chunks, while Pretty JSON has bounded input and derived output. Preview retains
+the built-in log, table, chart, and timeline presentations; ordinary or incompatible content falls
+back to bounded formatted JSON or the first bounded Raw chunk. Tree and cross-Event Causality views
+are not part of the memory-only Inspector.
 
 Event detail retrieval is generation-bound. Clear, import, scope change, pause, filter change, or
 selection change invalidates predecessor work. A stale result cannot overwrite the current

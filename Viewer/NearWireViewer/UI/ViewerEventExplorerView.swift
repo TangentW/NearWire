@@ -155,6 +155,11 @@ struct ViewerExplorerTimelineView: View {
   @State private var showsFilters = false
   @State private var showsGaps = false
   @State private var showsClearConfirmation = false
+  @State private var isApplyingTailScroll = false
+  @State private var tailFrame = CGRect.null
+  @State private var timelineViewportSize = CGSize.zero
+  @State private var tailViewport = ViewerTimelineTailViewportState()
+  @State private var tailScrollGeneration: UInt64 = 0
 
   init(explorer: ViewerEventExplorerController) {
     self.explorer = explorer
@@ -356,22 +361,121 @@ struct ViewerExplorerTimelineView: View {
         )
       }
     } else {
-      List(selection: selectedEventBinding) {
-        ForEach(rows) { row in
-          ViewerExplorerTimelineRowView(row: row)
-            .tag(row.id)
-            .onAppear {
-              if row.id == rows.first?.id, presentation.hasOlderEvents {
-                explorer.loadOlderEvents()
+      ScrollViewReader { proxy in
+        List(selection: selectedEventBinding) {
+          ForEach(rows) { row in
+            ViewerExplorerTimelineRowView(row: row)
+              .tag(row.id)
+              .onAppear {
+                if row.id == rows.first?.id, presentation.hasOlderEvents {
+                  explorer.loadOlderEvents()
+                }
+                if row.id == rows.last?.id, presentation.hasNewerEvents {
+                  explorer.loadNewerEvents()
+                }
               }
-              if row.id == rows.last?.id, presentation.hasNewerEvents {
-                explorer.loadNewerEvents()
+          }
+          Color.clear
+            .frame(height: 1)
+            .id(ViewerTimelineScrollAnchor.tail)
+            .listRowInsets(EdgeInsets())
+            .listRowSeparator(.hidden)
+            .background {
+              GeometryReader { geometry in
+                Color.clear.preference(
+                  key: ViewerTimelineTailFramePreferenceKey.self,
+                  value: geometry.frame(in: .named(ViewerTimelineCoordinateSpace.name))
+                )
               }
             }
         }
+        .background {
+          GeometryReader { geometry in
+            Color.clear.preference(
+              key: ViewerTimelineViewportSizePreferenceKey.self,
+              value: geometry.size
+            )
+          }
+        }
+        .coordinateSpace(name: ViewerTimelineCoordinateSpace.name)
+        .onAppear {
+          tailViewport.mount()
+          if presentation.autoFollow, !presentation.isPaused {
+            scrollToTail(using: proxy)
+          }
+        }
+        .onDisappear {
+          tailViewport.unmount()
+          tailScrollGeneration &+= 1
+          isApplyingTailScroll = false
+        }
+        .onPreferenceChange(ViewerTimelineTailFramePreferenceKey.self) { frame in
+          tailFrame = frame
+          reportMeasuredTailVisibility()
+        }
+        .onPreferenceChange(ViewerTimelineViewportSizePreferenceKey.self) { size in
+          timelineViewportSize = size
+          reportMeasuredTailVisibility()
+        }
+        .onChange(of: rows.last?.id) { _ in
+          if tailViewport.shouldFollowNewEvents, !presentation.isPaused {
+            scrollToTail(using: proxy)
+          }
+        }
+        .onChange(of: presentation.autoFollow) { isFollowing in
+          if isFollowing, !presentation.isPaused {
+            scrollToTail(using: proxy)
+          }
+        }
+        .accessibilityLabel("Event timeline")
+        .transaction { transaction in transaction.animation = nil }
       }
-      .accessibilityLabel("Event timeline")
-      .transaction { transaction in transaction.animation = nil }
+    }
+  }
+
+  private func scrollToTail(using proxy: ScrollViewProxy) {
+    tailScrollGeneration &+= 1
+    let generation = tailScrollGeneration
+    isApplyingTailScroll = true
+    Task { @MainActor in
+      await Task.yield()
+      guard generation == tailScrollGeneration else { return }
+      guard tailViewport.isMounted else {
+        isApplyingTailScroll = false
+        return
+      }
+      var transaction = Transaction()
+      transaction.disablesAnimations = true
+      withTransaction(transaction) {
+        proxy.scrollTo(ViewerTimelineScrollAnchor.tail, anchor: .bottom)
+      }
+      await Task.yield()
+      guard generation == tailScrollGeneration else { return }
+      isApplyingTailScroll = false
+      reportTailVisibility(true)
+    }
+  }
+
+  private func reportMeasuredTailVisibility() {
+    guard !isApplyingTailScroll,
+      let token = tailViewport.observe(
+        tailFrame: tailFrame,
+        viewportSize: timelineViewportSize
+      )
+    else { return }
+    publishTailVisibility(token)
+  }
+
+  private func reportTailVisibility(_ isVisible: Bool) {
+    guard let token = tailViewport.observe(isVisible: isVisible) else { return }
+    publishTailVisibility(token)
+  }
+
+  private func publishTailVisibility(_ token: UInt64) {
+    Task { @MainActor in
+      await Task.yield()
+      guard tailViewport.accepts(token) else { return }
+      explorer.updateTimelineTailFollowing(tailViewport.isTailVisible)
     }
   }
 
@@ -431,42 +535,20 @@ struct ViewerExplorerTimelineView: View {
 
 }
 
-private struct ViewerExplorerTimelineRowView: View {
+struct ViewerExplorerTimelineRowView: View {
   @Environment(\.locale) private var locale
   let row: ViewerExplorerTimelinePresentationRow
 
   var body: some View {
     VStack(alignment: .leading, spacing: 5) {
-      HStack(alignment: .firstTextBaseline) {
-        Text(row.contentSummary)
-          .font(.body)
-          .lineLimit(1)
-          .truncationMode(.tail)
-        Spacer()
-        Text(ViewerExplorerFormatting.time(row.viewerWallMilliseconds, locale: locale))
-          .font(.caption.monospacedDigit())
-          .foregroundStyle(.secondary)
-          .fixedSize(horizontal: true, vertical: false)
+      ViewThatFits(in: .horizontal) {
+        timelineHeader(compactStatuses: false)
+        timelineHeader(compactStatuses: true)
       }
-      HStack(spacing: 7) {
-        Text(row.eventType)
-        Label(row.deviceAlias, systemImage: "iphone")
-        Text(LocalizedStringKey(row.direction))
-        Text(LocalizedStringKey(row.priority.capitalized))
-        Text(ViewerExplorerFormatting.bytes(row.contentByteCount, locale: locale))
-      }
-      .font(.caption)
-      .foregroundStyle(.secondary)
-      .lineLimit(1)
-      if hasVisibleStatus {
-        HStack(spacing: 6) {
-          if let disposition = visibleDisposition { badge(disposition, color: .secondary) }
-          if row.hasGap { badge("Gap", color: .orange) }
-          if row.hasDrop { badge("Drop", color: .red) }
-          if row.hasPresentationConflict { badge("Conflict", color: .red) }
-          if row.sessionEnded { badge("Session ended", color: .secondary) }
-        }
-      }
+      Text(row.contentSummary)
+        .font(.body)
+        .lineLimit(3)
+        .truncationMode(.tail)
     }
     .padding(.vertical, 4)
     .accessibilityElement(children: .combine)
@@ -493,15 +575,13 @@ private struct ViewerExplorerTimelineRowView: View {
       states.append(ViewerLocalization.string("session ended", locale: locale))
     }
     return ViewerLocalization.format(
-      "%@, %@, %@, %@, %@, %@",
+      "%@, %@, %@, %@",
       locale: locale,
       arguments: [
-        "\(row.contentSummary), \(row.eventType)",
-        row.deviceAlias,
-        ViewerLocalization.string(row.direction, locale: locale),
-        ViewerLocalization.string(row.priority.capitalized, locale: locale),
+        row.eventType,
         states.joined(separator: ", "),
         ViewerExplorerFormatting.date(row.viewerWallMilliseconds, locale: locale),
+        row.contentSummary,
       ]
     )
   }
@@ -511,18 +591,125 @@ private struct ViewerExplorerTimelineRowView: View {
     return row.disposition
   }
 
-  private var hasVisibleStatus: Bool {
-    visibleDisposition != nil || row.hasGap || row.hasDrop || row.hasPresentationConflict
-      || row.sessionEnded
+  private var visibleStatusCount: Int {
+    (visibleDisposition == nil ? 0 : 1)
+      + (row.hasGap ? 1 : 0)
+      + (row.hasDrop ? 1 : 0)
+      + (row.hasPresentationConflict ? 1 : 0)
+      + (row.sessionEnded ? 1 : 0)
   }
 
-  private func badge(_ text: String, color: Color) -> some View {
-    Text(LocalizedStringKey(text))
+  private var compactStatusColor: Color {
+    if row.hasDrop || row.hasPresentationConflict { return .red }
+    if row.hasGap { return .orange }
+    return .secondary
+  }
+
+  private func timelineHeader(compactStatuses: Bool) -> some View {
+    HStack(alignment: .firstTextBaseline, spacing: 6) {
+      Text(row.eventType)
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        .lineLimit(1)
+        .truncationMode(.middle)
+        .frame(minWidth: 60, alignment: .leading)
+      if compactStatuses {
+        if visibleStatusCount > 0 {
+          badge("+\(visibleStatusCount)", color: compactStatusColor, localized: false)
+        }
+      } else {
+        if let disposition = visibleDisposition { badge(disposition, color: .secondary) }
+        if row.hasGap { badge("Gap", color: .orange) }
+        if row.hasDrop { badge("Drop", color: .red) }
+        if row.hasPresentationConflict { badge("Conflict", color: .red) }
+        if row.sessionEnded { badge("Session ended", color: .secondary) }
+      }
+      Spacer(minLength: 8)
+      Text(ViewerExplorerFormatting.time(row.viewerWallMilliseconds, locale: locale))
+        .font(.caption.monospacedDigit())
+        .foregroundStyle(.secondary)
+        .fixedSize(horizontal: true, vertical: false)
+    }
+  }
+
+  private func badge(_ text: String, color: Color, localized: Bool = true) -> some View {
+    Group {
+      if localized {
+        Text(LocalizedStringKey(text))
+      } else {
+        Text(verbatim: text)
+      }
+    }
       .font(.caption2)
       .foregroundStyle(color)
+      .lineLimit(1)
+      .fixedSize(horizontal: true, vertical: false)
       .padding(.horizontal, 5)
       .padding(.vertical, 2)
       .background(color.opacity(0.1), in: Capsule())
+  }
+}
+
+private enum ViewerTimelineScrollAnchor: Hashable {
+  case tail
+}
+
+struct ViewerTimelineTailViewportState: Equatable {
+  private(set) var isMounted = false
+  private(set) var isTailVisible = false
+  private var reportGeneration: UInt64 = 0
+
+  var shouldFollowNewEvents: Bool { isMounted && isTailVisible }
+
+  mutating func mount() {
+    isMounted = true
+  }
+
+  mutating func unmount() {
+    isMounted = false
+    isTailVisible = false
+    reportGeneration &+= 1
+  }
+
+  mutating func observe(tailFrame: CGRect, viewportSize: CGSize) -> UInt64? {
+    guard isMounted, viewportSize.width > 0, viewportSize.height > 0 else { return nil }
+    let tolerance: CGFloat = 1
+    let isVisible =
+      !tailFrame.isNull
+      && tailFrame.minY >= -tolerance
+      && tailFrame.maxY <= viewportSize.height + tolerance
+    return observe(isVisible: isVisible)
+  }
+
+  mutating func observe(isVisible: Bool) -> UInt64? {
+    guard isMounted else { return nil }
+    isTailVisible = isVisible
+    reportGeneration &+= 1
+    return reportGeneration
+  }
+
+  func accepts(_ token: UInt64) -> Bool {
+    isMounted && reportGeneration == token
+  }
+}
+
+private enum ViewerTimelineCoordinateSpace {
+  static let name = "ViewerTimelineViewport"
+}
+
+private struct ViewerTimelineTailFramePreferenceKey: PreferenceKey {
+  static let defaultValue = CGRect.null
+
+  static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
+    value = nextValue()
+  }
+}
+
+private struct ViewerTimelineViewportSizePreferenceKey: PreferenceKey {
+  static let defaultValue = CGSize.zero
+
+  static func reduce(value: inout CGSize, nextValue: () -> CGSize) {
+    value = nextValue()
   }
 }
 
@@ -724,7 +911,6 @@ private struct ViewerInspectorPresentationSignature: Equatable {
   let contentByteCount: Int
   let rawChunkIndex: Int
   let rawChunk: ViewerRawJSONChunk?
-  let treeState: ViewerJSONTreeState?
   let rendererPreparation: ViewerRendererPreparation?
 
   @MainActor
@@ -736,7 +922,6 @@ private struct ViewerInspectorPresentationSignature: Equatable {
       contentByteCount: explorer.inspectorContentByteCount,
       rawChunkIndex: explorer.rawChunkIndex,
       rawChunk: explorer.rawChunk,
-      treeState: explorer.inspectorTreeState,
       rendererPreparation: explorer.rendererPreparation
     )
   }
@@ -777,9 +962,8 @@ final class ViewerInspectorPresentationObserver: ObservableObject {
 enum ViewerExplorerInspectorTab: String, CaseIterable {
   case metadata = "Metadata"
   case raw = "Raw"
-  case tree = "Tree"
   case pretty = "Pretty"
-  case renderer = "Renderer"
+  case preview = "Preview"
 }
 
 struct ViewerExplorerInspectorView: View {
@@ -865,9 +1049,8 @@ struct ViewerExplorerInspectorView: View {
     switch tab {
     case .metadata: metadataView
     case .raw: rawView
-    case .tree: treeView
     case .pretty: prettyView
-    case .renderer: rendererView
+    case .preview: previewView
     }
   }
 
@@ -943,7 +1126,7 @@ struct ViewerExplorerInspectorView: View {
           text: chunk.text,
           accessibilityText: chunk.focusedAccessibilityText
         )
-        .accessibilityHint("Received Event content is display-only and has no clipboard command.")
+        .accessibilityHint("Select Event content to copy it.")
       } else {
         ViewerExplorerEmptyState(
           title: "Raw JSON Unavailable",
@@ -951,37 +1134,6 @@ struct ViewerExplorerInspectorView: View {
           description: "The selected chunk could not be prepared."
         )
       }
-    }
-  }
-
-  @ViewBuilder
-  private var treeView: some View {
-    if let tree = explorer.inspectorTreeState {
-      List(tree.nodes, id: \.id) { node in
-        HStack(alignment: .top) {
-          Image(systemName: node.kind.hasChildren ? "chevron.right.circle" : "circle.fill")
-            .font(.caption)
-            .foregroundStyle(.secondary)
-          Text(node.preview)
-            .font(.system(.body, design: .monospaced))
-            .lineLimit(3)
-          Spacer()
-          if let offset = node.nextChildOffset {
-            Button(offset == 0 ? "Expand" : "More") {
-              explorer.expandTree(nodeID: node.id, offset: offset)
-            }
-            .controlSize(.small)
-          }
-        }
-        .padding(.leading, node.parentID == nil ? 0 : 14)
-      }
-    } else {
-      ViewerExplorerEmptyState(
-        title: "Tree Needs Refinement",
-        systemImage: "point.3.connected.trianglepath.dotted",
-        description: explorer.rendererPreparation?.generic.treeGuidance
-          ?? "Use raw JSON or narrow the selected Event."
-      )
     }
   }
 
@@ -995,7 +1147,7 @@ struct ViewerExplorerInspectorView: View {
           maximumBytes: ViewerJSONInspectionLimits.maximumFocusedAccessibilityBytes
         )
       )
-      .accessibilityHint("Received Event content is display-only and has no clipboard command.")
+      .accessibilityHint("Select Event content to copy it.")
     } else {
       ViewerExplorerEmptyState(
         title: "Pretty JSON Unavailable",
@@ -1007,7 +1159,7 @@ struct ViewerExplorerInspectorView: View {
   }
 
   @ViewBuilder
-  private var rendererView: some View {
+  private var previewView: some View {
     if let preparation = explorer.rendererPreparation {
       if let guidance = preparation.fallbackGuidance {
         VStack(spacing: 0) {
@@ -1016,12 +1168,12 @@ struct ViewerExplorerInspectorView: View {
             .foregroundStyle(.secondary)
             .padding(10)
           Divider()
-          genericRendererSummary(preparation)
+          genericPreview(preparation)
         }
       } else if let specialized = preparation.specialized {
         specializedRenderer(specialized)
       } else {
-        genericRendererSummary(preparation)
+        genericPreview(preparation)
       }
     }
   }
@@ -1080,13 +1232,41 @@ struct ViewerExplorerInspectorView: View {
     }
   }
 
-  private func genericRendererSummary(_ preparation: ViewerRendererPreparation) -> some View {
-    ViewerExplorerEmptyState(
-      title: "Generic JSON",
-      systemImage: "curlybraces",
-      description:
-        "Use Raw, Tree, or Pretty. \(preparation.generic.rawChunkCount) bounded raw chunk(s) are available."
-    )
+  @ViewBuilder
+  private func genericPreview(_ preparation: ViewerRendererPreparation) -> some View {
+    if let pretty = preparation.generic.prettyText {
+      ViewerReceivedEventText(
+        text: pretty,
+        accessibilityText: ViewerStructuredTextEscaper.escape(
+          pretty,
+          maximumBytes: ViewerJSONInspectionLimits.maximumFocusedAccessibilityBytes
+        )
+      )
+      .accessibilityHint("Select Event content to copy it.")
+    } else if let chunk = explorer.previewRawChunk {
+      VStack(spacing: 0) {
+        Label(
+          "Showing the first bounded Raw chunk because formatted JSON is unavailable.",
+          systemImage: "info.circle"
+        )
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(10)
+        Divider()
+        ViewerReceivedEventText(
+          text: chunk.text,
+          accessibilityText: chunk.focusedAccessibilityText
+        )
+        .accessibilityHint("Select Event content to copy it.")
+      }
+    } else {
+      ViewerExplorerEmptyState(
+        title: "Preview Unavailable",
+        systemImage: "curlybraces",
+        description: "The selected Event could not be prepared for preview."
+      )
+    }
   }
 
   private func metadataRow(_ label: String, _ value: String) -> some View {
@@ -1474,7 +1654,8 @@ extension ViewerWorkspaceMutationFailure {
     case .invalidFile: return "The selected JSON file is not a valid NearWire Session export."
     case .unsupportedFile: return "The selected JSON file uses an unsupported export format."
     case .capacityExceeded:
-      return "The imported Session is too large for the current memory limit. Import a smaller Session."
+      return
+        "The imported Session is too large for the current memory limit. Import a smaller Session."
     case .cancelled: return "The Session operation was cancelled."
     }
   }

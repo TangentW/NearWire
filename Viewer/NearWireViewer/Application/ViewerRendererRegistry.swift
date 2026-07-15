@@ -64,8 +64,6 @@ struct ViewerGenericJSONPreparation: Equatable, Sendable {
   let prettyText: String?
   let prettyState: ViewerGenericPrettyState
   let prettyGuidance: String?
-  let treeState: ViewerJSONTreeState?
-  let treeGuidance: String?
 }
 
 struct ViewerLogPreparation: Equatable, Sendable {
@@ -250,22 +248,6 @@ struct ViewerRendererPreparer: Sendable {
     isCancelled: @escaping @Sendable () -> Bool
   ) -> ViewerGenericJSONPreparation {
     let data = buffer.content
-    var treeState: ViewerJSONTreeState?
-    var treeGuidance: String?
-    do {
-      var scanner = ViewerJSONRangeScanner(
-        data: data,
-        budget: ViewerInspectionBudget(
-          maximumScannedBytes: data.count,
-          nowNanoseconds: nowNanoseconds,
-          isCancelled: isCancelled
-        )
-      )
-      treeState = try ViewerJSONTreeState(root: scanner.root(), data: data)
-    } catch {
-      treeGuidance = "Refine the selection to build the bounded JSON tree."
-    }
-
     let prettyText: String?
     let prettyState: ViewerGenericPrettyState
     let prettyGuidance: String?
@@ -292,9 +274,7 @@ struct ViewerRendererPreparer: Sendable {
       rawChunkCount: ViewerRawJSONNavigator.chunkCount(in: buffer),
       prettyText: prettyText,
       prettyState: prettyState,
-      prettyGuidance: prettyGuidance,
-      treeState: treeState,
-      treeGuidance: treeGuidance
+      prettyGuidance: prettyGuidance
     )
   }
 
@@ -668,9 +648,7 @@ final class ViewerRendererPreparationService: @unchecked Sendable {
           rawChunkCount: 0,
           prettyText: nil,
           prettyState: .refineRequired,
-          prettyGuidance: nil,
-          treeState: nil,
-          treeGuidance: nil
+          prettyGuidance: nil
         ),
         specialized: nil,
         fallbackReason: .cancelled

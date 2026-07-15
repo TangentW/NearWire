@@ -1,0 +1,35 @@
+[
+  {
+    "attachments" : [
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "00008132-0006406A01FA401C",
+        "deviceName" : "My Mac",
+        "exportedFileName" : "003E8F15-4674-4C7C-99A1-352B3467CC73.png",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "NearWire Timeline narrow status refinement_0_96ED675C-E5E8-433A-A267-E02C34737ED1.png",
+        "timestamp" : 1784139753.937
+      },
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "00008132-0006406A01FA401C",
+        "deviceName" : "My Mac",
+        "exportedFileName" : "26F97F40-A13F-43DB-A26C-5A1B22ED2999.png",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "NearWire Timeline row refinement_0_75C0C3A1-C744-4D06-A773-FF8A9351F1B2.png",
+        "timestamp" : 1784139753.923
+      },
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "00008132-0006406A01FA401C",
+        "deviceName" : "My Mac",
+        "exportedFileName" : "91B707E2-1B51-4DD1-83EA-1F39465994FE.png",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "NearWire Timeline and Preview refinement_0_CB85B56A-E6AF-487C-A2D2-D9DE2F700233.png",
+        "timestamp" : 1784139753.914
+      }
+    ],
+    "testIdentifier" : "ViewerFoundationTests/testTimelineTailFollowingPreservesManualReadingAndJumpRestoresFollow()",
+    "testIdentifierURL" : "test://com.apple.xcode/NearWireViewer/NearWireViewerTests/ViewerFoundationTests/testTimelineTailFollowingPreservesManualReadingAndJumpRestoresFollow"
+  }
+]

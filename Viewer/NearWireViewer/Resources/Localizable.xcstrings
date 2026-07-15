@@ -203,6 +203,22 @@
         }
       }
     },
+    "%@, %@, %@, %@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@, %@, %@, %@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@，%@，%@，%@"
+          }
+        }
+      }
+    },
     "%@, %@, %@, %@, %@, %@" : {
       "extractionState" : "stale",
       "localizations" : {
@@ -5553,6 +5569,38 @@
         }
       }
     },
+    "Preview" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Preview"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "预览"
+          }
+        }
+      }
+    },
+    "Preview Unavailable" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Preview Unavailable"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "预览不可用"
+          }
+        }
+      }
+    },
     "Pretty" : {
       "extractionState" : "stale",
       "localizations" : {
@@ -6611,6 +6659,38 @@
         }
       }
     },
+    "Select All" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Select All"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "全选"
+          }
+        }
+      }
+    },
+    "Select Event content to copy it." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Select Event content to copy it."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "可选择事件内容并进行复制。"
+          }
+        }
+      }
+    },
     "Select one device to view performance" : {
       "extractionState" : "stale",
       "localizations" : {
@@ -6907,6 +6987,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "显示 Viewer"
+          }
+        }
+      }
+    },
+    "Showing the first bounded Raw chunk because formatted JSON is unavailable." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Showing the first bounded Raw chunk because formatted JSON is unavailable."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "格式化 JSON 不可用，当前显示首个受限的原始分块。"
           }
         }
       }
@@ -7594,6 +7690,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "本地入队前所选 App 已变化。"
+          }
+        }
+      }
+    },
+    "The selected Event could not be prepared for preview." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The selected Event could not be prepared for preview."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法为所选事件准备预览。"
           }
         }
       }

@@ -1,4 +1,5 @@
 import AppKit
+import CoreText
 import SwiftUI
 
 enum ViewerOperatorTextControlStyle: Equatable, Sendable {
@@ -214,13 +215,12 @@ final class ViewerBoundedTextScrollView: NSScrollView {
   }
 }
 
-/// Received or stored Event text is deliberately display-only. It has no selection, editing,
-/// contextual menu, drag registration, or validated responder command that can reach a pasteboard.
+/// Received Event text remains read-only. It permits only deliberate selection, Copy, and Select All.
 @MainActor
 final class ViewerReceivedEventTextView: NSTextView, CustomReflectable {
   private var ownedTextStorage: NSTextStorage?
 
-  override var acceptsFirstResponder: Bool { false }
+  override var acceptsFirstResponder: Bool { true }
 
   override convenience init(frame frameRect: NSRect) {
     self.init(frame: frameRect, textContainer: nil)
@@ -239,7 +239,37 @@ final class ViewerReceivedEventTextView: NSTextView, CustomReflectable {
   }
 
   override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
+    switch item.action {
+    case #selector(NSText.copy(_:)):
+      return selectedRange().length > 0
+    case #selector(NSText.selectAll(_:)):
+      return !string.isEmpty
+    default:
+      return false
+    }
+  }
+
+  override func dragSelection(
+    with event: NSEvent,
+    offset mouseOffset: NSSize,
+    slideBack: Bool
+  ) -> Bool {
     false
+  }
+
+  func updateMenu(copyTitle: String, selectAllTitle: String) {
+    let menu = NSMenu()
+    menu.addItem(
+      withTitle: copyTitle,
+      action: #selector(NSText.copy(_:)),
+      keyEquivalent: ""
+    )
+    menu.addItem(
+      withTitle: selectAllTitle,
+      action: #selector(NSText.selectAll(_:)),
+      keyEquivalent: ""
+    )
+    self.menu = menu
   }
 
   func clearSensitiveState() {
@@ -253,14 +283,14 @@ final class ViewerReceivedEventTextView: NSTextView, CustomReflectable {
 
   private func configure() {
     isEditable = false
-    isSelectable = false
+    isSelectable = true
     isRichText = false
     importsGraphics = false
     isAutomaticLinkDetectionEnabled = false
     displaysLinkToolTips = false
     usesFindPanel = false
-    menu = nil
     unregisterDraggedTypes()
+    layoutManager?.allowsNonContiguousLayout = true
     drawsBackground = false
     textContainerInset = NSSize(width: 8, height: 8)
   }
@@ -285,55 +315,271 @@ final class ViewerReceivedEventTextView: NSTextView, CustomReflectable {
 }
 
 struct ViewerReceivedEventText: NSViewRepresentable {
+  @Environment(\.locale) private var locale
   let text: String
   let accessibilityText: String
 
-  func makeNSView(context: Context) -> NSScrollView {
+  func makeNSView(context: Context) -> ViewerReceivedEventTextScrollView {
     let display = ViewerReceivedEventTextView(frame: .zero)
-    display.string = text
-    display.font = NSFont.monospacedSystemFont(
-      ofSize: NSFont.systemFontSize,
-      weight: NSFont.Weight.regular
-    )
-    display.setAccessibilityLabel(accessibilityText)
+    _ = configure(display)
 
-    let scrollView = NSScrollView(frame: .zero)
+    let scrollView = ViewerReceivedEventTextScrollView(frame: .zero)
     scrollView.borderType = .noBorder
     scrollView.drawsBackground = false
-    scrollView.hasHorizontalScroller = true
+    scrollView.hasHorizontalScroller = false
     scrollView.hasVerticalScroller = true
     scrollView.autohidesScrollers = true
     scrollView.documentView = display
     configureSizing(display, in: scrollView)
+    scrollView.invalidateDocumentLayout()
     return scrollView
   }
 
-  func updateNSView(_ scrollView: NSScrollView, context: Context) {
+  func updateNSView(_ scrollView: ViewerReceivedEventTextScrollView, context: Context) {
     guard let display = scrollView.documentView as? ViewerReceivedEventTextView else { return }
-    if display.string != text { display.string = text }
-    display.setAccessibilityLabel(accessibilityText)
+    if configure(display) {
+      scrollView.invalidateDocumentLayout()
+    }
     configureSizing(display, in: scrollView)
+    scrollView.needsLayout = true
   }
 
-  static func dismantleNSView(_ scrollView: NSScrollView, coordinator: ()) {
+  static func dismantleNSView(
+    _ scrollView: ViewerReceivedEventTextScrollView,
+    coordinator: ()
+  ) {
+    scrollView.cancelPendingMeasurement()
     (scrollView.documentView as? ViewerReceivedEventTextView)?.clearSensitiveState()
     scrollView.documentView = nil
   }
 
   private func configureSizing(_ display: ViewerReceivedEventTextView, in scrollView: NSScrollView)
   {
-    display.minSize = scrollView.contentSize
+    let width = max(scrollView.contentSize.width, 1)
+    display.minSize = NSSize(width: width, height: max(scrollView.contentSize.height, 1))
     display.maxSize = NSSize(
-      width: CGFloat.greatestFiniteMagnitude,
+      width: width,
       height: CGFloat.greatestFiniteMagnitude
     )
-    display.isHorizontallyResizable = true
+    display.isHorizontallyResizable = false
     display.isVerticallyResizable = true
-    display.autoresizingMask = []
-    display.textContainer?.widthTracksTextView = false
+    display.autoresizingMask = [.width]
+    display.textContainer?.widthTracksTextView = true
     display.textContainer?.containerSize = NSSize(
-      width: CGFloat.greatestFiniteMagnitude,
+      width: width,
       height: CGFloat.greatestFiniteMagnitude
     )
+  }
+
+  @discardableResult
+  private func configure(_ display: ViewerReceivedEventTextView) -> Bool {
+    let textChanged = display.string != text
+    if textChanged {
+      display.string = text
+      display.setSelectedRange(NSRange(location: 0, length: 0))
+    }
+    display.font = NSFont.monospacedSystemFont(
+      ofSize: NSFont.systemFontSize,
+      weight: NSFont.Weight.regular
+    )
+    display.setAccessibilityLabel(accessibilityText)
+    display.updateMenu(
+      copyTitle: ViewerLocalization.string("Copy", locale: locale),
+      selectAllTitle: ViewerLocalization.string("Select All", locale: locale)
+    )
+    return textChanged
+  }
+}
+
+@MainActor
+final class ViewerReceivedEventTextScrollView: NSScrollView {
+  private var contentRevision: UInt64 = 0
+  private var requestedRevision: UInt64?
+  private var requestedWidth: CGFloat?
+  private var measuredHeight: CGFloat = 0
+  private var measurementGeneration: UInt64 = 0
+  private var measurementTask: Task<Void, Never>?
+  private let measurementWorker = ViewerReceivedEventTextMeasurementWorker()
+
+  func invalidateDocumentLayout() {
+    contentRevision &+= 1
+    measuredHeight = 0
+    requestedRevision = nil
+    requestedWidth = nil
+    cancelPendingMeasurement()
+    needsLayout = true
+  }
+
+  func cancelPendingMeasurement() {
+    measurementGeneration &+= 1
+    measurementTask?.cancel()
+    measurementTask = nil
+    measurementWorker.cancelPending()
+  }
+
+  override func layout() {
+    super.layout()
+    guard let display = documentView as? ViewerReceivedEventTextView else { return }
+    let viewport = contentView.bounds.size
+    let width = max(viewport.width, 1)
+    if display.frame.width != width {
+      display.frame.size.width = width
+    }
+    display.textContainer?.widthTracksTextView = true
+    display.textContainer?.containerSize = NSSize(
+      width: width,
+      height: CGFloat.greatestFiniteMagnitude
+    )
+    let lineFragmentPadding = display.textContainer?.lineFragmentPadding ?? 0
+    let measurementWidth = max(width - lineFragmentPadding * 2, 1)
+    if requestedWidth != measurementWidth || requestedRevision != contentRevision {
+      requestMeasurement(
+        text: display.string,
+        width: measurementWidth,
+        fontSize: display.font?.pointSize ?? NSFont.systemFontSize
+      )
+    }
+    let height = max(viewport.height, ceil(measuredHeight + display.textContainerInset.height * 2))
+    let size = NSSize(width: width, height: height)
+    if display.frame.size != size {
+      display.frame = NSRect(origin: .zero, size: size)
+    }
+    display.minSize = NSSize(width: width, height: max(viewport.height, 1))
+    display.maxSize = NSSize(width: width, height: CGFloat.greatestFiniteMagnitude)
+  }
+
+  private func requestMeasurement(text: String, width: CGFloat, fontSize: CGFloat) {
+    cancelPendingMeasurement()
+    requestedWidth = width
+    requestedRevision = contentRevision
+    let generation = measurementGeneration
+    let revision = contentRevision
+    guard !text.isEmpty else {
+      measuredHeight = 0
+      return
+    }
+    measurementTask = Task { @MainActor [weak self] in
+      try? await Task.sleep(nanoseconds: 120_000_000)
+      guard let self, !Task.isCancelled, generation == measurementGeneration else { return }
+      measurementTask = nil
+      measurementWorker.submit(
+        ViewerReceivedEventTextMeasurementRequest(
+          text: text,
+          width: width,
+          fontSize: fontSize
+        )
+      ) { [weak self] height in
+        Task { @MainActor [weak self] in
+          guard let self, generation == measurementGeneration,
+            revision == contentRevision, requestedWidth == width
+          else { return }
+          measuredHeight = height
+          needsLayout = true
+          layoutSubtreeIfNeeded()
+        }
+      }
+    }
+  }
+}
+
+struct ViewerReceivedEventTextMeasurementRequest: Sendable {
+  let text: String
+  let width: CGFloat
+  let fontSize: CGFloat
+}
+
+final class ViewerReceivedEventTextMeasurementWorker: @unchecked Sendable {
+  private struct Work: Sendable {
+    let request: ViewerReceivedEventTextMeasurementRequest
+    let completion: @Sendable (CGFloat) -> Void
+  }
+
+  private let lock = NSLock()
+  private let measure: @Sendable (ViewerReceivedEventTextMeasurementRequest) -> CGFloat
+  private var pending: Work?
+  private var isRunning = false
+
+  init(
+    measure: @escaping @Sendable (ViewerReceivedEventTextMeasurementRequest) -> CGFloat = {
+      ViewerReceivedEventTextMeasurement.height(
+        text: $0.text,
+        width: $0.width,
+        fontSize: $0.fontSize
+      )
+    }
+  ) {
+    self.measure = measure
+  }
+
+  func submit(
+    _ request: ViewerReceivedEventTextMeasurementRequest,
+    completion: @escaping @Sendable (CGFloat) -> Void
+  ) {
+    let shouldStart: Bool
+    lock.lock()
+    pending = Work(request: request, completion: completion)
+    if isRunning {
+      shouldStart = false
+    } else {
+      isRunning = true
+      shouldStart = true
+    }
+    lock.unlock()
+    guard shouldStart else { return }
+    DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+      self?.run()
+    }
+  }
+
+  func cancelPending() {
+    lock.lock()
+    pending = nil
+    lock.unlock()
+  }
+
+  var retainedWorkCountForTesting: Int {
+    lock.lock()
+    defer { lock.unlock() }
+    return (isRunning ? 1 : 0) + (pending == nil ? 0 : 1)
+  }
+
+  private func run() {
+    while let work = takeNext() {
+      let height = measure(work.request)
+      work.completion(height)
+    }
+  }
+
+  private func takeNext() -> Work? {
+    lock.lock()
+    defer { lock.unlock() }
+    guard let next = pending else {
+      isRunning = false
+      return nil
+    }
+    pending = nil
+    return next
+  }
+}
+
+enum ViewerReceivedEventTextMeasurement {
+  nonisolated static func height(text: String, width: CGFloat, fontSize: CGFloat) -> CGFloat {
+    let font = CTFontCreateWithName("SFMono-Regular" as CFString, fontSize, nil)
+    let attributed = NSAttributedString(
+      string: text,
+      attributes: [
+        NSAttributedString.Key(kCTFontAttributeName as String): font
+      ]
+    )
+    let framesetter = CTFramesetterCreateWithAttributedString(attributed as CFAttributedString)
+    var fitRange = CFRange()
+    let size = CTFramesetterSuggestFrameSizeWithConstraints(
+      framesetter,
+      CFRange(location: 0, length: 0),
+      nil,
+      CGSize(width: max(width, 1), height: CGFloat.greatestFiniteMagnitude),
+      &fitRange
+    )
+    return ceil(size.height)
   }
 }

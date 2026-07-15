@@ -14,11 +14,9 @@ private final class ViewerWorkspaceControlProbe: ViewerWorkspaceSessionControlli
   @unchecked Sendable
 {
   private let lock = NSLock()
-  private var clearCompletion:
-    (@Sendable (Result<Void, ViewerWorkspaceMutationFailure>) -> Void)?
+  private var clearCompletion: (@Sendable (Result<Void, ViewerWorkspaceMutationFailure>) -> Void)?
   private var clearAfterCommit: (@Sendable () -> Void)?
-  private var importCompletion:
-    (@Sendable (Result<Void, ViewerWorkspaceMutationFailure>) -> Void)?
+  private var importCompletion: (@Sendable (Result<Void, ViewerWorkspaceMutationFailure>) -> Void)?
   private var importAfterCommit: (@Sendable () -> Void)?
   private(set) var clearCount = 0
   private(set) var importCount = 0
@@ -306,7 +304,8 @@ final class ViewerLocalizationTests: XCTestCase {
       pattern: #"ViewerLocalization\.(?:string|format)\(\s*\"([^\"\n]+)\""#
     )
     let swiftUILiteral = try NSRegularExpression(
-      pattern: #"(?:Text|Button|Label|Toggle|Picker|GroupBox|accessibilityLabel|help)\s*\(\s*\"([^\"\n]+)\""#
+      pattern:
+        #"(?:Text|Button|Label|Toggle|Picker|GroupBox|accessibilityLabel|help)\s*\(\s*\"([^\"\n]+)\""#
     )
     let hardCodedPanelText = try NSRegularExpression(
       pattern: #"\b(?:panel|alert)\.(?:title|message|informativeText|prompt)\s*=\s*\""#
@@ -325,7 +324,8 @@ final class ViewerLocalizationTests: XCTestCase {
           else { return }
           let rawLiteral = String(source[range])
           guard !rawLiteral.contains(#"\("#) else { return }
-          let key = rawLiteral
+          let key =
+            rawLiteral
             .replacingOccurrences(of: #"\""#, with: "\"")
             .replacingOccurrences(of: #"\\"#, with: #"\"#)
           if englishStrings[key] == nil {
@@ -338,7 +338,8 @@ final class ViewerLocalizationTests: XCTestCase {
       }
     }
 
-    XCTAssertEqual(missingKeys, [], "Fixed Viewer UI strings missing from the catalog: \(missingKeys)")
+    XCTAssertEqual(
+      missingKeys, [], "Fixed Viewer UI strings missing from the catalog: \(missingKeys)")
     XCTAssertEqual(
       hardCodedPanels,
       [],
@@ -360,7 +361,8 @@ final class ViewerLocalizationTests: XCTestCase {
   }
 
   private func formatPlaceholders(in value: String) -> [String] {
-    let pattern = #"%(?:[0-9]+\$)?[-+#0 ]*(?:\*|[0-9]+)?(?:\.\*|\.[0-9]+)?(?:hh|h|ll|l|q|L|z|t|j)?[diuoxXfFeEgGaAcCsSp@%]"#
+    let pattern =
+      #"%(?:[0-9]+\$)?[-+#0 ]*(?:\*|[0-9]+)?(?:\.\*|\.[0-9]+)?(?:hh|h|ll|l|q|L|z|t|j)?[diuoxXfFeEgGaAcCsSp@%]"#
     let expression = try! NSRegularExpression(pattern: pattern)
     let range = NSRange(value.startIndex..<value.endIndex, in: value)
     return expression.matches(in: value, range: range).compactMap {
@@ -421,6 +423,13 @@ final class ViewerWorkspacePresentationTests: XCTestCase {
       [.devices, .eventTimeline, .eventInspector, .controlComposer]
     )
     XCTAssertEqual(ViewerWorkspaceLayout.regions.count, ViewerWorkspaceRegion.allCases.count)
+  }
+
+  func testInspectorOffersOnlyMetadataRawPrettyAndPreview() {
+    XCTAssertEqual(
+      ViewerExplorerInspectorTab.allCases.map(\.rawValue),
+      ["Metadata", "Raw", "Pretty", "Preview"]
+    )
   }
 
   @MainActor
@@ -503,7 +512,7 @@ final class ViewerPerformanceInventoryTests: XCTestCase {
     )
   }
 
-   func testPerformanceDecoderPreservesMeasurementsAvailabilityAndUnknownRawOnlyValues() throws {
+  func testPerformanceDecoderPreservesMeasurementsAvailabilityAndUnknownRawOnlyValues() throws {
     let outcome = ViewerPerformanceSnapshotDecoder.decode(
       .canonical(
         Data(
@@ -1472,7 +1481,7 @@ final class ViewerPerformanceAggregationTests: XCTestCase {
     )
   }
 
-   private func decodedSnapshot(
+  private func decodedSnapshot(
     numericOffset: Double,
     battery: BatteryState,
     thermal: ThermalState
@@ -2092,7 +2101,7 @@ final class ViewerFoundationTests: XCTestCase {
   }
 
   @MainActor
-  func testNativeTextControlsBoundExactEditsAndDisableInspectorClipboardSurfaces() {
+  func testNativeTextControlsBoundExactEditsAndExposeOnlyExplicitInspectorCopy() async throws {
     var buffer = ViewerIncrementalTextBuffer(
       maximumUTF8Bytes: 8,
       maximumUnicodeScalars: 4
@@ -2209,19 +2218,83 @@ final class ViewerFoundationTests: XCTestCase {
       NSMenuItem(title: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: ""),
       NSMenuItem(title: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: ""),
       NSMenuItem(title: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: ""),
+      NSMenuItem(
+        title: "Select All",
+        action: #selector(NSText.selectAll(_:)),
+        keyEquivalent: ""
+      ),
     ]
     XCTAssertFalse(received.isEditable)
-    XCTAssertFalse(received.isSelectable)
-    XCTAssertFalse(received.acceptsFirstResponder)
+    XCTAssertTrue(received.isSelectable)
+    XCTAssertTrue(received.acceptsFirstResponder)
     XCTAssertFalse(received.isRichText)
     XCTAssertFalse(received.importsGraphics)
-    XCTAssertNil(received.menu)
     XCTAssertTrue(received.registeredDraggedTypes.isEmpty)
-    XCTAssertTrue(clipboardItems.allSatisfy { !received.validateUserInterfaceItem($0) })
+    received.updateMenu(copyTitle: "Copy", selectAllTitle: "Select All")
+    XCTAssertEqual(
+      received.menu?.items.map(\.action),
+      [#selector(NSText.copy(_:)), #selector(NSText.selectAll(_:))]
+    )
+    received.setSelectedRange(NSRange(location: 0, length: 7))
+    XCTAssertTrue(received.validateUserInterfaceItem(clipboardItems[0]))
+    XCTAssertFalse(received.validateUserInterfaceItem(clipboardItems[1]))
+    XCTAssertFalse(received.validateUserInterfaceItem(clipboardItems[2]))
+    XCTAssertTrue(received.validateUserInterfaceItem(clipboardItems[3]))
     XCTAssertTrue(Mirror(reflecting: received).children.isEmpty)
     XCTAssertFalse(String(reflecting: received).contains("private Event content"))
     received.clearSensitiveState()
     XCTAssertEqual(received.string, "")
+
+    let wrappedHostingView = NSHostingView(
+      rootView: ViewerReceivedEventText(
+        text: String(repeating: "0123456789", count: 200),
+        accessibilityText: "Received Event content"
+      )
+      .frame(width: 220, height: 120)
+    )
+    wrappedHostingView.frame = NSRect(x: 0, y: 0, width: 220, height: 120)
+    wrappedHostingView.layoutSubtreeIfNeeded()
+    let wrapped = try XCTUnwrap(
+      descendantViews(of: ViewerReceivedEventTextView.self, in: wrappedHostingView).first
+    )
+    let wrappedScroll = try XCTUnwrap(
+      descendantViews(of: ViewerReceivedEventTextScrollView.self, in: wrappedHostingView).first
+    )
+    XCTAssertFalse(wrappedScroll.hasHorizontalScroller)
+    XCTAssertEqual(wrapped.textContainer?.widthTracksTextView, true)
+    XCTAssertLessThanOrEqual(wrapped.frame.width, 220)
+    for _ in 0..<100 where wrapped.frame.height <= 120 {
+      try await Task.sleep(nanoseconds: 10_000_000)
+      wrappedHostingView.layoutSubtreeIfNeeded()
+    }
+    XCTAssertGreaterThan(wrapped.frame.height, 120)
+
+    let measurementGate = BlockingViewerOperationGate()
+    let measurementCompletions = LockedStringSequence()
+    let measurementWorker = ViewerReceivedEventTextMeasurementWorker { request in
+      measurementGate.run()
+      return CGFloat(request.text.utf8.count)
+    }
+    measurementWorker.submit(
+      ViewerReceivedEventTextMeasurementRequest(text: "first", width: 100, fontSize: 13)
+    ) { _ in measurementCompletions.append("first") }
+    XCTAssertEqual(measurementGate.waitUntilEntered(), .success)
+    measurementWorker.submit(
+      ViewerReceivedEventTextMeasurementRequest(text: "replaced", width: 100, fontSize: 13)
+    ) { _ in measurementCompletions.append("replaced") }
+    measurementWorker.submit(
+      ViewerReceivedEventTextMeasurementRequest(text: "latest", width: 100, fontSize: 13)
+    ) { _ in measurementCompletions.append("latest") }
+    XCTAssertEqual(measurementWorker.retainedWorkCountForTesting, 2)
+    measurementGate.release()
+    for _ in 0..<100
+    where measurementCompletions.values.count < 2
+      || measurementWorker.retainedWorkCountForTesting != 0
+    {
+      try await Task.sleep(nanoseconds: 10_000_000)
+    }
+    XCTAssertEqual(measurementCompletions.values, ["first", "latest"])
+    XCTAssertEqual(measurementWorker.retainedWorkCountForTesting, 0)
 
     var filter = ViewerExplorerFilterDraft()
     XCTAssertEqual(
@@ -2371,7 +2444,7 @@ final class ViewerFoundationTests: XCTestCase {
     XCTAssertEqual(composer.ttlText, "")
   }
 
-   func testBuiltApplicationMetadataAndPrivacyManifestMatchDiscoveryContract() throws {
+  func testBuiltApplicationMetadataAndPrivacyManifestMatchDiscoveryContract() throws {
     let info = try XCTUnwrap(Bundle.main.infoDictionary)
     XCTAssertEqual(info["NSBonjourServices"] as? [String], ["_nearwire._tcp"])
     XCTAssertEqual(
@@ -4278,7 +4351,217 @@ final class ViewerFoundationTests: XCTestCase {
     }
   }
 
-   func testCommittedObservationConsumesPrecomputedCanonicalContent() throws {
+  @MainActor
+  func testTimelineTailFollowingPreservesManualReadingAndJumpRestoresFollow() async throws {
+    var viewport = ViewerTimelineTailViewportState()
+    viewport.mount()
+    let bottomToken = try XCTUnwrap(
+      viewport.observe(
+        tailFrame: CGRect(x: 0, y: 619, width: 560, height: 1),
+        viewportSize: CGSize(width: 560, height: 620)
+      )
+    )
+    XCTAssertTrue(viewport.shouldFollowNewEvents)
+    XCTAssertTrue(viewport.accepts(bottomToken))
+    let awayToken = try XCTUnwrap(
+      viewport.observe(
+        tailFrame: CGRect(x: 0, y: 700, width: 560, height: 1),
+        viewportSize: CGSize(width: 560, height: 620)
+      )
+    )
+    XCTAssertFalse(viewport.shouldFollowNewEvents)
+    XCTAssertFalse(viewport.accepts(bottomToken))
+    XCTAssertTrue(viewport.accepts(awayToken))
+    let returnedToken = try XCTUnwrap(
+      viewport.observe(
+        tailFrame: CGRect(x: 0, y: 619, width: 560, height: 1),
+        viewportSize: CGSize(width: 560, height: 620)
+      )
+    )
+    XCTAssertTrue(viewport.shouldFollowNewEvents)
+    XCTAssertFalse(viewport.accepts(awayToken))
+    viewport.unmount()
+    XCTAssertFalse(viewport.shouldFollowNewEvents)
+    XCTAssertFalse(viewport.accepts(returnedToken))
+
+    let runtimeLogicalID = UUID()
+    let context = try makeObservationContext(
+      connectionID: UUID(),
+      displayName: "Tail follow"
+    )
+    let window = ViewerLiveEventWindow(
+      runtimeLogicalID: runtimeLogicalID,
+      refreshScheduler: ViewerLiveRefreshScheduler(
+        now: { 0 },
+        scheduleOnMain: { _, action in
+          Task { @MainActor in action() }
+        }
+      )
+    )
+    let controller = ViewerEventExplorerController(
+      inputs: ViewerRuntimeExplorerInputs(
+        runtimeLogicalID: runtimeLogicalID,
+        liveObservations: window
+      )
+    )
+    controller.start()
+    defer { _ = controller.sealAndClear() }
+
+    func offer(_ sequence: UInt64, content: JSONValue? = nil) throws {
+      let observation = try ViewerCommittedEventObservation(
+        runtimeLogicalID: runtimeLogicalID,
+        context: context,
+        nickname: nil,
+        envelope: makeObservationEnvelope(
+          content: content ?? .object(["value": .integer(Int64(sequence))]),
+          createdAt: Date(timeIntervalSince1970: Double(sequence)),
+          sessionEpoch: SessionEpoch(),
+          sequence: sequence
+        ),
+        viewerWallMilliseconds: Int64(sequence),
+        viewerMonotonicNanoseconds: sequence,
+        deterministicEventBytes: 1,
+        initialDisposition: .buffered
+      )
+      XCTAssertEqual(window.offer(observation), .accepted)
+      window.waitForProjectionForTesting()
+    }
+
+    try offer(1)
+    await waitUntilExplorer { controller.timelineRows.count == 1 }
+    XCTAssertTrue(controller.autoFollow)
+
+    controller.updateTimelineTailFollowing(false)
+    XCTAssertFalse(controller.autoFollow)
+    try offer(2)
+    await waitUntilExplorer { controller.timelineRows.count == 2 }
+    XCTAssertFalse(controller.autoFollow)
+
+    controller.updateTimelineTailFollowing(true)
+    XCTAssertTrue(controller.autoFollow)
+    controller.updateTimelineTailFollowing(false)
+    controller.jumpToLatest()
+    XCTAssertTrue(controller.autoFollow)
+
+    controller.selectEvent(try XCTUnwrap(controller.timelineRows.last?.id))
+    await waitUntilExplorer { controller.inspectorState == .ready }
+    let hostingView = NSHostingView(
+      rootView: HStack(spacing: 0) {
+        ViewerExplorerTimelineView(explorer: controller)
+          .frame(width: 560)
+        Divider()
+        ViewerExplorerInspectorView(explorer: controller, tab: .constant(.preview))
+          .frame(width: 440)
+      }
+      .environment(\.locale, Locale(identifier: "en"))
+      .frame(width: 1_000, height: 620)
+    )
+    hostingView.frame = NSRect(x: 0, y: 0, width: 1_000, height: 620)
+    for _ in 0..<4 {
+      await Task.yield()
+      hostingView.layoutSubtreeIfNeeded()
+    }
+    hostingView.displayIfNeeded()
+
+    let preview = try XCTUnwrap(
+      descendantViews(of: ViewerReceivedEventTextView.self, in: hostingView).first
+    )
+    XCTAssertTrue(preview.string.contains("\"value\""))
+    if let data = renderedPNGData(of: hostingView), let image = NSImage(data: data) {
+      let attachment = XCTAttachment(image: image)
+      attachment.name = "NearWire Timeline and Preview refinement"
+      attachment.lifetime = .keepAlways
+      add(attachment)
+    } else {
+      XCTFail("The refined Event workspace could not be rendered offscreen.")
+    }
+
+    let rowHostingView = NSHostingView(
+      rootView: ViewerExplorerTimelineRowView(
+        row: ViewerExplorerTimelinePresentationRow(
+          id: try XCTUnwrap(controller.timelineRows.last?.id),
+          eventType: "test.observation",
+          contentSummary: """
+            First summary line demonstrates the selected Event content. Second summary line keeps useful context visible. Third summary line remains readable. Fourth-line overflow must be truncated rather than adding another metadata row.
+            """,
+          viewerWallMilliseconds: 2,
+          disposition: ViewerEventDisposition.consumerAccepted.rawValue,
+          hasGap: true,
+          hasDrop: false,
+          hasPresentationConflict: false,
+          sessionEnded: false
+        )
+      )
+      .environment(\.locale, Locale(identifier: "en"))
+      .frame(width: 520)
+      .padding(12)
+      .frame(width: 544, height: 110, alignment: .top)
+    )
+    rowHostingView.frame = NSRect(x: 0, y: 0, width: 544, height: 110)
+    rowHostingView.layoutSubtreeIfNeeded()
+    rowHostingView.displayIfNeeded()
+    if let data = renderedPNGData(of: rowHostingView), let image = NSImage(data: data) {
+      let attachment = XCTAttachment(image: image)
+      attachment.name = "NearWire Timeline row refinement"
+      attachment.lifetime = .keepAlways
+      add(attachment)
+    } else {
+      XCTFail("The refined Timeline row could not be rendered offscreen.")
+    }
+
+    let narrowRowHostingView = NSHostingView(
+      rootView: ViewerExplorerTimelineRowView(
+        row: ViewerExplorerTimelinePresentationRow(
+          id: try XCTUnwrap(controller.timelineRows.last?.id),
+          eventType: "com.example.feature.with.a.deliberately.long.event.type",
+          contentSummary: "A compact three-line summary remains the primary Event content.",
+          viewerWallMilliseconds: 2,
+          disposition: ViewerEventDisposition.overflowDisplaced.rawValue,
+          hasGap: true,
+          hasDrop: true,
+          hasPresentationConflict: true,
+          sessionEnded: true
+        )
+      )
+      .frame(width: 340)
+      .fixedSize(horizontal: false, vertical: true)
+    )
+    narrowRowHostingView.frame = NSRect(x: 0, y: 0, width: 340, height: 160)
+    narrowRowHostingView.layoutSubtreeIfNeeded()
+    XCTAssertLessThanOrEqual(narrowRowHostingView.fittingSize.height, 100)
+    if let data = renderedPNGData(of: narrowRowHostingView), let image = NSImage(data: data) {
+      let attachment = XCTAttachment(image: image)
+      attachment.name = "NearWire Timeline narrow status refinement"
+      attachment.lifetime = .keepAlways
+      add(attachment)
+    } else {
+      XCTFail("The minimum-width Timeline row could not be rendered offscreen.")
+    }
+
+    do {
+      try offer(
+        3,
+        content: .object([
+          "first": .string(String(repeating: "x", count: 40_000)),
+          "second": .string(String(repeating: "y", count: 40_000)),
+        ])
+      )
+    } catch {
+      XCTFail("Large preview fixture creation failed: \(error)")
+      return
+    }
+    await waitUntilExplorer { controller.timelineRows.count == 3 }
+    controller.selectEvent(try XCTUnwrap(controller.timelineRows.last?.id))
+    await waitUntilExplorer { controller.inspectorState == .ready }
+    XCTAssertGreaterThan(controller.rendererPreparation?.generic.rawChunkCount ?? 0, 1)
+    XCTAssertEqual(controller.previewRawChunk?.index, 0)
+    controller.showRawChunk(1)
+    XCTAssertEqual(controller.rawChunkIndex, 1)
+    XCTAssertEqual(controller.rawChunk?.index, 1)
+    XCTAssertEqual(controller.previewRawChunk?.index, 0)
+  }
+
+  func testCommittedObservationConsumesPrecomputedCanonicalContent() throws {
     let runtimeLogicalID = UUID()
     let context = try makeObservationContext(
       connectionID: UUID(),
@@ -4304,7 +4587,7 @@ final class ViewerFoundationTests: XCTestCase {
     XCTAssertEqual(observation.canonicalProjection.canonicalContent, precomputed)
   }
 
-   func testLiveProjectionEnforcesIngressAndWindowBoundsAndTracksRuntimeState() async throws {
+  func testLiveProjectionEnforcesIngressAndWindowBoundsAndTracksRuntimeState() async throws {
     let runtimeLogicalID = UUID()
     let connectionID = UUID()
     let context = try makeObservationContext(
@@ -6068,7 +6351,7 @@ final class ViewerFoundationTests: XCTestCase {
   }
 
   @MainActor
-  func testRendererRegistryPreparesBoundedRawTreeLogTableAndNumericFallbacks() throws {
+  func testRendererRegistryPreparesBoundedRawPrettyLogTableAndNumericFallbacks() throws {
     var genericObject: [String: Any] = [:]
     for index in 0..<129 { genericObject[String(format: "key-%03d", index)] = index }
     genericObject["payload"] = String(repeating: "é", count: 33_000)
@@ -6107,29 +6390,6 @@ final class ViewerFoundationTests: XCTestCase {
       )
     }
     XCTAssertEqual(reconstructed, genericData)
-
-    var tree = try XCTUnwrap(genericResult.preparation.generic.treeState)
-    let firstChildren = try tree.expand(nodeID: 0, offset: 0, data: genericData)
-    XCTAssertEqual(firstChildren.count, ViewerJSONInspectionLimits.maximumTreeChildrenPerExpansion)
-    XCTAssertEqual(tree.nodes.first?.nextChildOffset, 128)
-    let remainingChildren = try tree.expand(nodeID: 0, offset: 128, data: genericData)
-    XCTAssertEqual(remainingChildren.count, 2)
-    XCTAssertEqual(tree.nodes.count, 131)
-    XCTAssertLessThanOrEqual(tree.nodes.count, ViewerJSONInspectionLimits.maximumTreeNodes)
-    XCTAssertLessThanOrEqual(
-      tree.derivedTextBytes,
-      ViewerJSONInspectionLimits.maximumTreeDerivedTextBytes
-    )
-    XCTAssertTrue(
-      tree.nodes.allSatisfy {
-        $0.preview.utf8.count <= ViewerJSONInspectionLimits.maximumTreePreviewBytes
-          && $0.valueRange.upperBound <= genericData.count
-      }
-    )
-    XCTAssertLessThanOrEqual(
-      try tree.focusedAccessibilityText(nodeID: 1, data: genericData).utf8.count,
-      ViewerJSONInspectionLimits.maximumFocusedAccessibilityBytes
-    )
 
     let unsafeMessage = "line\n\u{202E}unsafe " + String(repeating: "x", count: 70_000)
     let logData = try JSONSerialization.data(
@@ -6171,7 +6431,8 @@ final class ViewerFoundationTests: XCTestCase {
       options: [.sortedKeys]
     )
     let tableRequest = model.select(
-      preparedLiveBuffer: makeRendererBuffer(rowID: 3, eventType: "table.metrics", content: tableData),
+      preparedLiveBuffer: makeRendererBuffer(
+        rowID: 3, eventType: "table.metrics", content: tableData),
       identity: .memory(rendererJournalKey(3))
     )
     let tableResult = ViewerRendererPreparer().prepare(tableRequest)
@@ -6203,7 +6464,8 @@ final class ViewerFoundationTests: XCTestCase {
       options: [.sortedKeys]
     )
     let numericRequest = model.select(
-      preparedLiveBuffer: makeRendererBuffer(rowID: 4, eventType: "chart.metrics", content: numericData),
+      preparedLiveBuffer: makeRendererBuffer(
+        rowID: 4, eventType: "chart.metrics", content: numericData),
       identity: .memory(rendererJournalKey(4))
     )
     let numericResult = ViewerRendererPreparer().prepare(numericRequest)
@@ -6319,13 +6581,14 @@ final class ViewerFoundationTests: XCTestCase {
         .utf8
     )
     let depthRequest = model.select(
-      preparedLiveBuffer: makeRendererBuffer(rowID: 20, eventType: "custom.depth", content: depthData),
+      preparedLiveBuffer: makeRendererBuffer(
+        rowID: 20, eventType: "custom.depth", content: depthData),
       identity: .memory(rendererJournalKey(20))
     )
     let depthResult = preparer.prepare(depthRequest)
     XCTAssertEqual(depthResult.preparation.presentedKind, .genericJSON)
     XCTAssertEqual(depthResult.preparation.generic.prettyState, .prepared)
-    XCTAssertEqual(depthResult.preparation.generic.treeState?.nodes.count, 1)
+    XCTAssertNotNil(depthResult.preparation.generic.prettyText)
 
     let repeatedEntry = Array("\"a\":0".utf8)
     var hundredThousandEntries = Data()
@@ -6371,14 +6634,8 @@ final class ViewerFoundationTests: XCTestCase {
     let keyResult = preparer.prepare(keyRequest)
     XCTAssertEqual(keyResult.preparation.presentedKind, .genericJSON)
     XCTAssertEqual(keyResult.preparation.fallbackReason, .inputTooLarge)
-    var keyTree = try XCTUnwrap(keyResult.preparation.generic.treeState)
-    let keyNodes = try keyTree.expand(nodeID: 0, offset: 0, data: maximumKeyData)
-    let keyNode = try XCTUnwrap(keyNodes.first)
-    XCTAssertEqual(keyNode.keyRange?.count, oneMiB + 2)
-    XCTAssertLessThanOrEqual(
-      try keyTree.focusedAccessibilityText(nodeID: keyNode.id, data: maximumKeyData).utf8.count,
-      ViewerJSONInspectionLimits.maximumFocusedAccessibilityBytes
-    )
+    XCTAssertEqual(keyResult.preparation.generic.prettyState, .chunkedRawOnly)
+    XCTAssertGreaterThan(keyResult.preparation.generic.rawChunkCount, 1)
 
     var maximumMessageData = Data("{\"message\":\"".utf8)
     maximumMessageData.append(Data(repeating: 0x78, count: oneMiB))
@@ -6415,7 +6672,6 @@ final class ViewerFoundationTests: XCTestCase {
     XCTAssertEqual(maximumResult.preparation.presentedKind, .genericJSON)
     XCTAssertEqual(maximumResult.preparation.generic.prettyState, .chunkedRawOnly)
     XCTAssertEqual(maximumResult.preparation.generic.rawChunkCount, 256)
-    XCTAssertEqual(maximumResult.preparation.generic.treeState?.nodes.count, 1)
     XCTAssertEqual(try model.rawChunk(at: 0).byteRange.count, 64 * 1_024)
     XCTAssertEqual(try model.rawChunk(at: 255).byteRange.count, 64 * 1_024)
     XCTAssertLessThanOrEqual(

@@ -34,12 +34,8 @@ struct ViewerExplorerTimelinePresentationRow: Identifiable, Equatable, Sendable 
   let id: ViewerExplorerEventIdentity
   let eventType: String
   let contentSummary: String
-  let deviceAlias: String
-  let direction: String
-  let priority: String
   let viewerWallMilliseconds: Int64
   let disposition: String?
-  let contentByteCount: Int64
   let hasGap: Bool
   let hasDrop: Bool
   let hasPresentationConflict: Bool
@@ -276,7 +272,7 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
   private(set) var filterValidationMessage: String?
   private(set) var rawChunkIndex = 0
   private(set) var rawChunk: ViewerRawJSONChunk?
-  private(set) var inspectorTreeState: ViewerJSONTreeState?
+  private(set) var previewRawChunk: ViewerRawJSONChunk?
   private(set) var exportState: ViewerExportPresentationState = .idle
   private(set) var workspaceOperationState: ViewerWorkspaceOperationState = .idle
 
@@ -320,7 +316,8 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
     inputs: ViewerRuntimeExplorerInputs,
     rendererService: ViewerRendererPreparationService = ViewerRendererPreparationService(),
     evaluator: ViewerLiveEventEvaluator = ViewerLiveEventEvaluator(),
-    claimWorkspaceMutation: @escaping @MainActor (ViewerWorkspaceMutationKind) ->
+    claimWorkspaceMutation:
+      @escaping @MainActor (ViewerWorkspaceMutationKind) ->
       ViewerAdmissionWorkspaceMutationLease? = { _ in .unmanagedForTesting() }
   ) {
     runtimeLogicalID = inputs.runtimeLogicalID
@@ -378,12 +375,8 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
         id: .memory($0.key),
         eventType: $0.eventType,
         contentSummary: $0.contentSummary,
-        deviceAlias: $0.deviceAlias,
-        direction: $0.key.direction.rawValue,
-        priority: $0.priority,
         viewerWallMilliseconds: $0.viewerWallMilliseconds,
         disposition: $0.disposition,
-        contentByteCount: Int64($0.contentByteCount),
         hasGap: $0.hasGap,
         hasDrop: $0.hasDrop,
         hasPresentationConflict: $0.hasPresentationConflict,
@@ -472,7 +465,8 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
     guard snapshot.sessions.contains(where: { $0.connectionID == connectionID }) else {
       return .guidance(.deviceNotReady)
     }
-    let retainedStart = snapshot.events.lazy
+    let retainedStart =
+      snapshot.events.lazy
       .filter { $0.observation.key.connectionID == connectionID }
       .map { $0.observation.viewerMonotonicNanoseconds }
       .min() ?? 0
@@ -498,8 +492,11 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
   ) -> Bool {
     guard !sealed else { return false }
     let result = filterDraft.replaceText(field, range: range, replacement: replacement)
-    if case .rejected = result { filterValidationMessage = "The filter value is too large." }
-    else { filterValidationMessage = nil }
+    if case .rejected = result {
+      filterValidationMessage = "The filter value is too large."
+    } else {
+      filterValidationMessage = nil
+    }
     publish()
     return result == .applied
   }
@@ -551,6 +548,12 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
       live.setPresentationPaused(false)
     }
     refresh(reason: .jumpToLatest)
+  }
+
+  func updateTimelineTailFollowing(_ isFollowing: Bool) {
+    guard !sealed, !rows.isEmpty, autoFollowValue != isFollowing else { return }
+    autoFollowValue = isFollowing
+    publish()
   }
 
   func loadOlderEvents() {}
@@ -606,20 +609,6 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
     rawChunkIndex = index
     rawChunk = chunk
     publish()
-  }
-
-  func expandTree(nodeID: Int, offset: Int) {
-    guard !sealed, var tree = inspectorTreeState, let buffer = inspector.canonicalBuffer else {
-      return
-    }
-    do {
-      _ = try tree.expand(nodeID: nodeID, offset: offset, data: buffer.content)
-      inspectorTreeState = tree
-      publish()
-    } catch {
-      inspectorState = .failed(.refineQuery)
-      publish()
-    }
   }
 
   func clearCurrentSession() {
@@ -751,7 +740,8 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
         guard let destination else { return }
         self.exportState = .exporting(eventCount: eventCount)
         self.publish()
-        self.activeExportToken = transfer.executeExport(ticket, to: destination) { [weak self] result in
+        self.activeExportToken = transfer.executeExport(ticket, to: destination) {
+          [weak self] result in
           Task { @MainActor in
             guard let self, !self.sealed, self.activeExportOperationID == operationID else {
               return
@@ -851,7 +841,8 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
     }
     let deviceScope: ViewerLiveDeviceScope
     do {
-      deviceScope = selectedDevices.isEmpty
+      deviceScope =
+        selectedDevices.isEmpty
         ? .all : try ViewerLiveDeviceScope(selectedConnectionIDs: selectedDevices)
     } catch {
       filterValidationMessage = "Select at most 16 devices."
@@ -912,7 +903,8 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
       traversalState = rows.isEmpty ? .failed(.refineQuery) : .ready(delivery.reason)
     case .complete(let output):
       let matched = Set(output.matchedKeys)
-      let successor = delivery.snapshot.events.compactMap { event -> ViewerExplorerMemoryEventRow? in
+      let successor = delivery.snapshot.events.compactMap {
+        event -> ViewerExplorerMemoryEventRow? in
         matched.contains(event.observation.key) ? ViewerExplorerMemoryEventRow(event) : nil
       }
       rows = Array(successor.suffix(ViewerExplorerLimits.maximumEventRows))
@@ -940,8 +932,9 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
     if inspector.selectedIdentity == selectedEventIdentity {
       do {
         let buffer = try inspector.prepare(liveEvent: event, identity: selectedEventIdentity)
-        guard inspector.canonicalBuffer?.metadata != buffer.metadata
-          || inspector.canonicalBuffer?.content != buffer.content
+        guard
+          inspector.canonicalBuffer?.metadata != buffer.metadata
+            || inspector.canonicalBuffer?.content != buffer.content
         else { return }
         prepareInspector(buffer: buffer, identity: selectedEventIdentity)
       } catch {
@@ -985,7 +978,7 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
     inspectorState = .loading
     rawChunkIndex = 0
     rawChunk = nil
-    inspectorTreeState = nil
+    previewRawChunk = nil
     publish()
     let id = UUID()
     activeRendererID = id
@@ -996,8 +989,9 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
         guard let self, !self.sealed, self.activeRendererID == id else { return }
         self.activeRendererID = nil
         guard self.inspector.apply(result) else { return }
-        self.inspectorTreeState = result.preparation.generic.treeState
-        self.rawChunk = try? self.inspector.rawChunk(at: 0)
+        let firstRawChunk = try? self.inspector.rawChunk(at: 0)
+        self.rawChunk = firstRawChunk
+        self.previewRawChunk = firstRawChunk
         self.inspectorState = .ready
         self.publish()
       }
@@ -1011,7 +1005,7 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
     inspectorState = .empty
     rawChunkIndex = 0
     rawChunk = nil
-    inspectorTreeState = nil
+    previewRawChunk = nil
   }
 
   private func resetMemoryPresentation() {
@@ -1035,13 +1029,13 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
   }
 }
 
-private extension Result where Success == Void, Failure == ViewerWorkspaceMutationFailure {
-  var isSuccess: Bool {
+extension Result where Success == Void, Failure == ViewerWorkspaceMutationFailure {
+  fileprivate var isSuccess: Bool {
     if case .success = self { return true }
     return false
   }
 
-  var failure: ViewerWorkspaceMutationFailure? {
+  fileprivate var failure: ViewerWorkspaceMutationFailure? {
     if case .failure(let failure) = self { return failure }
     return nil
   }
@@ -1058,13 +1052,9 @@ extension ViewerExplorerDevicePresentationRow: CustomReflectable, CustomStringCo
 extension ViewerExplorerTimelinePresentationRow: CustomReflectable, CustomStringConvertible,
   CustomDebugStringConvertible
 {
-  var description: String {
-    "ViewerExplorerTimelinePresentationRow(redacted, contentBytes: \(contentByteCount))"
-  }
+  var description: String { "ViewerExplorerTimelinePresentationRow(redacted)" }
   var debugDescription: String { description }
-  var customMirror: Mirror {
-    Mirror(self, children: ["contentBytes": contentByteCount], displayStyle: .struct)
-  }
+  var customMirror: Mirror { Mirror(self, children: [:], displayStyle: .struct) }
 }
 
 extension ViewerExplorerFilterDraft: CustomReflectable, CustomStringConvertible,

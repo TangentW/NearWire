@@ -16,10 +16,6 @@ enum ViewerJSONInspectionLimits {
   static let rawChunkBytes = 64 * 1_024
   static let maximumPrettyInputBytes = 1 * 1_024 * 1_024
   static let maximumPrettyOutputBytes = 2 * 1_024 * 1_024
-  static let maximumTreeChildrenPerExpansion = 128
-  static let maximumTreeNodes = 4_096
-  static let maximumTreeDerivedTextBytes = 2 * 1_024 * 1_024
-  static let maximumTreePreviewBytes = 256
   static let maximumFocusedAccessibilityBytes = 512
   static let deadlineNanoseconds: UInt64 = 100_000_000
 }
@@ -277,7 +273,7 @@ struct ViewerJSONRangeScanner: Sendable {
   mutating func children(
     of parent: ViewerJSONValueRange,
     offset: Int,
-    limit: Int = ViewerJSONInspectionLimits.maximumTreeChildrenPerExpansion,
+    limit: Int,
     maximumEntries: Int = Int.max
   ) throws -> ViewerJSONChildPage {
     guard offset >= 0, (1...Self.maximumRetainedChildren).contains(limit),
@@ -485,141 +481,6 @@ struct ViewerJSONRangeScanner: Sendable {
   private static func isDigit1To9(_ value: UInt8) -> Bool { (0x31...0x39).contains(value) }
 }
 
-struct ViewerJSONTreeNode: Equatable, Sendable {
-  let id: Int
-  let parentID: Int?
-  let kind: ViewerJSONNodeKind
-  let keyRange: Range<Int>?
-  let valueRange: Range<Int>
-  let preview: String
-  let childOffset: Int
-  let nextChildOffset: Int?
-}
-
-struct ViewerJSONTreeState: Equatable, Sendable {
-  private(set) var nodes: [ViewerJSONTreeNode]
-  private(set) var derivedTextBytes: Int
-  private var loadedExpansions: Set<ExpansionKey>
-  private var nextNodeID: Int
-
-  private struct ExpansionKey: Equatable, Hashable, Sendable {
-    let nodeID: Int
-    let offset: Int
-  }
-
-  init(root: ViewerJSONValueRange, data: Data) throws {
-    let preview = try ViewerJSONPreview.make(
-      value: root,
-      data: data,
-      maximumBytes: ViewerJSONInspectionLimits.maximumTreePreviewBytes
-    )
-    nodes = [
-      ViewerJSONTreeNode(
-        id: 0,
-        parentID: nil,
-        kind: root.kind,
-        keyRange: nil,
-        valueRange: root.valueRange,
-        preview: preview,
-        childOffset: 0,
-        nextChildOffset: root.kind.hasChildren ? 0 : nil
-      )
-    ]
-    derivedTextBytes = preview.utf8.count
-    loadedExpansions = []
-    nextNodeID = 1
-  }
-
-  mutating func expand(
-    nodeID: Int,
-    offset: Int,
-    data: Data,
-    nowNanoseconds: @escaping @Sendable () -> UInt64 = {
-      DispatchTime.now().uptimeNanoseconds
-    },
-    isCancelled: @escaping @Sendable () -> Bool = { false }
-  ) throws -> [ViewerJSONTreeNode] {
-    guard let parent = nodes.first(where: { $0.id == nodeID }), parent.kind.hasChildren,
-      offset >= 0
-    else { throw ViewerJSONInspectionError.invalidRequest }
-    let expansion = ExpansionKey(nodeID: nodeID, offset: offset)
-    guard !loadedExpansions.contains(expansion) else { return [] }
-    var scanner = ViewerJSONRangeScanner(
-      data: data,
-      budget: ViewerInspectionBudget(
-        maximumScannedBytes: data.count,
-        nowNanoseconds: nowNanoseconds,
-        isCancelled: isCancelled
-      )
-    )
-    let page = try scanner.children(of: parentRange(parent), offset: offset)
-    var additions: [ViewerJSONTreeNode] = []
-    additions.reserveCapacity(page.values.count)
-    var additionalTextBytes = 0
-    for value in page.values {
-      let preview = try ViewerJSONPreview.make(
-        value: value,
-        data: data,
-        maximumBytes: ViewerJSONInspectionLimits.maximumTreePreviewBytes
-      )
-      additionalTextBytes += preview.utf8.count
-      additions.append(
-        ViewerJSONTreeNode(
-          id: nextNodeID + additions.count,
-          parentID: parent.id,
-          kind: value.kind,
-          keyRange: value.keyRange,
-          valueRange: value.valueRange,
-          preview: preview,
-          childOffset: offset + additions.count,
-          nextChildOffset: value.kind.hasChildren ? 0 : nil
-        )
-      )
-    }
-    guard nodes.count + additions.count <= ViewerJSONInspectionLimits.maximumTreeNodes,
-      derivedTextBytes + additionalTextBytes
-        <= ViewerJSONInspectionLimits.maximumTreeDerivedTextBytes
-    else { throw ViewerJSONInspectionError.outputTooLarge }
-    nodes.append(contentsOf: additions)
-    if let parentIndex = nodes.firstIndex(where: { $0.id == parent.id }) {
-      nodes[parentIndex] = ViewerJSONTreeNode(
-        id: parent.id,
-        parentID: parent.parentID,
-        kind: parent.kind,
-        keyRange: parent.keyRange,
-        valueRange: parent.valueRange,
-        preview: parent.preview,
-        childOffset: parent.childOffset,
-        nextChildOffset: page.nextOffset
-      )
-    }
-    derivedTextBytes += additionalTextBytes
-    nextNodeID += additions.count
-    loadedExpansions.insert(expansion)
-    return additions
-  }
-
-  func focusedAccessibilityText(nodeID: Int, data: Data) throws -> String {
-    guard let node = nodes.first(where: { $0.id == nodeID }) else {
-      throw ViewerJSONInspectionError.invalidRequest
-    }
-    let key: String
-    if let keyRange = node.keyRange {
-      key = try ViewerJSONPreview.decodedString(range: keyRange, data: data)
-    } else {
-      key = "Value"
-    }
-    return ViewerStructuredTextEscaper.escape(
-      "\(key): \(node.preview)",
-      maximumBytes: ViewerJSONInspectionLimits.maximumFocusedAccessibilityBytes
-    )
-  }
-
-  private func parentRange(_ node: ViewerJSONTreeNode) -> ViewerJSONValueRange {
-    ViewerJSONValueRange(kind: node.kind, keyRange: node.keyRange, valueRange: node.valueRange)
-  }
-}
-
 enum ViewerJSONPreview {
   static func make(
     value: ViewerJSONValueRange,
@@ -820,14 +681,4 @@ extension ViewerInspectorEventMetadata: CustomReflectable, CustomStringConvertib
   var description: String { "ViewerInspectorEventMetadata(redacted)" }
   var debugDescription: String { description }
   var customMirror: Mirror { Mirror(self, children: [:], displayStyle: .struct) }
-}
-
-extension ViewerJSONTreeState: CustomReflectable, CustomStringConvertible,
-  CustomDebugStringConvertible
-{
-  var description: String { "ViewerJSONTreeState(redacted, nodes: \(nodes.count))" }
-  var debugDescription: String { description }
-  var customMirror: Mirror {
-    Mirror(self, children: ["nodeCount": nodes.count], displayStyle: .struct)
-  }
 }
