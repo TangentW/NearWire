@@ -37,6 +37,7 @@ final class ViewerApplicationModel: ObservableObject {
   private var runtimeToken = UUID()
   private var startupTask: Task<Void, Never>?
   private var shutdownTask: Task<ViewerCleanupOutcome, Never>?
+  private var shutdownReceipt: ViewerCleanupReceipt?
   private var preparedIdentity: ViewerPreparedIdentity?
   private var activeListener: ViewerListenerGeneration?
   private var preparingListener: ViewerListenerGeneration?
@@ -46,7 +47,15 @@ final class ViewerApplicationModel: ObservableObject {
   private var storeStatusRefreshCoordinator: ViewerStoreStatusRefreshCoordinator?
   private var runtimeComponents: ViewerRuntimeComponents?
   private var sessionControl: (any ViewerSessionControlling)?
+  private var terminalCleanupTask: Task<Void, Never>?
   private lazy var admissionManager = ViewerAdmissionManager(onPending: { _ in })
+
+  static func permitsWorkspaceMutation(
+    _ kind: ViewerWorkspaceMutationKind,
+    hasBlockingSessions: Bool
+  ) -> Bool {
+    kind == .clearEvents || !hasBlockingSessions
+  }
 
   init(
     preferences: ViewerPreferences = .live,
@@ -226,10 +235,29 @@ final class ViewerApplicationModel: ObservableObject {
   func prepareForTermination() async -> ViewerCleanupOutcome {
     startupTask?.cancel()
     let storeStatusCleanup = storeStatusRefreshCoordinator?.deactivateAndWait()
-    let outcome = await beginStopRuntime().value
-    await storeStatusCleanup?.value
+    _ = beginStopRuntime()
+    guard let runtimeCleanupReceipt = shutdownReceipt else {
+      status = .stopped
+      return .completed
+    }
+    let closeWorkingStore = dependencies.closeWorkingStore
+    let terminalCleanupTask = Task {
+      async let runtimeCleanup: Void = runtimeCleanupReceipt.waitForCompletion()
+      async let statusCleanup: Void = storeStatusCleanup?.value ?? ()
+      _ = await (runtimeCleanup, statusCleanup)
+      await closeWorkingStore()
+    }
+    self.terminalCleanupTask = terminalCleanupTask
+    let outcome = await ViewerCleanupReceipt(cleanup: terminalCleanupTask).wait(
+      timeoutNanoseconds: dependencies.cleanupTimeoutNanoseconds,
+      scheduler: dependencies.scheduler
+    )
     status = .stopped
     return outcome
+  }
+
+  func waitForTerminalCleanup() async {
+    await terminalCleanupTask?.value
   }
 
   private func startRuntime() {
@@ -246,6 +274,8 @@ final class ViewerApplicationModel: ObservableObject {
     selectedRoute = nil
     isPaused = false
     shutdownTask = nil
+    shutdownReceipt = nil
+    terminalCleanupTask = nil
     status = .starting
     pendingCoalescer?.deactivate()
     sessionCoalescer?.deactivate()
@@ -268,7 +298,22 @@ final class ViewerApplicationModel: ObservableObject {
     let runtimeLogicalID = UUID()
     let components = dependencies.makeRuntimeComponents(runtimeLogicalID)
     runtimeComponents = components
-    let explorerController = ViewerEventExplorerController(inputs: components.explorerInputs)
+    let explorerController = ViewerEventExplorerController(
+      inputs: components.explorerInputs,
+      claimWorkspaceMutation: { [weak self] kind in
+        guard let self, let lease = self.admissionManager.claimWorkspaceMutation() else {
+          return nil
+        }
+        guard Self.permitsWorkspaceMutation(
+          kind,
+          hasBlockingSessions: self.sessionControl?.hasWorkspaceMutationBlockingSessions == true
+        ) else {
+          lease.release()
+          return nil
+        }
+        return lease
+      }
+    )
     self.explorerController = explorerController
     explorerController.start()
     let performanceController = ViewerPerformanceDashboardController(
@@ -355,6 +400,7 @@ final class ViewerApplicationModel: ObservableObject {
       _ = await (explorer, analysis, composer)
     }
     let receipt = admissionManager.stop().joining(componentCleanup).joining(presentationCleanup)
+    shutdownReceipt = receipt
     preparingListener?.admissionIngress.deactivate()
     activeListener?.admissionIngress.deactivate()
     preparingListener?.listener.cancel()

@@ -122,6 +122,8 @@ final class ViewerControlComposerController: ObservableObject, CustomReflectable
 
   func updateSessionSnapshots(_ snapshots: [ViewerSessionSnapshot]) {
     guard !sealed else { return }
+    let previousRows = targetRows
+    let previousSelection = selectedTargetIDs
     let oldSelectedCapabilities = selectedCapabilities()
     let activeSnapshots = Dictionary(
       uniqueKeysWithValues: snapshots.compactMap { snapshot -> (UUID, ViewerSessionSnapshot)? in
@@ -144,7 +146,11 @@ final class ViewerControlComposerController: ObservableObject, CustomReflectable
       $0.title == $1.title ? $0.id.uuidString < $1.id.uuidString : $0.title < $1.title
     }
     selectedTargetIDs.formIntersection(Set(targetRows.map(\.id)))
-    if oldSelectedCapabilities != selectedCapabilities() { invalidateAttempt() }
+    let capabilitiesChanged = oldSelectedCapabilities != selectedCapabilities()
+    if capabilitiesChanged { invalidateAttempt() }
+    guard previousRows != targetRows || previousSelection != selectedTargetIDs
+      || capabilitiesChanged
+    else { return }
     publish()
   }
 

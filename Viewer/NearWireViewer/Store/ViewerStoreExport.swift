@@ -1,6 +1,688 @@
 import Darwin
 import Foundation
+@_spi(NearWireInternal) import NearWireCore
 import SQLite3
+
+struct ViewerSessionImportSession: Decodable, Sendable {
+  let startedAtMilliseconds: Int64
+  let endedAtMilliseconds: Int64?
+  let name: String?
+  let note: String?
+  let pinned: Bool
+  let state: String
+}
+
+struct ViewerSessionImportDevice: Decodable, Sendable {
+  let device: String
+  let connection: String
+  let startedAtMilliseconds: Int64
+  let endedAtMilliseconds: Int64?
+  let partialHistory: Bool
+  let state: String
+  let applicationIdentifier: String?
+  let applicationVersion: String?
+  let displayName: String?
+
+  var referenceKey: String { "\(device)\u{1f}\(connection)" }
+}
+
+struct ViewerSessionImportEvent: Sendable {
+  struct Causality: Decodable, Sendable {
+    let correlationID: String?
+    let replyTo: String?
+  }
+
+  let device: String
+  let connection: String
+  let direction: EventDirection
+  let wireSequence: UInt64
+  let eventID: String
+  let eventType: String
+  let content: JSONValue
+  let createdAtMilliseconds: Int64
+  let viewerReceivedAtMilliseconds: Int64
+  let viewerMonotonicNanoseconds: UInt64
+  let priority: EventPriority
+  let disposition: String?
+  let originMonotonicNanoseconds: UInt64
+  let ttlMilliseconds: UInt64
+  let eventSchemaVersion: UInt16
+  let causality: Causality?
+
+  var deviceReferenceKey: String { "\(device)\u{1f}\(connection)" }
+
+  fileprivate init(record: ViewerSessionImportEventRecord, content: JSONValue) {
+    device = record.device
+    connection = record.connection
+    direction = record.direction
+    wireSequence = record.wireSequence
+    eventID = record.eventID
+    eventType = record.eventType
+    self.content = content
+    createdAtMilliseconds = record.createdAtMilliseconds
+    viewerReceivedAtMilliseconds = record.viewerReceivedAtMilliseconds
+    viewerMonotonicNanoseconds = record.viewerMonotonicNanoseconds
+    priority = record.priority
+    disposition = record.disposition
+    originMonotonicNanoseconds = record.originMonotonicNanoseconds
+    ttlMilliseconds = record.ttlMilliseconds
+    eventSchemaVersion = record.eventSchemaVersion
+    causality = record.causality
+  }
+}
+
+fileprivate struct ViewerSessionImportEventRecord: Decodable {
+  let device: String
+  let connection: String
+  let direction: EventDirection
+  let wireSequence: UInt64
+  let eventID: String
+  let eventType: String
+  let createdAtMilliseconds: Int64
+  let viewerReceivedAtMilliseconds: Int64
+  let viewerMonotonicNanoseconds: UInt64
+  let priority: EventPriority
+  let disposition: String?
+  let originMonotonicNanoseconds: UInt64
+  let ttlMilliseconds: UInt64
+  let eventSchemaVersion: UInt16
+  let causality: ViewerSessionImportEvent.Causality?
+}
+
+struct ViewerSessionImportGap: Decodable, Sendable {
+  let createdAtMilliseconds: Int64
+  let reason: String
+  let count: Int64
+  let firstViewerTimeMilliseconds: Int64
+  let lastViewerTimeMilliseconds: Int64
+  let directions: String
+  let device: String?
+  let connection: String?
+  let firstWireSequence: UInt64?
+  let lastWireSequence: UInt64?
+
+  var deviceReferenceKey: String? {
+    guard let device, let connection else { return nil }
+    return "\(device)\u{1f}\(connection)"
+  }
+}
+
+struct ViewerSessionImportAnnotation: Decodable, Sendable {
+  let revision: Int64
+  let createdAtMilliseconds: Int64
+  let body: String
+}
+
+final class ViewerSessionImportCancellation: @unchecked Sendable {
+  private let lock = NSLock()
+  private var cancelled = false
+
+  func cancel() {
+    lock.lock()
+    cancelled = true
+    lock.unlock()
+  }
+
+  func check() throws {
+    if isCancelled { throw ViewerStoreError.cancelled }
+  }
+
+  var isCancelled: Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    return cancelled
+  }
+}
+
+enum ViewerSessionTransferLimits {
+  static let maximumFileBytes: Int64 = 4 * 1_024 * 1_024 * 1_024
+  static let maximumDeviceCount: Int64 = 4_096
+  static let maximumEventCount: Int64 = 2_000_000
+  static let maximumGapCount: Int64 = 500_000
+  static let maximumAnnotationCount: Int64 = 100_000
+
+  static func validateCounts(
+    deviceCount: Int64,
+    eventCount: Int64,
+    gapCount: Int64,
+    annotationCount: Int64
+  ) throws {
+    guard deviceCount >= 0, deviceCount <= maximumDeviceCount,
+      eventCount >= 0, eventCount <= maximumEventCount,
+      gapCount >= 0, gapCount <= maximumGapCount,
+      annotationCount >= 0, annotationCount <= maximumAnnotationCount
+    else { throw ViewerStoreError.workLimitExceeded }
+  }
+
+  static func validateFileBytes(_ count: Int64) throws {
+    guard count >= 0, count <= maximumFileBytes else {
+      throw ViewerStoreError.workLimitExceeded
+    }
+  }
+}
+
+private final class ViewerMappedImportFile {
+  let data: Data
+  private let descriptor: Int32
+  private let pointer: UnsafeMutableRawPointer
+  private let count: Int
+  private let snapshotURL: URL
+
+  init(descriptor: Int32, pointer: UnsafeMutableRawPointer, count: Int, snapshotURL: URL) {
+    self.descriptor = descriptor
+    self.pointer = pointer
+    self.count = count
+    self.snapshotURL = snapshotURL
+    data = Data(bytesNoCopy: pointer, count: count, deallocator: .none)
+  }
+
+  deinit {
+    _ = munmap(pointer, count)
+    _ = Darwin.close(descriptor)
+    _ = unlink(snapshotURL.path)
+  }
+}
+
+struct ViewerSessionImportDocument: @unchecked Sendable {
+  let session: ViewerSessionImportSession
+  private let storage: ViewerMappedImportFile
+  private let data: Data
+  private let members: [String: Range<Int>]
+  private let cancellation: ViewerSessionImportCancellation
+  private let structuralScanProgress: (Int) -> Void
+
+  static func open(
+    _ url: URL,
+    maximumFileBytes: Int64,
+    snapshotDirectory: URL,
+    cancellation: ViewerSessionImportCancellation = ViewerSessionImportCancellation(),
+    reserveSnapshotBytes: (Int64) throws -> Void = { _ in },
+    structuralScanProgress: @escaping (Int) -> Void = { _ in }
+  ) throws -> ViewerSessionImportDocument {
+    guard url.isFileURL, maximumFileBytes > 0 else { throw ViewerStoreError.invalidPath }
+    let descriptor = Darwin.open(url.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+    guard descriptor >= 0 else { throw ViewerStoreError.invalidPath }
+    defer { _ = Darwin.close(descriptor) }
+
+    var status = stat()
+    guard fstat(descriptor, &status) == 0,
+      (status.st_mode & S_IFMT) == S_IFREG,
+      status.st_size > 0,
+      status.st_size <= maximumFileBytes,
+      status.st_size <= Int64(Int.max)
+    else {
+      throw ViewerStoreError.invalidValue
+    }
+
+    try reserveSnapshotBytes(status.st_size)
+    try cancellation.check()
+    let storage = try copyOwnedSnapshot(
+      descriptor: descriptor,
+      sourceStatus: status,
+      directory: snapshotDirectory,
+      cancellation: cancellation
+    )
+    return try ViewerSessionImportDocument(
+      storage: storage,
+      cancellation: cancellation,
+      structuralScanProgress: structuralScanProgress
+    )
+  }
+
+  private static func copyOwnedSnapshot(
+    descriptor source: Int32,
+    sourceStatus: stat,
+    directory: URL,
+    cancellation: ViewerSessionImportCancellation
+  ) throws -> ViewerMappedImportFile {
+    let snapshotURL = directory.appendingPathComponent(
+      "NearWire-import.json.snapshot",
+      isDirectory: false
+    )
+    let snapshot = Darwin.open(
+      snapshotURL.path,
+      O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+      S_IRUSR | S_IWUSR
+    )
+    guard snapshot >= 0 else {
+      throw errno == EEXIST ? ViewerStoreError.busy : ViewerStoreError.unavailable
+    }
+
+    var keepsSnapshot = false
+    defer {
+      if !keepsSnapshot {
+        _ = Darwin.close(snapshot)
+        _ = unlink(snapshotURL.path)
+      }
+    }
+
+    var buffer = [UInt8](repeating: 0, count: 64 * 1_024)
+    var copied: Int64 = 0
+    while copied < sourceStatus.st_size {
+      try cancellation.check()
+      let requested = min(buffer.count, Int(sourceStatus.st_size - copied))
+      let readCount = buffer.withUnsafeMutableBytes { bytes in
+        Darwin.read(source, bytes.baseAddress, requested)
+      }
+      if readCount < 0, errno == EINTR { continue }
+      guard readCount > 0 else { throw ViewerStoreError.invalidValue }
+
+      var written = 0
+      while written < readCount {
+        let result = buffer.withUnsafeBytes { bytes in
+          Darwin.write(snapshot, bytes.baseAddress?.advanced(by: written), readCount - written)
+        }
+        if result < 0, errno == EINTR { continue }
+        guard result > 0 else { throw ViewerStoreError.unavailable }
+        written += result
+      }
+      copied += Int64(readCount)
+    }
+
+    var finalSourceStatus = stat()
+    guard fstat(source, &finalSourceStatus) == 0,
+      finalSourceStatus.st_dev == sourceStatus.st_dev,
+      finalSourceStatus.st_ino == sourceStatus.st_ino,
+      finalSourceStatus.st_size == sourceStatus.st_size,
+      finalSourceStatus.st_mtimespec.tv_sec == sourceStatus.st_mtimespec.tv_sec,
+      finalSourceStatus.st_mtimespec.tv_nsec == sourceStatus.st_mtimespec.tv_nsec,
+      fsync(snapshot) == 0,
+      lseek(snapshot, 0, SEEK_SET) == 0
+    else { throw ViewerStoreError.invalidValue }
+
+    let count = Int(sourceStatus.st_size)
+    guard let pointer = mmap(nil, count, PROT_READ, MAP_PRIVATE, snapshot, 0),
+      pointer != MAP_FAILED
+    else { throw ViewerStoreError.unavailable }
+    keepsSnapshot = true
+    return ViewerMappedImportFile(
+      descriptor: snapshot,
+      pointer: pointer,
+      count: count,
+      snapshotURL: snapshotURL
+    )
+  }
+
+  private init(
+    storage: ViewerMappedImportFile,
+    cancellation: ViewerSessionImportCancellation,
+    structuralScanProgress: @escaping (Int) -> Void
+  ) throws {
+    let data = storage.data
+    let scanner = ViewerJSONStructureScanner(
+      data: data,
+      cancellation: cancellation,
+      scanProgress: structuralScanProgress
+    )
+    let members = try scanner.rootObjectMembers()
+    let required = Set([
+      "schemaVersion", "scope", "disclosure", "session", "devices", "events", "gaps",
+      "annotations",
+    ])
+    guard Set(members.keys) == required,
+      try Self.decode(Int.self, from: data, range: members["schemaVersion"]) == 1,
+      try Self.decode(String.self, from: data, range: members["scope"]) == "completeSession",
+      let disclosureRange = members["disclosure"],
+      try Self.decode(ViewerExportDisclosure.self, from: data, range: disclosureRange)
+        .isSupportedForImport,
+      let sessionRange = members["session"], sessionRange.count <= 64 * 1_024
+    else { throw ViewerStoreError.unsupportedSchema }
+    let session = try Self.decode(
+      ViewerSessionImportSession.self,
+      from: data,
+      range: sessionRange
+    )
+    _ = try session.name.map(ViewerTextRules.recordingName)
+    _ = try session.note.map(ViewerTextRules.noteOrAnnotation)
+    guard ["active", "closed", "recoveredAfterInterruption"].contains(session.state),
+      session.endedAtMilliseconds.map({ $0 >= session.startedAtMilliseconds }) ?? true
+    else { throw ViewerStoreError.invalidValue }
+
+    self.storage = storage
+    self.data = data
+    self.members = members
+    self.session = session
+    self.cancellation = cancellation
+    self.structuralScanProgress = structuralScanProgress
+  }
+
+  func forEachDevice(
+    _ body: (ViewerSessionImportDevice) throws -> Void
+  ) throws {
+    try forEach(
+      "devices",
+      maximumCount: Int(ViewerSessionTransferLimits.maximumDeviceCount),
+      maximumRecordBytes: 16 * 1_024
+    ) { range in
+      let value = try Self.decode(ViewerSessionImportDevice.self, from: data, range: range)
+      guard Self.validReference(value.device), Self.validReference(value.connection),
+        ["active", "closed", "recoveredAfterInterruption"].contains(value.state),
+        Self.validOptionalText(value.displayName, maximumBytes: 512),
+        Self.validOptionalText(value.applicationIdentifier, maximumBytes: 512),
+        Self.validOptionalText(value.applicationVersion, maximumBytes: 256)
+      else { throw ViewerStoreError.invalidValue }
+      try body(value)
+    }
+  }
+
+  func forEachEvent(
+    _ body: (ViewerSessionImportEvent) throws -> Void
+  ) throws {
+    try forEach(
+      "events",
+      maximumCount: Int(ViewerSessionTransferLimits.maximumEventCount),
+      maximumRecordBytes: EventValidationLimits.default.maximumEncodedModelBytes
+    ) { range in
+      let record = Data(data[range])
+      let eventMembers = try ViewerJSONStructureScanner(
+        data: record,
+        cancellation: cancellation
+      ).rootObjectMembers()
+      guard let contentRange = eventMembers["content"],
+        contentRange.count <= EventValidationLimits.default.maximumEncodedContentBytes
+      else {
+        throw ViewerStoreError.invalidValue
+      }
+      let metadata = try Self.decode(
+        ViewerSessionImportEventRecord.self,
+        from: data,
+        range: range
+      )
+      let content: JSONValue
+      do {
+        content = try JSONValue.decodeJSON(from: Data(record[contentRange]))
+      } catch {
+        throw ViewerStoreError.invalidValue
+      }
+      let value = ViewerSessionImportEvent(record: metadata, content: content)
+      guard Self.validReference(value.device), Self.validReference(value.connection),
+        !value.eventType.isEmpty,
+        value.eventType.utf8.count <= EventValidationLimits.default.maximumTypeBytes
+      else { throw ViewerStoreError.invalidValue }
+      try body(value)
+    }
+  }
+
+  func forEachGap(_ body: (ViewerSessionImportGap) throws -> Void) throws {
+    try forEach(
+      "gaps",
+      maximumCount: Int(ViewerSessionTransferLimits.maximumGapCount),
+      maximumRecordBytes: 16 * 1_024
+    ) { range in
+      let value = try Self.decode(ViewerSessionImportGap.self, from: data, range: range)
+      let hasCompleteDeviceReference = (value.device == nil) == (value.connection == nil)
+      guard hasCompleteDeviceReference,
+        value.device.map(Self.validReference) ?? true,
+        value.connection.map(Self.validReference) ?? true,
+        !value.reason.isEmpty, value.reason.utf8.count <= 128,
+        value.count > 0,
+        value.firstViewerTimeMilliseconds <= value.lastViewerTimeMilliseconds,
+        ["unknown", "appToViewer", "viewerToApp", "both"].contains(value.directions),
+        (value.firstWireSequence == nil) == (value.lastWireSequence == nil),
+        !(value.firstWireSequence.map { first in
+          value.lastWireSequence.map { first > $0 } ?? false
+        } ?? false)
+      else { throw ViewerStoreError.invalidValue }
+      try body(value)
+    }
+  }
+
+  func forEachAnnotation(
+    _ body: (ViewerSessionImportAnnotation) throws -> Void
+  ) throws {
+    try forEach(
+      "annotations",
+      maximumCount: Int(ViewerSessionTransferLimits.maximumAnnotationCount),
+      maximumRecordBytes: 128 * 1_024
+    ) { range in
+      let value = try Self.decode(ViewerSessionImportAnnotation.self, from: data, range: range)
+      guard value.revision > 0, !value.body.isEmpty, value.body.utf8.count <= 65_536 else {
+        throw ViewerStoreError.invalidValue
+      }
+      try body(value)
+    }
+  }
+
+  private func forEach(
+    _ member: String,
+    maximumCount: Int,
+    maximumRecordBytes: Int,
+    _ body: (Range<Int>) throws -> Void
+  ) throws {
+    guard let range = members[member] else { throw ViewerStoreError.invalidValue }
+    try ViewerJSONStructureScanner(
+      data: data,
+      cancellation: cancellation,
+      scanProgress: structuralScanProgress
+    ).forEachArrayElement(
+      in: range,
+      maximumCount: maximumCount
+    ) { valueRange in
+      guard valueRange.count <= maximumRecordBytes else { throw ViewerStoreError.invalidValue }
+      try body(valueRange)
+    }
+  }
+
+  private static func decode<T: Decodable>(
+    _ type: T.Type,
+    from data: Data,
+    range: Range<Int>?
+  ) throws -> T {
+    guard let range else { throw ViewerStoreError.invalidValue }
+    do {
+      return try JSONDecoder().decode(type, from: Data(data[range]))
+    } catch {
+      throw ViewerStoreError.invalidValue
+    }
+  }
+
+  private static func validReference(_ value: String) -> Bool {
+    !value.isEmpty && value.utf8.count <= 128
+      && value.unicodeScalars.allSatisfy { !CharacterSet.controlCharacters.contains($0) }
+  }
+
+  private static func validOptionalText(_ value: String?, maximumBytes: Int) -> Bool {
+    guard let value else { return true }
+    return !value.isEmpty && value.utf8.count <= maximumBytes
+      && value.unicodeScalars.allSatisfy { !CharacterSet.controlCharacters.contains($0) }
+  }
+}
+
+private struct ViewerJSONStructureScanner {
+  let data: Data
+  let cancellation: ViewerSessionImportCancellation?
+  let scanProgress: (Int) -> Void
+  private let maximumDepth = 80
+  private let cancellationCheckMask = (64 * 1_024) - 1
+
+  init(
+    data: Data,
+    cancellation: ViewerSessionImportCancellation? = nil,
+    scanProgress: @escaping (Int) -> Void = { _ in }
+  ) {
+    self.data = data
+    self.cancellation = cancellation
+    self.scanProgress = scanProgress
+  }
+
+  func rootObjectMembers() throws -> [String: Range<Int>] {
+    var index = data.startIndex
+    try skipWhitespace(&index)
+    try expect(UInt8(ascii: "{"), at: &index)
+    var members: [String: Range<Int>] = [:]
+    try skipWhitespace(&index)
+    if consume(UInt8(ascii: "}"), at: &index) {
+      throw ViewerStoreError.invalidValue
+    }
+    while true {
+      try skipWhitespace(&index)
+      let keyRange = try scanString(at: &index)
+      guard keyRange.count <= 128 else { throw ViewerStoreError.invalidValue }
+      let key: String
+      do {
+        key = try JSONDecoder().decode(String.self, from: Data(data[keyRange]))
+      } catch {
+        throw ViewerStoreError.invalidValue
+      }
+      guard members[key] == nil else { throw ViewerStoreError.invalidValue }
+      try skipWhitespace(&index)
+      try expect(UInt8(ascii: ":"), at: &index)
+      try skipWhitespace(&index)
+      let valueStart = index
+      try scanValue(at: &index)
+      let valueRange = valueStart..<index
+      switch key {
+      case "schemaVersion":
+        guard valueRange.count <= 32 else { throw ViewerStoreError.invalidValue }
+      case "scope":
+        guard valueRange.count <= 64 else { throw ViewerStoreError.invalidValue }
+      case "disclosure":
+        guard valueRange.count <= 8 * 1_024 else { throw ViewerStoreError.invalidValue }
+      case "session":
+        guard valueRange.count <= 64 * 1_024 else { throw ViewerStoreError.invalidValue }
+      default:
+        break
+      }
+      members[key] = valueRange
+      try skipWhitespace(&index)
+      if consume(UInt8(ascii: "}"), at: &index) { break }
+      try expect(UInt8(ascii: ","), at: &index)
+    }
+    try skipWhitespace(&index)
+    guard index == data.endIndex else { throw ViewerStoreError.invalidValue }
+    return members
+  }
+
+  func forEachArrayElement(
+    in range: Range<Int>,
+    maximumCount: Int,
+    _ body: (Range<Int>) throws -> Void
+  ) throws {
+    var index = range.lowerBound
+    try skipWhitespace(&index, limit: range.upperBound)
+    try expect(UInt8(ascii: "["), at: &index, limit: range.upperBound)
+    try skipWhitespace(&index, limit: range.upperBound)
+    if consume(UInt8(ascii: "]"), at: &index, limit: range.upperBound) {
+      try skipWhitespace(&index, limit: range.upperBound)
+      guard index == range.upperBound else { throw ViewerStoreError.invalidValue }
+      return
+    }
+    var count = 0
+    while true {
+      guard count < maximumCount else { throw ViewerStoreError.invalidValue }
+      let start = index
+      try scanValue(at: &index, limit: range.upperBound)
+      try body(start..<index)
+      count += 1
+      try skipWhitespace(&index, limit: range.upperBound)
+      if consume(UInt8(ascii: "]"), at: &index, limit: range.upperBound) { break }
+      try expect(UInt8(ascii: ","), at: &index, limit: range.upperBound)
+      try skipWhitespace(&index, limit: range.upperBound)
+    }
+    try skipWhitespace(&index, limit: range.upperBound)
+    guard index == range.upperBound else { throw ViewerStoreError.invalidValue }
+  }
+
+  private func scanValue(at index: inout Int, limit: Int? = nil) throws {
+    let limit = limit ?? data.endIndex
+    guard index < limit else { throw ViewerStoreError.invalidValue }
+    switch data[index] {
+    case UInt8(ascii: "\""):
+      _ = try scanString(at: &index, limit: limit)
+    case UInt8(ascii: "{"), UInt8(ascii: "["):
+      try scanCompound(at: &index, limit: limit)
+    default:
+      let start = index
+      while index < limit {
+        try checkCancellation(at: index)
+        let byte = data[index]
+        if byte == UInt8(ascii: ",") || byte == UInt8(ascii: "]")
+          || byte == UInt8(ascii: "}") || Self.isWhitespace(byte)
+        {
+          break
+        }
+        index += 1
+      }
+      guard index > start else { throw ViewerStoreError.invalidValue }
+    }
+  }
+
+  private func scanCompound(at index: inout Int, limit: Int) throws {
+    var stack: [UInt8] = []
+    while index < limit {
+      try checkCancellation(at: index)
+      let byte = data[index]
+      if byte == UInt8(ascii: "\"") {
+        _ = try scanString(at: &index, limit: limit)
+        continue
+      }
+      index += 1
+      if byte == UInt8(ascii: "{") {
+        stack.append(UInt8(ascii: "}"))
+      } else if byte == UInt8(ascii: "[") {
+        stack.append(UInt8(ascii: "]"))
+      } else if byte == UInt8(ascii: "}") || byte == UInt8(ascii: "]") {
+        guard stack.last == byte else { throw ViewerStoreError.invalidValue }
+        stack.removeLast()
+        if stack.isEmpty { return }
+      }
+      guard stack.count <= maximumDepth else { throw ViewerStoreError.invalidValue }
+    }
+    throw ViewerStoreError.invalidValue
+  }
+
+  private func scanString(at index: inout Int, limit: Int? = nil) throws -> Range<Int> {
+    let limit = limit ?? data.endIndex
+    let start = index
+    try expect(UInt8(ascii: "\""), at: &index, limit: limit)
+    var escaped = false
+    while index < limit {
+      try checkCancellation(at: index)
+      let byte = data[index]
+      index += 1
+      if escaped {
+        escaped = false
+      } else if byte == UInt8(ascii: "\\") {
+        escaped = true
+      } else if byte == UInt8(ascii: "\"") {
+        return start..<index
+      } else if byte < 0x20 {
+        throw ViewerStoreError.invalidValue
+      }
+    }
+    throw ViewerStoreError.invalidValue
+  }
+
+  private func skipWhitespace(_ index: inout Int, limit: Int? = nil) throws {
+    let limit = limit ?? data.endIndex
+    while index < limit, Self.isWhitespace(data[index]) {
+      try checkCancellation(at: index)
+      index += 1
+    }
+  }
+
+  private func checkCancellation(at index: Int) throws {
+    if index & cancellationCheckMask == 0 {
+      scanProgress(index)
+      try cancellation?.check()
+    }
+  }
+
+  private func expect(_ byte: UInt8, at index: inout Int, limit: Int? = nil) throws {
+    guard consume(byte, at: &index, limit: limit) else { throw ViewerStoreError.invalidValue }
+  }
+
+  private func consume(_ byte: UInt8, at index: inout Int, limit: Int? = nil) -> Bool {
+    let limit = limit ?? data.endIndex
+    guard index < limit, data[index] == byte else { return false }
+    index += 1
+    return true
+  }
+
+  private static func isWhitespace(_ byte: UInt8) -> Bool {
+    byte == 0x20 || byte == 0x09 || byte == 0x0a || byte == 0x0d
+  }
+}
 
 struct ViewerExportSnapshot: Equatable, Sendable {
   let eventUpperRowID: Int64
@@ -32,12 +714,22 @@ struct ViewerExportDisclosure: Codable, Equatable, Sendable {
   static let current = ViewerExportDisclosure(
     format: "NearWire JSON Export",
     version: 1,
-    warning: "Event content can contain secrets, personal information, or identifying data.",
+    warning:
+      "Session metadata and notes, annotations and diagnostic gaps, Event metadata and content, and peer-provided App display name, identifier, and version are exported verbatim and can contain identifying or sensitive data.",
     aliasesArePseudonymsNotRedaction: true,
     unencrypted: true,
     outsideViewerQuotaAndRetention: true,
     mayBeSyncedOrBackedUpByDestinationProvider: true
   )
+
+  var isSupportedForImport: Bool {
+    format == Self.current.format
+      && version == Self.current.version
+      && aliasesArePseudonymsNotRedaction
+      && unencrypted
+      && outsideViewerQuotaAndRetention
+      && mayBeSyncedOrBackedUpByDestinationProvider
+  }
 }
 
 enum ViewerExportFilePhase: CaseIterable, Equatable, Sendable {
@@ -139,7 +831,24 @@ final class ViewerStoreExportService: @unchecked Sendable {
   private let pool: ViewerSQLitePool
   private let leases: ViewerStoreLeaseRegistry
   private let filePhases: ViewerExportFilePhaseObserver
+  private let maximumCompleteFileBytes: Int64
   private let cancellation = ViewerExportCancellation()
+
+  private final class ByteBudget {
+    private let maximumBytes: Int64
+    private var writtenBytes: Int64 = 0
+
+    init(maximumBytes: Int64) { self.maximumBytes = maximumBytes }
+
+    func reserve(_ count: Int) throws {
+      guard count >= 0 else { throw ViewerStoreError.invalidValue }
+      let (next, overflow) = writtenBytes.addingReportingOverflow(Int64(count))
+      guard !overflow, next <= maximumBytes else {
+        throw ViewerStoreError.workLimitExceeded
+      }
+      writtenBytes = next
+    }
+  }
 
   private struct SecureTemporary {
     let parentDescriptor: Int32
@@ -152,11 +861,14 @@ final class ViewerStoreExportService: @unchecked Sendable {
   init(
     pool: ViewerSQLitePool,
     leases: ViewerStoreLeaseRegistry,
-    filePhases: ViewerExportFilePhaseObserver = .live
+    filePhases: ViewerExportFilePhaseObserver = .live,
+    maximumCompleteFileBytes: Int64 = ViewerSessionTransferLimits.maximumFileBytes
   ) {
+    precondition((1...ViewerSessionTransferLimits.maximumFileBytes).contains(maximumCompleteFileBytes))
     self.pool = pool
     self.leases = leases
     self.filePhases = filePhases
+    self.maximumCompleteFileBytes = maximumCompleteFileBytes
   }
 
   func preflight(recordingID: Int64, operationID: UUID? = nil) throws -> (
@@ -343,6 +1055,13 @@ final class ViewerStoreExportService: @unchecked Sendable {
       try fixedSnapshot
       ?? captureSnapshot(querySnapshot: querySnapshot, operationID: operationID)
     try validate(lease: lease, generation: generation)
+    if compiledQuery == nil {
+      try validateCompleteSessionBounds(
+        recordingID: recordingID,
+        snapshot: snapshot,
+        operationID: operationID
+      )
+    }
     let temporary = try secureTemporarySibling(for: destination)
     var committed = false
     defer {
@@ -372,6 +1091,15 @@ final class ViewerStoreExportService: @unchecked Sendable {
         handle: handle,
         operationID: operationID
       )
+      if compiledQuery == nil {
+        var status = stat()
+        guard fstat(temporary.fileDescriptor, &status) == 0 else {
+          throw ViewerStoreError.invalidPath
+        }
+        guard status.st_size <= maximumCompleteFileBytes else {
+          throw ViewerStoreError.workLimitExceeded
+        }
+      }
       try filePhases.reach(.afterWrite)
       try validate(lease: lease, generation: generation)
       try filePhases.reach(.beforeFileSync)
@@ -424,17 +1152,27 @@ final class ViewerStoreExportService: @unchecked Sendable {
     operationID: UUID?
   ) throws {
     let disclosure = try ViewerCanonicalJSON.encode(ViewerExportDisclosure.current)
-    try write(Data("{\"schemaVersion\":1,\"disclosure\":".utf8), to: handle, generation: generation)
-    try write(disclosure, to: handle, generation: generation)
-    try write(Data(",\"session\":".utf8), to: handle, generation: generation)
+    let scope = compiledQuery == nil ? "completeSession" : "filteredResult"
+    let byteBudget = compiledQuery == nil ? ByteBudget(maximumBytes: maximumCompleteFileBytes) : nil
+    try write(
+      Data("{\"schemaVersion\":1,\"scope\":\"\(scope)\",\"disclosure\":".utf8),
+      to: handle,
+      generation: generation,
+      byteBudget: byteBudget
+    )
+    try write(disclosure, to: handle, generation: generation, byteBudget: byteBudget)
+    try write(
+      Data(",\"session\":".utf8), to: handle, generation: generation, byteBudget: byteBudget)
     try writeSession(
       recordingID: recordingID, snapshot: snapshot, handle: handle, generation: generation,
-      operationID: operationID)
-    try write(Data(",\"devices\":[".utf8), to: handle, generation: generation)
+      operationID: operationID, byteBudget: byteBudget)
+    try write(
+      Data(",\"devices\":[".utf8), to: handle, generation: generation, byteBudget: byteBudget)
     try writeDevices(
       recordingID: recordingID, snapshot: snapshot, handle: handle, lease: lease,
-      generation: generation, operationID: operationID)
-    try write(Data("],\"events\":[".utf8), to: handle, generation: generation)
+      generation: generation, operationID: operationID, byteBudget: byteBudget)
+    try write(
+      Data("],\"events\":[".utf8), to: handle, generation: generation, byteBudget: byteBudget)
     try writeEvents(
       recordingID: recordingID,
       snapshot: snapshot,
@@ -443,17 +1181,21 @@ final class ViewerStoreExportService: @unchecked Sendable {
       handle: handle,
       lease: lease,
       generation: generation,
-      operationID: operationID
+      operationID: operationID,
+      byteBudget: byteBudget
     )
-    try write(Data("],\"gaps\":[".utf8), to: handle, generation: generation)
+    try write(
+      Data("],\"gaps\":[".utf8), to: handle, generation: generation, byteBudget: byteBudget)
     try writeGaps(
       recordingID: recordingID, snapshot: snapshot, handle: handle, lease: lease,
-      generation: generation, operationID: operationID)
-    try write(Data("],\"annotations\":[".utf8), to: handle, generation: generation)
+      generation: generation, operationID: operationID, byteBudget: byteBudget)
+    try write(
+      Data("],\"annotations\":[".utf8), to: handle, generation: generation,
+      byteBudget: byteBudget)
     try writeAnnotations(
       recordingID: recordingID, snapshot: snapshot, handle: handle, lease: lease,
-      generation: generation, operationID: operationID)
-    try write(Data("]}".utf8), to: handle, generation: generation)
+      generation: generation, operationID: operationID, byteBudget: byteBudget)
+    try write(Data("]}".utf8), to: handle, generation: generation, byteBudget: byteBudget)
   }
 
   private func writeDevices(
@@ -462,7 +1204,8 @@ final class ViewerStoreExportService: @unchecked Sendable {
     handle: FileHandle,
     lease: ViewerStoreLeaseRegistry.Lease,
     generation: UInt64,
-    operationID: UUID?
+    operationID: UUID?,
+    byteBudget: ByteBudget?
   ) throws {
     var cursor: Int64 = 0
     var first = true
@@ -504,8 +1247,10 @@ final class ViewerStoreExportService: @unchecked Sendable {
       }
       guard !rows.isEmpty else { break }
       for row in rows {
-        if !first { try write(Data(",".utf8), to: handle, generation: generation) }
-        try write(row, to: handle, generation: generation)
+        if !first {
+          try write(Data(",".utf8), to: handle, generation: generation, byteBudget: byteBudget)
+        }
+        try write(row, to: handle, generation: generation, byteBudget: byteBudget)
         first = false
       }
     }
@@ -519,7 +1264,8 @@ final class ViewerStoreExportService: @unchecked Sendable {
     handle: FileHandle,
     lease: ViewerStoreLeaseRegistry.Lease,
     generation: UInt64,
-    operationID: UUID?
+    operationID: UUID?,
+    byteBudget: ByteBudget?
   ) throws {
     var cursorMonotonic: Int64 = -1
     var cursorRowID: Int64 = 0
@@ -603,8 +1349,10 @@ final class ViewerStoreExportService: @unchecked Sendable {
       }
       guard !rows.isEmpty else { break }
       for (rowID, monotonic, row) in rows {
-        if !first { try write(Data(",".utf8), to: handle, generation: generation) }
-        try write(row, to: handle, generation: generation)
+        if !first {
+          try write(Data(",".utf8), to: handle, generation: generation, byteBudget: byteBudget)
+        }
+        try write(row, to: handle, generation: generation, byteBudget: byteBudget)
         first = false
         cursorRowID = rowID
         cursorMonotonic = monotonic
@@ -617,7 +1365,8 @@ final class ViewerStoreExportService: @unchecked Sendable {
     snapshot: ViewerExportSnapshot,
     handle: FileHandle,
     generation: UInt64,
-    operationID: UUID?
+    operationID: UUID?,
+    byteBudget: ByteBudget?
   ) throws {
     let row: Data = try pool.exportReader.run(operationID: operationID, budget: .export()) {
       database in
@@ -640,7 +1389,7 @@ final class ViewerStoreExportService: @unchecked Sendable {
       if !statement.isNull(at: 3) { object["note"] = statement.string(at: 3) }
       return try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
     }
-    try write(row, to: handle, generation: generation)
+    try write(row, to: handle, generation: generation, byteBudget: byteBudget)
   }
 
   private func writeGaps(
@@ -649,7 +1398,8 @@ final class ViewerStoreExportService: @unchecked Sendable {
     handle: FileHandle,
     lease: ViewerStoreLeaseRegistry.Lease,
     generation: UInt64,
-    operationID: UUID?
+    operationID: UUID?,
+    byteBudget: ByteBudget?
   ) throws {
     var cursor: Int64 = 0
     var first = true
@@ -696,8 +1446,10 @@ final class ViewerStoreExportService: @unchecked Sendable {
       }
       guard !rows.isEmpty else { break }
       for (rowID, row) in rows {
-        if !first { try write(Data(",".utf8), to: handle, generation: generation) }
-        try write(row, to: handle, generation: generation)
+        if !first {
+          try write(Data(",".utf8), to: handle, generation: generation, byteBudget: byteBudget)
+        }
+        try write(row, to: handle, generation: generation, byteBudget: byteBudget)
         first = false
         cursor = rowID
       }
@@ -710,7 +1462,8 @@ final class ViewerStoreExportService: @unchecked Sendable {
     handle: FileHandle,
     lease: ViewerStoreLeaseRegistry.Lease,
     generation: UInt64,
-    operationID: UUID?
+    operationID: UUID?,
+    byteBudget: ByteBudget?
   ) throws {
     var cursor: Int64 = 0
     var first = true
@@ -746,8 +1499,10 @@ final class ViewerStoreExportService: @unchecked Sendable {
       }
       guard !rows.isEmpty else { break }
       for (rowID, row) in rows {
-        if !first { try write(Data(",".utf8), to: handle, generation: generation) }
-        try write(row, to: handle, generation: generation)
+        if !first {
+          try write(Data(",".utf8), to: handle, generation: generation, byteBudget: byteBudget)
+        }
+        try write(row, to: handle, generation: generation, byteBudget: byteBudget)
         first = false
         cursor = rowID
       }
@@ -792,6 +1547,38 @@ final class ViewerStoreExportService: @unchecked Sendable {
         annotationUpperRowID: try maximum("AnnotationVersions", database: database)
       )
     }
+  }
+
+  private func validateCompleteSessionBounds(
+    recordingID: Int64,
+    snapshot: ViewerExportSnapshot,
+    operationID: UUID?
+  ) throws {
+    let counts = try pool.exportReader.run(operationID: operationID, budget: .export()) {
+      database -> (Int64, Int64, Int64, Int64) in
+      func count(_ table: String, upperRowID: Int64) throws -> Int64 {
+        let statement = try ViewerSQLiteStatement(
+          database: database,
+          sql: "SELECT COUNT(*) FROM \(table) WHERE recordingID=?1 AND rowID<=?2"
+        )
+        try statement.bind(recordingID, at: 1)
+        try statement.bind(upperRowID, at: 2)
+        guard try statement.step() else { throw ViewerStoreError.corruptStore }
+        return statement.int64(at: 0)
+      }
+      return (
+        try count("DeviceSessions", upperRowID: snapshot.deviceSessionUpperRowID),
+        try count("Events", upperRowID: snapshot.eventUpperRowID),
+        try count("GapVersions", upperRowID: snapshot.gapUpperRowID),
+        try count("AnnotationVersions", upperRowID: snapshot.annotationUpperRowID)
+      )
+    }
+    try ViewerSessionTransferLimits.validateCounts(
+      deviceCount: counts.0,
+      eventCount: counts.1,
+      gapCount: counts.2,
+      annotationCount: counts.3
+    )
   }
 
   private func maximum(_ table: String, database: OpaquePointer) throws -> Int64 {
@@ -967,8 +1754,10 @@ final class ViewerStoreExportService: @unchecked Sendable {
   private func write(
     _ data: Data,
     to handle: FileHandle,
-    generation: UInt64
+    generation: UInt64,
+    byteBudget: ByteBudget?
   ) throws {
+    try byteBudget?.reserve(data.count)
     var offset = 0
     while offset < data.count {
       try cancellation.check(generation)

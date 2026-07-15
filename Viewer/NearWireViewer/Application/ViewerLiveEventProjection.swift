@@ -593,7 +593,7 @@ final class ViewerLiveEventWindow: ViewerLiveObservationProviding, @unchecked Se
   ) {
     var shouldSchedule = false
     ingressLock.lock()
-    if !cleared {
+    if !cleared, authority[key] != nil {
       if pendingDispositions[key] != nil
         || pendingDispositions.count < ViewerLiveProjectionLimits.retainedCount
       {
@@ -672,7 +672,7 @@ final class ViewerLiveEventWindow: ViewerLiveObservationProviding, @unchecked Se
   ) {
     var shouldSchedule = false
     ingressLock.lock()
-    if !cleared {
+    if !cleared, authority[key]?.observationID == observationID {
       if pendingStoreOutcomes.count
         < ViewerLiveProjectionLimits.retainedCount + ViewerLiveProjectionLimits.ingressCount
       {
@@ -720,6 +720,64 @@ final class ViewerLiveEventWindow: ViewerLiveObservationProviding, @unchecked Se
     if !paused { request = makeWakeRequestLocked() }
     refreshLock.unlock()
     if let request { scheduleWake(token: request.0, delay: request.1) }
+  }
+
+  func clearCurrentSession() {
+    let completion = DispatchGroup()
+    completion.enter()
+    var deferred: [ViewerLiveIngressEntry] = []
+
+    ingressLock.lock()
+    while ingressCount > 0 {
+      if let entry = ingress[ingressHead] { deferred.append(entry) }
+      ingress[ingressHead] = nil
+      ingressHead = (ingressHead + 1) % ingress.count
+      ingressCount -= 1
+    }
+    ingressBytes = 0
+    authority.removeAll(keepingCapacity: true)
+    pendingStoreOutcomes.removeAll(keepingCapacity: true)
+    pendingDispositions.removeAll(keepingCapacity: true)
+    pendingDropCounts.removeAll(keepingCapacity: true)
+    pendingConflictKeys.removeAll(keepingCapacity: true)
+    pendingIngressOverflowCount = 0
+    pendingDiagnosticLossCount = 0
+    projectionQueue.async { [self] in
+      let removed = window.removeAll()
+      for key in Array(sessions.keys) {
+        sessions[key]?.dropCounts.removeAll(keepingCapacity: true)
+      }
+      conflictMarkers.removeAll()
+      ingressOverflowCount = 0
+      windowOverflowCount = 0
+      diagnosticLossCount = 0
+      storeUnavailableCount = 0
+      storeRecoveryCount = 0
+      performanceSliceRevision = 0
+      publishSnapshot()
+      withExtendedLifetime(removed) {}
+      completion.leave()
+    }
+    ingressLock.unlock()
+
+    for entry in deferred where entry.kind == .deferredDuplicate {
+      entry.deferredDecision?(.sealed)
+    }
+    withExtendedLifetime(deferred) {}
+    completion.wait()
+  }
+
+  func flushIngressForWorkspaceMutation() {
+    projectionQueue.sync {
+      ingressLock.lock()
+      guard !cleared, !ingestionSealed else {
+        ingressLock.unlock()
+        return
+      }
+      let work = takePendingWorkLocked()
+      ingressLock.unlock()
+      if applyPendingWork(work) { publishSnapshot() }
+    }
   }
 
   func sealPresentation() -> Task<Void, Never> {

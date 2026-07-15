@@ -223,6 +223,10 @@ final class ViewerCleanupReceipt: @unchecked Sendable, CustomReflectable,
     }
   }
 
+  func waitForCompletion() async {
+    await cleanup.value
+  }
+
   var description: String { "ViewerCleanupReceipt(redacted)" }
   var debugDescription: String { description }
   var customMirror: Mirror { Mirror(self, children: [:], displayStyle: .class) }
@@ -1039,6 +1043,29 @@ final class ViewerPlaceholderHandoffOwner: ViewerAdmissionHandoffOwning, @unchec
   var customMirror: Mirror { Mirror(self, children: [:], displayStyle: .class) }
 }
 
+final class ViewerAdmissionWorkspaceMutationLease: @unchecked Sendable {
+  private let lock = NSLock()
+  private var releaseOperation: (@Sendable () -> Void)?
+
+  fileprivate init(release: @escaping @Sendable () -> Void) {
+    releaseOperation = release
+  }
+
+  static func unmanagedForTesting() -> ViewerAdmissionWorkspaceMutationLease {
+    ViewerAdmissionWorkspaceMutationLease(release: {})
+  }
+
+  func release() {
+    lock.lock()
+    let operation = releaseOperation
+    releaseOperation = nil
+    lock.unlock()
+    operation?()
+  }
+
+  deinit { release() }
+}
+
 final class ViewerAdmissionManager: @unchecked Sendable, CustomReflectable,
   CustomStringConvertible, CustomDebugStringConvertible
 {
@@ -1091,6 +1118,8 @@ final class ViewerAdmissionManager: @unchecked Sendable, CustomReflectable,
   private var requiresApproval = false
   private var paused = false
   private var shutdown = false
+  private var workspaceMutationID: UUID?
+  private var handoffTransferCount = 0
   private var stopReceipt: ViewerCleanupReceipt?
 
   init(
@@ -1136,7 +1165,8 @@ final class ViewerAdmissionManager: @unchecked Sendable, CustomReflectable,
     let attemptID = UUID()
     let attempt: Attempt
     lock.lock()
-    guard !shutdown, !paused, activeGenerations.contains(generation),
+    guard !shutdown, !paused, workspaceMutationID == nil,
+      activeGenerations.contains(generation),
       let reservation = budget.reserve()
     else {
       lock.unlock()
@@ -1228,6 +1258,20 @@ final class ViewerAdmissionManager: @unchecked Sendable, CustomReflectable,
     complete(summaryID: summaryID, handoff: false)
   }
 
+  func claimWorkspaceMutation() -> ViewerAdmissionWorkspaceMutationLease? {
+    let id = UUID()
+    lock.lock()
+    guard !shutdown, workspaceMutationID == nil, attempts.isEmpty, handoffTransferCount == 0 else {
+      lock.unlock()
+      return nil
+    }
+    workspaceMutationID = id
+    lock.unlock()
+    return ViewerAdmissionWorkspaceMutationLease { [weak self] in
+      self?.releaseWorkspaceMutation(id: id)
+    }
+  }
+
   func setPaused(_ value: Bool) {
     lock.lock()
     guard paused != value else {
@@ -1294,8 +1338,10 @@ final class ViewerAdmissionManager: @unchecked Sendable, CustomReflectable,
       return
     }
     attempts.removeValue(forKey: attemptID)
+    handoffTransferCount += 1
     lock.unlock()
     transfer(attempt)
+    completeHandoffTransfer()
   }
 
   private func terminal(attemptID: UUID) {
@@ -1329,10 +1375,12 @@ final class ViewerAdmissionManager: @unchecked Sendable, CustomReflectable,
       return
     }
     attempts.removeValue(forKey: entry.key)
+    if handoff { handoffTransferCount += 1 }
     let pending = pendingSummariesLocked()
     lock.unlock()
     if handoff {
       transfer(entry.value)
+      completeHandoffTransfer()
     } else {
       finish([entry.value])
     }
@@ -1377,6 +1425,19 @@ final class ViewerAdmissionManager: @unchecked Sendable, CustomReflectable,
     } else {
       attempt.cleanup.beginCoreCleanup(attempt.core, cancel: true)
     }
+  }
+
+  private func completeHandoffTransfer() {
+    lock.lock()
+    precondition(handoffTransferCount > 0)
+    handoffTransferCount -= 1
+    lock.unlock()
+  }
+
+  private func releaseWorkspaceMutation(id: UUID) {
+    lock.lock()
+    if workspaceMutationID == id { workspaceMutationID = nil }
+    lock.unlock()
   }
 
   var description: String { "ViewerAdmissionManager(redacted)" }

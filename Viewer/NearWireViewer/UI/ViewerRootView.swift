@@ -1,7 +1,9 @@
+import Combine
 import SwiftUI
+import UniformTypeIdentifiers
 
 enum ViewerWorkspaceRegion: String, CaseIterable, Equatable, Sendable {
-  case sourceAndDevices
+  case devices
   case eventTimeline
   case eventInspector
   case performanceDashboard
@@ -11,43 +13,153 @@ enum ViewerWorkspaceRegion: String, CaseIterable, Equatable, Sendable {
 enum ViewerWorkspaceLayout {
   static let regions = ViewerWorkspaceRegion.allCases
   static let minimumWindowWidth: CGFloat = 1_000
-  static let minimumWindowHeight: CGFloat = 640
-  static let sourceMinimumWidth: CGFloat = 220
-  static let sourceIdealWidth: CGFloat = 260
-  static let sourceMaximumWidth: CGFloat = 360
+  static let minimumWindowHeight: CGFloat = 720
   static let timelineMinimumWidth: CGFloat = 340
   static let timelineIdealWidth: CGFloat = 500
   static let inspectorMinimumWidth: CGFloat = 280
   static let inspectorIdealWidth: CGFloat = 360
-  static let composerMinimumHeight: CGFloat = 240
-  static let composerIdealHeight: CGFloat = 300
-  static let composerMaximumHeight: CGFloat = 460
+  static let analysisMinimumHeight: CGFloat = 260
+  static let composerMinimumHeight: CGFloat = 180
+  static let composerContentMinimumHeight: CGFloat = 240
+  static let composerIdealHeight: CGFloat = 240
+  static let composerMaximumHeight: CGFloat = 360
+}
+
+enum ViewerWorkspaceLayoutProbeKind: Equatable, Sendable {
+  case analysis
+  case timelineToolbar
+  case composer
+}
+
+final class ViewerWorkspaceLayoutProbeView: NSView {
+  var kind: ViewerWorkspaceLayoutProbeKind
+
+  init(kind: ViewerWorkspaceLayoutProbeKind) {
+    self.kind = kind
+    super.init(frame: .zero)
+  }
+
+  @available(*, unavailable)
+  required init?(coder: NSCoder) { nil }
+
+  override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
+struct ViewerWorkspaceLayoutProbe: NSViewRepresentable {
+  let kind: ViewerWorkspaceLayoutProbeKind
+
+  func makeNSView(context: Context) -> ViewerWorkspaceLayoutProbeView {
+    ViewerWorkspaceLayoutProbeView(kind: kind)
+  }
+
+  func updateNSView(_ nsView: ViewerWorkspaceLayoutProbeView, context: Context) {
+    nsView.kind = kind
+  }
+}
+
+struct ViewerWorkspaceVisibility: Equatable, Sendable {
+  var timeline = true
+  var inspector = true
+  var composer = true
+}
+
+private struct ViewerRootPresentationSignature: Equatable {
+  struct Session: Equatable {
+    let route: ViewerLogicalRoute
+    let connectionID: UUID?
+    let state: ViewerSessionState
+  }
+
+  let status: ViewerApplicationModel.Status
+  let requiresApproval: Bool
+  let selectedRoute: ViewerLogicalRoute?
+  let explorerIdentity: ObjectIdentifier?
+  let analysisIdentity: ObjectIdentifier?
+  let composerIdentity: ObjectIdentifier?
+  let sessions: [Session]
+
+  @MainActor
+  static func make(_ model: ViewerApplicationModel) -> Self {
+    Self(
+      status: model.status,
+      requiresApproval: model.requiresApproval,
+      selectedRoute: model.selectedRoute,
+      explorerIdentity: model.explorerController.map(ObjectIdentifier.init),
+      analysisIdentity: model.analysisCoordinator.map(ObjectIdentifier.init),
+      composerIdentity: model.composerController.map(ObjectIdentifier.init),
+      sessions: model.sessions.map {
+        Session(route: $0.route, connectionID: $0.connectionID, state: $0.state)
+      }
+    )
+  }
+}
+
+@MainActor
+private final class ViewerRootPresentationObserver: ObservableObject {
+  @Published private(set) var revision: UInt64 = 0
+  private weak var model: ViewerApplicationModel?
+  private var signature: ViewerRootPresentationSignature
+  private var cancellables: Set<AnyCancellable> = []
+  private var refreshScheduled = false
+
+  init(model: ViewerApplicationModel) {
+    self.model = model
+    signature = .make(model)
+    let publishers: [AnyPublisher<Void, Never>] = [
+      model.$status.map { _ in () }.eraseToAnyPublisher(),
+      model.$requiresApproval.map { _ in () }.eraseToAnyPublisher(),
+      model.$selectedRoute.map { _ in () }.eraseToAnyPublisher(),
+      model.$explorerController.map { _ in () }.eraseToAnyPublisher(),
+      model.$analysisCoordinator.map { _ in () }.eraseToAnyPublisher(),
+      model.$composerController.map { _ in () }.eraseToAnyPublisher(),
+      model.$sessions.map { _ in () }.eraseToAnyPublisher(),
+    ]
+    Publishers.MergeMany(publishers)
+      .sink { [weak self] in self?.scheduleRefresh() }
+      .store(in: &cancellables)
+  }
+
+  private func scheduleRefresh() {
+    guard !refreshScheduled else { return }
+    refreshScheduled = true
+    Task { @MainActor [weak self] in
+      await Task.yield()
+      guard let self else { return }
+      self.refreshScheduled = false
+      guard let model = self.model else { return }
+      let next = ViewerRootPresentationSignature.make(model)
+      guard next != self.signature else { return }
+      self.signature = next
+      self.revision &+= 1
+    }
+  }
 }
 
 struct ViewerRootView: View {
-  @ObservedObject var model: ViewerApplicationModel
+  let model: ViewerApplicationModel
+  @StateObject private var presentationObserver: ViewerRootPresentationObserver
   @State private var showsDeviceDetails = false
+  @State private var focusedDeviceID: UUID?
+  @State private var workspaceVisibility = ViewerWorkspaceVisibility()
+
+  init(model: ViewerApplicationModel) {
+    self.model = model
+    _presentationObserver = StateObject(
+      wrappedValue: ViewerRootPresentationObserver(model: model)
+    )
+  }
 
   var body: some View {
+    let _ = presentationObserver.revision
     VStack(spacing: 0) {
       pairingHeader
       Divider()
-      HSplitView {
-        sourceAndDeviceSidebar
-          .frame(
-            minWidth: ViewerWorkspaceLayout.sourceMinimumWidth,
-            idealWidth: ViewerWorkspaceLayout.sourceIdealWidth,
-            maxWidth: ViewerWorkspaceLayout.sourceMaximumWidth
-          )
-          .accessibilityIdentifier("nearwire.workspace.source-devices")
-        analysisWorkspace
-      }
+      deviceStrip
+      Divider()
+      analysisWorkspace
     }
     .sheet(isPresented: $showsDeviceDetails) {
       deviceDetailsSheet
-    }
-    .onChange(of: model.selectedRoute) { route in
-      if route == nil { showsDeviceDetails = false }
     }
   }
 
@@ -59,6 +171,8 @@ struct ViewerRootView: View {
           statusContent
         }
         Spacer()
+        workspaceVisibilityControls
+        Divider().frame(height: 24)
         Button("Copy") { model.copyPairingCode() }
           .disabled(pairingCode == nil)
           .accessibilityLabel("Copy pairing code")
@@ -76,11 +190,28 @@ struct ViewerRootView: View {
         "The pairing code and stable vid are visible to nearby Bonjour browsers. They are not secrets or passwords."
       )
       .font(.caption).foregroundStyle(.secondary)
-      Toggle("Require approval for new devices", isOn: $model.requiresApproval)
+      Toggle(
+        "Require approval for new devices",
+        isOn: Binding(
+          get: { model.requiresApproval },
+          set: { model.requiresApproval = $0 }
+        )
+      )
         .accessibilityHint("New devices wait for explicit acceptance before session handoff.")
-      ViewerStorageSettings(model: model)
     }
     .padding(20)
+  }
+
+  @ViewBuilder
+  private var workspaceVisibilityControls: some View {
+    if let analysis = model.analysisCoordinator {
+      ViewerWorkspaceVisibilityControls(
+        analysis: analysis,
+        visibility: $workspaceVisibility
+      )
+    } else {
+      ViewerWorkspaceVisibilityControlsPlaceholder(visibility: $workspaceVisibility)
+    }
   }
 
   @ViewBuilder
@@ -117,132 +248,54 @@ struct ViewerRootView: View {
   }
 
   @ViewBuilder
-  private var sourceAndDeviceSidebar: some View {
+  private var deviceStrip: some View {
     if let explorer = model.explorerController {
-      ViewerExplorerSidebarView(
+      ViewerDevicesStrip(
         application: model,
         explorer: explorer,
+        focusedDeviceID: $focusedDeviceID,
         showsDeviceDetails: $showsDeviceDetails
       )
     } else {
-      sourceAndDevicePlaceholder
-    }
-  }
-
-  private var sourceAndDevicePlaceholder: some View {
-    VStack(alignment: .leading, spacing: 0) {
-      HStack {
-        Text("Sources & Devices").font(.headline)
-        Spacer()
-        Text("\(model.sessions.count)")
-          .font(.caption.monospacedDigit())
-          .foregroundStyle(.secondary)
-          .accessibilityLabel("\(model.sessions.count) device rows")
-      }
-      .padding(.horizontal, 14)
-      .padding(.vertical, 12)
-      Divider()
-      List(selection: $model.selectedRoute) {
-        Section("Current Source") {
-          HStack(spacing: 10) {
-            Image(systemName: liveSourceIcon)
-              .foregroundStyle(liveSourceTint)
-              .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 2) {
-              Text("Live")
-              Text(liveSourceStatus)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            }
-          }
-          .accessibilityElement(children: .combine)
-          .accessibilityLabel("Live source, \(liveSourceStatus)")
-        }
-        Section("History") {
-          Text("Recorded sessions will appear here.")
-            .font(.caption)
-            .foregroundStyle(.secondary)
-        }
-        Section("Devices") {
-          if model.sessions.isEmpty {
-            Label("No connected or recent Apps", systemImage: "iphone.slash")
-              .font(.caption)
-              .foregroundStyle(.secondary)
-          }
-          ForEach(model.sessions) { session in
-            VStack(alignment: .leading, spacing: 5) {
-              HStack {
-                Text(session.title).font(.headline)
-                Spacer()
-                Text(session.state.rawValue.capitalized)
-                  .font(.caption)
-                  .foregroundStyle(session.state == .active ? .green : .secondary)
-              }
-              Text(session.installationAlias).font(.caption).foregroundStyle(.secondary)
-              if session.downlinkCount + session.uplinkCount > 0 {
-                Label(
-                  "\(session.uplinkCount + session.downlinkCount) queued",
-                  systemImage: "tray.full"
-                )
-                .font(.caption).foregroundStyle(.orange)
-              }
-            }
-            .tag(session.route)
-            .padding(.vertical, 3)
-          }
-        }
-        if !model.pendingApps.isEmpty {
-          Section("Awaiting Approval") {
-            ForEach(model.pendingApps) { app in
-              VStack(alignment: .leading, spacing: 6) {
-                Text(app.displayName).font(.headline)
-                Text(app.installationAlias).font(.caption).foregroundStyle(.secondary)
-                Text(app.compatibilityStatus).font(.caption2).foregroundStyle(.secondary)
-                HStack {
-                  Button("Reject") { model.reject(app.id) }
-                  Button("Accept") { model.accept(app.id) }.buttonStyle(.borderedProminent)
-                }
-              }
-              .padding(.vertical, 3)
-            }
-          }
-        }
-      }
-      Divider()
-      Button {
-        showsDeviceDetails = true
-      } label: {
-        Label("Device Settings & Telemetry", systemImage: "slider.horizontal.3")
-          .frame(maxWidth: .infinity)
-      }
-      .buttonStyle(.bordered)
-      .disabled(model.selectedSession == nil)
-      .accessibilityHint(
-        "Opens nickname, rate, queue, throughput, Event counter, and disconnect controls."
-      )
-      .padding(12)
+      ViewerDevicesStripPlaceholder(sessionCount: model.sessions.count)
     }
   }
 
   private var analysisWorkspace: some View {
     VSplitView {
-      Group {
-        if let analysis = model.analysisCoordinator {
-          ViewerAnalysisWorkspacePane(
-            analysis: analysis,
-            explorer: model.explorerController
-          )
-        } else {
-          ViewerAnalysisWorkspacePlaceholder()
+      analysisContent
+        .frame(minHeight: ViewerWorkspaceLayout.analysisMinimumHeight, maxHeight: .infinity)
+        .layoutPriority(1)
+        .background(ViewerWorkspaceLayoutProbe(kind: .analysis))
+        .clipped()
+      if workspaceVisibility.composer {
+        ScrollView(.vertical) {
+          controlComposer
+            .frame(minHeight: ViewerWorkspaceLayout.composerContentMinimumHeight)
         }
+          .frame(
+            minHeight: ViewerWorkspaceLayout.composerMinimumHeight,
+            idealHeight: ViewerWorkspaceLayout.composerIdealHeight,
+            maxHeight: ViewerWorkspaceLayout.composerMaximumHeight
+          )
+          .background(ViewerWorkspaceLayoutProbe(kind: .composer))
+          .clipped()
+          .accessibilityIdentifier("nearwire.workspace.control-composer")
       }
-      controlComposer
-        .frame(
-          minHeight: ViewerWorkspaceLayout.composerMinimumHeight,
-          idealHeight: ViewerWorkspaceLayout.composerIdealHeight,
-          maxHeight: ViewerWorkspaceLayout.composerMaximumHeight
-        )
-        .accessibilityIdentifier("nearwire.workspace.control-composer")
+    }
+  }
+
+  @ViewBuilder
+  private var analysisContent: some View {
+    if let analysis = model.analysisCoordinator {
+      ViewerAnalysisWorkspacePane(
+        analysis: analysis,
+        explorer: model.explorerController,
+        showsTimeline: workspaceVisibility.timeline,
+        showsInspector: workspaceVisibility.inspector
+      )
+    } else {
+      ViewerAnalysisWorkspacePlaceholder()
     }
   }
 
@@ -274,10 +327,18 @@ struct ViewerRootView: View {
 
   @ViewBuilder
   private var deviceDetailsSheet: some View {
-    if let session = model.selectedSession {
+    if let focusedDeviceID,
+      let session = model.sessions.first(where: { $0.connectionID == focusedDeviceID })
+    {
       ViewerDeviceDetail(model: model, session: session)
         .id(session.route.storageKey)
         .frame(minWidth: 620, minHeight: 620)
+    } else if let focusedDeviceID,
+      let row = model.explorerController?.deviceRows.first(where: { $0.id == focusedDeviceID })
+    {
+      ViewerOfflineDeviceDetail(row: row)
+        .id(row.id)
+        .frame(minWidth: 520, minHeight: 420)
     } else {
       ViewerEmptyState(
         title: "Device No Longer Available",
@@ -292,36 +353,6 @@ struct ViewerRootView: View {
     model.sessions.lazy.filter { $0.state == .active }.count
   }
 
-  private var liveSourceStatus: String {
-    switch model.status {
-    case .stopped, .stopping:
-      return "No current runtime"
-    case .starting:
-      return "Starting"
-    case .failed:
-      return "Unavailable"
-    case .listening:
-      return model.storeStatus.state == .available
-        ? "Recording enabled" : "Live — not recording"
-    }
-  }
-
-  private var liveSourceIcon: String {
-    switch model.status {
-    case .listening: return "dot.radiowaves.left.and.right"
-    case .starting, .stopping: return "hourglass"
-    case .stopped, .failed: return "circle.dashed"
-    }
-  }
-
-  private var liveSourceTint: Color {
-    switch model.status {
-    case .listening: return .green
-    case .starting, .stopping: return .orange
-    case .stopped, .failed: return .secondary
-    }
-  }
-
   private var pairingCode: String? {
     guard case .listening(let code, _) = model.status else { return nil }
     return code
@@ -333,81 +364,497 @@ struct ViewerRootView: View {
   }
 }
 
-private struct ViewerStorageSettings: View {
-  @ObservedObject var model: ViewerApplicationModel
-  @State private var capacityGiB: String = ""
-  @State private var retentionDays: String = ""
-  @State private var validationMessage: String?
+private struct ViewerWorkspaceVisibilityControls: View {
+  @ObservedObject var analysis: ViewerAnalysisModeCoordinator
+  @Binding var visibility: ViewerWorkspaceVisibility
 
   var body: some View {
-    DisclosureGroup("Local storage") {
-      VStack(alignment: .leading, spacing: 10) {
-        HStack {
-          TextField("Capacity in GiB", text: $capacityGiB)
-            .frame(width: 140)
-            .accessibilityLabel("Local history capacity in GiB")
-          TextField("History retention in days", text: $retentionDays)
-            .frame(width: 190)
-            .accessibilityLabel("Local history retention in days")
-          Button("Save") {
-            validationMessage =
-              model.updateStorage(
-                capacityGiB: capacityGiB,
-                historyRetentionDays: retentionDays
-              ) ? nil : "Capacity or history retention is outside the supported range."
-          }
-          Button("Clean Up Now") { model.cleanUpStorage() }
-          Button("Retry Storage") { model.retryStorage() }
-            .disabled(model.storeStatus.state == .available)
+    HStack(spacing: 4) {
+      visibilityButton(
+        title: "Event Timeline",
+        systemImage: "rectangle.leadinghalf.inset.filled",
+        isVisible: $visibility.timeline,
+        enabled: analysis.mode == .events
+      )
+      visibilityButton(
+        title: "Event Inspector",
+        systemImage: "rectangle.trailinghalf.inset.filled",
+        isVisible: $visibility.inspector,
+        enabled: analysis.mode == .events
+      )
+      visibilityButton(
+        title: "Viewer to App Composer",
+        systemImage: "rectangle.bottomhalf.inset.filled",
+        isVisible: $visibility.composer,
+        enabled: true
+      )
+    }
+    .controlSize(.small)
+    .accessibilityElement(children: .contain)
+    .accessibilityLabel("Workspace panels")
+  }
+
+  private func visibilityButton(
+    title: String,
+    systemImage: String,
+    isVisible: Binding<Bool>,
+    enabled: Bool
+  ) -> some View {
+    Button {
+      isVisible.wrappedValue.toggle()
+    } label: {
+      ZStack(alignment: .bottomTrailing) {
+        Image(systemName: systemImage)
+          .foregroundStyle(isVisible.wrappedValue ? Color.accentColor : Color.secondary)
+        if isVisible.wrappedValue {
+          Image(systemName: "checkmark.circle.fill")
+            .font(.system(size: 8, weight: .bold))
+            .foregroundStyle(Color.accentColor)
+            .background(Color(nsColor: .windowBackgroundColor), in: Circle())
+            .offset(x: 3, y: 3)
+            .accessibilityHidden(true)
         }
-        Text(storageStatusSummary)
-          .font(.caption).foregroundStyle(.secondary)
-        Text(oldestHistorySummary)
-          .font(.caption).foregroundStyle(.secondary)
-        Text(
-          "History retention is separate from Event TTL. Deletion is logical first; secure_delete reduces remnants but does not guarantee secure erasure from storage media or backups."
+      }
+        .frame(width: 18, height: 18)
+        .padding(3)
+        .background(
+          isVisible.wrappedValue ? Color.accentColor.opacity(0.14) : Color.clear,
+          in: RoundedRectangle(cornerRadius: 4)
         )
-        .font(.caption).foregroundStyle(.secondary)
-        if let validationMessage {
-          Text(validationMessage).foregroundStyle(.red).font(.caption)
+    }
+    .buttonStyle(.bordered)
+    .disabled(!enabled)
+    .help("\(isVisible.wrappedValue ? "Hide" : "Show") \(title)")
+    .accessibilityLabel("\(isVisible.wrappedValue ? "Hide" : "Show") \(title)")
+    .accessibilityValue(isVisible.wrappedValue ? "Expanded" : "Collapsed")
+  }
+}
+
+private struct ViewerWorkspaceVisibilityControlsPlaceholder: View {
+  @Binding var visibility: ViewerWorkspaceVisibility
+
+  var body: some View {
+    HStack(spacing: 4) {
+      Image(systemName: "rectangle.leadinghalf.inset.filled")
+        .frame(width: 30, height: 24)
+      Image(systemName: "rectangle.trailinghalf.inset.filled")
+        .frame(width: 30, height: 24)
+      Button {
+        visibility.composer.toggle()
+      } label: {
+        Image(systemName: "rectangle.bottomhalf.inset.filled")
+      }
+      .help("\(visibility.composer ? "Hide" : "Show") Viewer to App Composer")
+      .accessibilityLabel(
+        "\(visibility.composer ? "Hide" : "Show") Viewer to App Composer"
+      )
+      .accessibilityValue(visibility.composer ? "Expanded" : "Collapsed")
+    }
+    .controlSize(.small)
+    .buttonStyle(.bordered)
+    .disabled(true)
+    .accessibilityLabel("Workspace panels unavailable while runtime starts")
+  }
+}
+
+private struct ViewerDevicesPresentation: Equatable {
+  struct DeviceChip: Identifiable, Equatable {
+    let id: UUID
+    let title: String
+    let subtitle: String
+    let state: String
+  }
+
+  let deviceRows: [DeviceChip]
+  let selectedDeviceIDs: Set<UUID>
+  let pendingApps: [ViewerPendingAppSummary]
+  let canExport: Bool
+  let canImport: Bool
+  let workspaceOperationState: ViewerWorkspaceOperationState
+
+  @MainActor
+  static func make(
+    application: ViewerApplicationModel,
+    explorer: ViewerEventExplorerController
+  ) -> Self {
+    let operation = explorer.workspaceOperationState
+    let operationIsRunning = operation == .clearing || operation == .importing
+    return Self(
+      deviceRows: explorer.deviceRows.map {
+        DeviceChip(id: $0.id, title: $0.title, subtitle: $0.subtitle, state: $0.state)
+      },
+      selectedDeviceIDs: explorer.selectedDeviceIDs,
+      pendingApps: application.pendingApps,
+      canExport: explorer.canManageSelectedRecording && !operationIsRunning,
+      canImport: explorer.canImportCurrentSession && application.pendingApps.isEmpty,
+      workspaceOperationState: operation
+    )
+  }
+}
+
+@MainActor
+private final class ViewerDevicesPresentationObserver: ObservableObject {
+  @Published private(set) var value: ViewerDevicesPresentation
+  private weak var application: ViewerApplicationModel?
+  private weak var explorer: ViewerEventExplorerController?
+  private var cancellables: Set<AnyCancellable> = []
+  private var refreshScheduled = false
+
+  init(application: ViewerApplicationModel, explorer: ViewerEventExplorerController) {
+    self.application = application
+    self.explorer = explorer
+    value = .make(application: application, explorer: explorer)
+    Publishers.MergeMany([
+      application.$pendingApps.map { _ in () }.eraseToAnyPublisher(),
+      application.$sessions.map { _ in () }.eraseToAnyPublisher(),
+      application.$selectedRoute.map { _ in () }.eraseToAnyPublisher(),
+      explorer.$revision.map { _ in () }.eraseToAnyPublisher(),
+    ])
+    .sink { [weak self] in self?.scheduleRefresh() }
+    .store(in: &cancellables)
+  }
+
+  private func scheduleRefresh() {
+    guard !refreshScheduled else { return }
+    refreshScheduled = true
+    Task { @MainActor [weak self] in
+      await Task.yield()
+      guard let self else { return }
+      self.refreshScheduled = false
+      guard let application = self.application, let explorer = self.explorer else { return }
+      let next = ViewerDevicesPresentation.make(application: application, explorer: explorer)
+      guard next != self.value else { return }
+      self.value = next
+    }
+  }
+}
+
+private struct ViewerDevicesStrip: View {
+  let application: ViewerApplicationModel
+  let explorer: ViewerEventExplorerController
+  @StateObject private var presentation: ViewerDevicesPresentationObserver
+  @Binding var focusedDeviceID: UUID?
+  @Binding var showsDeviceDetails: Bool
+  @State private var showsExport = false
+  @State private var showsImportDisclosure = false
+  @State private var showsImportPicker = false
+
+  init(
+    application: ViewerApplicationModel,
+    explorer: ViewerEventExplorerController,
+    focusedDeviceID: Binding<UUID?>,
+    showsDeviceDetails: Binding<Bool>
+  ) {
+    self.application = application
+    self.explorer = explorer
+    _focusedDeviceID = focusedDeviceID
+    _showsDeviceDetails = showsDeviceDetails
+    _presentation = StateObject(
+      wrappedValue: ViewerDevicesPresentationObserver(
+        application: application,
+        explorer: explorer
+      )
+    )
+  }
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 8) {
+      HStack(spacing: 10) {
+        Label("Devices", systemImage: "iphone.gen3")
+          .font(.headline)
+        Text("\(presentation.value.deviceRows.count)")
+          .font(.caption.monospacedDigit())
+          .foregroundStyle(.secondary)
+          .accessibilityLabel("\(presentation.value.deviceRows.count) devices")
+        Spacer()
+        Button {
+          if explorer.beginCurrentSessionImportSelection() {
+            showsImportDisclosure = true
+          }
+        } label: {
+          Label("Import Session", systemImage: "square.and.arrow.down")
+        }
+        .disabled(importIsDisabled)
+        .help("Replace the inactive current Session from a complete NearWire JSON export")
+        Button {
+          explorer.prepareExport(.completeRecording)
+          showsExport = true
+        } label: {
+          Label("Export Session", systemImage: "square.and.arrow.up")
+        }
+        .disabled(!presentation.value.canExport)
+        .help("Export the complete current Session as unencrypted JSON")
+        Button {
+          showsDeviceDetails = true
+        } label: {
+          Label("Device Details", systemImage: "slider.horizontal.3")
+        }
+        .disabled(!hasFocusedDevice)
+        .help("Open details for the focused Device; connected Devices also expose settings")
+      }
+
+      ScrollView(.horizontal, showsIndicators: true) {
+        HStack(spacing: 8) {
+          deviceScopeButton(
+            title: "All Devices",
+            subtitle: "Merged timeline",
+            systemImage: "rectangle.3.group",
+            selected: presentation.value.selectedDeviceIDs.isEmpty,
+            focused: false
+          ) {
+            explorer.selectAllDevices()
+          }
+          ForEach(presentation.value.deviceRows) { row in
+            deviceButton(row)
+          }
+          if presentation.value.deviceRows.isEmpty {
+            Label("Waiting for an App", systemImage: "iphone.slash")
+              .font(.caption)
+              .foregroundStyle(.secondary)
+              .padding(.horizontal, 8)
+          }
+        }
+        .padding(.vertical, 1)
+      }
+      .accessibilityLabel("Current Session Devices")
+
+      if !presentation.value.pendingApps.isEmpty {
+        Divider()
+        ScrollView(.horizontal, showsIndicators: true) {
+          HStack(spacing: 10) {
+            Text("Awaiting approval")
+              .font(.caption.weight(.semibold))
+              .foregroundStyle(.secondary)
+            ForEach(presentation.value.pendingApps) { app in
+              HStack(spacing: 8) {
+                VStack(alignment: .leading, spacing: 2) {
+                  Text(app.displayName).font(.caption.weight(.semibold))
+                  Text(app.installationAlias).font(.caption2).foregroundStyle(.secondary)
+                }
+                Button("Reject") { application.reject(app.id) }
+                  .controlSize(.small)
+                Button("Accept") { application.accept(app.id) }
+                  .controlSize(.small)
+                  .buttonStyle(.borderedProminent)
+              }
+              .padding(.horizontal, 10)
+              .padding(.vertical, 7)
+              .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+            }
+          }
         }
       }
-      .padding(.top, 8)
-      .onAppear {
-        capacityGiB = String(model.storageConfiguration.capacityBytes / 1_024 / 1_024 / 1_024)
-        retentionDays = String(model.storageConfiguration.historyRetentionDays)
-        model.refreshStoreStatus()
+      workspaceOperationStatus
+    }
+    .padding(.horizontal, 14)
+    .padding(.vertical, 10)
+    .accessibilityIdentifier("nearwire.workspace.devices")
+    .sheet(isPresented: $showsExport) {
+      ViewerExportSheet(explorer: explorer, isPresented: $showsExport)
+        .frame(minWidth: 540, minHeight: 480)
+    }
+    .alert("Replace Current Session?", isPresented: $showsImportDisclosure) {
+      Button("Cancel", role: .cancel) {
+        explorer.cancelCurrentSessionImportSelection()
+      }
+      Button("Choose JSON", role: .destructive) { showsImportPicker = true }
+    } message: {
+      Text(
+        "Import replaces all Events and offline Device rows in the current Session. Only a complete NearWire JSON export is accepted. Imported Devices remain offline and receive new local identities."
+      )
+    }
+    .fileImporter(
+      isPresented: $showsImportPicker,
+      allowedContentTypes: [.json],
+      allowsMultipleSelection: false
+    ) { result in
+      guard case .success(let urls) = result, let url = urls.first else {
+        explorer.cancelCurrentSessionImportSelection()
+        return
+      }
+      explorer.importCurrentSession(from: url)
+    }
+    .onChange(of: presentation.value.deviceRows) { rows in
+      if let focusedDeviceID, !rows.contains(where: { $0.id == focusedDeviceID }) {
+        self.focusedDeviceID = nil
+        showsDeviceDetails = false
       }
     }
   }
 
-  private var oldestHistorySummary: String {
-    guard let milliseconds = model.storeStatus.oldestHistoryMilliseconds else {
-      return "Oldest retained history: none · Estimated retention: unavailable"
+  private var importIsDisabled: Bool {
+    !presentation.value.canImport
+  }
+
+  private func deviceButton(_ row: ViewerDevicesPresentation.DeviceChip) -> some View {
+    deviceScopeButton(
+      title: row.title,
+      subtitle: "\(row.subtitle) · \(row.state.capitalized)",
+      systemImage: row.state == "active" ? "iphone.radiowaves.left.and.right" : "iphone",
+      selected: presentation.value.selectedDeviceIDs.contains(row.id),
+      focused: focusedDeviceID == row.id
+    ) {
+      explorer.toggleDevice(row.id)
+      focusedDeviceID = row.id
+      if let session = application.sessions.first(where: { $0.connectionID == row.id }) {
+        application.selectedRoute = session.route
+      } else {
+        application.selectedRoute = nil
+      }
     }
-    let date = Date(timeIntervalSince1970: TimeInterval(milliseconds) / 1_000)
-    let duration =
-      model.storeStatus.estimatedRetainedDurationMilliseconds
-      .map { String(format: "%.1f days", Double($0) / 86_400_000) }
-      ?? "unavailable"
-    return
-      "Oldest retained Event: \(date.formatted(date: .abbreviated, time: .shortened)) · Estimated retained duration: \(duration)"
   }
 
-  private var storageStatusSummary: String {
-    let state = model.storeStatus.migration?.message ?? model.storeStatus.state.rawValue
-    return
-      "State: \(state) · Last cleanup: \(model.storeStatus.lastCleanupCategory.rawValue) · Logical quota: \(format(model.storeStatus.logicalQuotaBytes)) / \(format(model.storeStatus.capacityBytes)) · Allocated files: \(format(model.storeStatus.allocatedFootprintBytes)) · Pinned estimate: \(format(model.storeStatus.pinnedQuotaBytes))"
+  @ViewBuilder
+  private var workspaceOperationStatus: some View {
+    switch presentation.value.workspaceOperationState {
+    case .idle:
+      EmptyView()
+    case .selectingImport:
+      Label("Choose a complete Session export to import", systemImage: "doc.badge.ellipsis")
+        .font(.caption)
+        .foregroundStyle(.secondary)
+    case .clearing:
+      operationBanner(
+        title: "Clearing current Session Events",
+        systemImage: "trash",
+        color: .secondary,
+        showsProgress: true
+      )
+    case .clearCompleted:
+      operationBanner(
+        title: "Current Session Events cleared",
+        systemImage: "checkmark.circle",
+        color: .green,
+        actionTitle: "Dismiss",
+        action: explorer.clearWorkspaceOperationPresentation
+      )
+    case .importing:
+      operationBanner(
+        title: "Importing Session",
+        systemImage: "square.and.arrow.down",
+        color: .secondary,
+        showsProgress: true,
+        actionTitle: "Cancel",
+        action: explorer.cancelCurrentSessionImport
+      )
+    case .importCompleted:
+      operationBanner(
+        title: "Session import completed",
+        systemImage: "checkmark.circle",
+        color: .green,
+        actionTitle: "Dismiss",
+        action: explorer.clearWorkspaceOperationPresentation
+      )
+    case .failed(let failure):
+      operationBanner(
+        title: failure.operatorMessage,
+        systemImage: "exclamationmark.triangle",
+        color: .orange,
+        actionTitle: "Dismiss",
+        action: explorer.clearWorkspaceOperationPresentation
+      )
+    }
   }
 
-  private func format(_ bytes: Int64) -> String {
-    ByteCountFormatter.string(fromByteCount: bytes, countStyle: .binary)
+  private func operationBanner(
+    title: String,
+    systemImage: String,
+    color: Color,
+    showsProgress: Bool = false,
+    actionTitle: String? = nil,
+    action: (() -> Void)? = nil
+  ) -> some View {
+    HStack(spacing: 8) {
+      if showsProgress {
+        ProgressView().controlSize(.small)
+      } else {
+        Image(systemName: systemImage).foregroundStyle(color)
+      }
+      Text(title).font(.caption).foregroundStyle(color)
+      Spacer()
+      if let actionTitle, let action {
+        Button(actionTitle, action: action).controlSize(.small)
+      }
+    }
+    .padding(.horizontal, 10)
+    .padding(.vertical, 7)
+    .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 7))
+  }
+
+  private func deviceScopeButton(
+    title: String,
+    subtitle: String,
+    systemImage: String,
+    selected: Bool,
+    focused: Bool,
+    action: @escaping () -> Void
+  ) -> some View {
+    Button(action: action) {
+      HStack(spacing: 8) {
+        Image(systemName: systemImage)
+          .font(.body)
+          .foregroundStyle(selected ? Color.accentColor : Color.secondary)
+          .accessibilityHidden(true)
+        VStack(alignment: .leading, spacing: 1) {
+          Text(title).font(.caption.weight(.semibold)).lineLimit(1)
+          Text(subtitle).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+        }
+        if selected {
+          Image(systemName: "checkmark.circle.fill")
+            .foregroundStyle(Color.accentColor)
+            .accessibilityHidden(true)
+        }
+        if focused {
+          Image(systemName: "viewfinder.circle.fill")
+            .foregroundStyle(Color.primary)
+            .accessibilityHidden(true)
+        }
+      }
+      .padding(.horizontal, 10)
+      .padding(.vertical, 7)
+      .background(
+        selected ? Color.accentColor.opacity(0.12) : Color(nsColor: .controlBackgroundColor),
+        in: RoundedRectangle(cornerRadius: 8)
+      )
+      .overlay {
+        RoundedRectangle(cornerRadius: 8)
+          .stroke(selected ? Color.accentColor.opacity(0.65) : Color.secondary.opacity(0.18))
+      }
+      .contentShape(RoundedRectangle(cornerRadius: 8))
+    }
+    .buttonStyle(.plain)
+    .accessibilityLabel(
+      "\(title), \(subtitle)\(focused ? ", focused for Device Details" : "")"
+    )
+    .accessibilityValue(selected ? "Selected" : "Not selected")
+  }
+
+  private var hasFocusedDevice: Bool {
+    guard let focusedDeviceID else { return false }
+    return presentation.value.deviceRows.contains { $0.id == focusedDeviceID }
+  }
+}
+
+private struct ViewerDevicesStripPlaceholder: View {
+  let sessionCount: Int
+
+  var body: some View {
+    HStack(spacing: 10) {
+      Label("Devices", systemImage: "iphone.gen3").font(.headline)
+      Text("\(sessionCount)").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+      Spacer()
+      ProgressView().controlSize(.small)
+      Text("Preparing current Session").font(.caption).foregroundStyle(.secondary)
+    }
+    .padding(.horizontal, 14)
+    .padding(.vertical, 12)
+    .accessibilityIdentifier("nearwire.workspace.devices")
   }
 }
 
 private struct ViewerDeviceDetail: View {
   @ObservedObject var model: ViewerApplicationModel
-  let session: ViewerSessionSnapshot
+  let initialSession: ViewerSessionSnapshot
   @State private var nickname: String
   @State private var uplink: String
   @State private var downlink: String
@@ -415,10 +862,14 @@ private struct ViewerDeviceDetail: View {
 
   init(model: ViewerApplicationModel, session: ViewerSessionSnapshot) {
     self.model = model
-    self.session = session
+    initialSession = session
     _nickname = State(initialValue: session.nickname ?? "")
     _uplink = State(initialValue: String(session.requestedPolicy.appUplink))
     _downlink = State(initialValue: String(session.requestedPolicy.appDownlink))
+  }
+
+  private var session: ViewerSessionSnapshot {
+    model.sessions.first(where: { $0.route == initialSession.route }) ?? initialSession
   }
 
   var body: some View {
@@ -543,9 +994,68 @@ private struct ViewerDeviceDetail: View {
   }
 }
 
+private struct ViewerOfflineDeviceDetail: View {
+  let row: ViewerExplorerDevicePresentationRow
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 20) {
+      HStack(alignment: .firstTextBaseline) {
+        VStack(alignment: .leading, spacing: 4) {
+          Text(row.title).font(.title2).fontWeight(.semibold)
+          Text("Offline Device details")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+        Spacer()
+        Label(row.state.capitalized, systemImage: "iphone.slash")
+          .foregroundStyle(.secondary)
+      }
+      GroupBox("Current Session") {
+        Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 10) {
+          offlineDetailRow("Application", row.subtitle)
+          offlineDetailRow("State", row.state.capitalized)
+          offlineDetailRow("Recorded Events", row.isMaterialized ? "Available" : "Not available")
+          offlineDetailRow("Gap diagnostics", row.hasGap ? "Present" : "None")
+          offlineDetailRow("Drop diagnostics", row.hasDrop ? "Present" : "None")
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+      }
+      Text(
+        "Connection settings and live telemetry are available only while this Device is connected. Imported and recent offline Devices remain available for Event scope and read-only Session details."
+      )
+      .font(.callout)
+      .foregroundStyle(.secondary)
+      Spacer()
+    }
+    .padding(24)
+  }
+
+  private func offlineDetailRow(_ label: String, _ value: String) -> some View {
+    GridRow {
+      Text(label).foregroundStyle(.secondary)
+      Text(value).textSelection(.enabled)
+    }
+  }
+}
+
 struct ViewerAnalysisWorkspacePane: View {
   @ObservedObject var analysis: ViewerAnalysisModeCoordinator
   let explorer: ViewerEventExplorerController?
+  let showsTimeline: Bool
+  let showsInspector: Bool
+  @State private var inspectorTab = ViewerExplorerInspectorTab.metadata
+
+  init(
+    analysis: ViewerAnalysisModeCoordinator,
+    explorer: ViewerEventExplorerController?,
+    showsTimeline: Bool = true,
+    showsInspector: Bool = true
+  ) {
+    self.analysis = analysis
+    self.explorer = explorer
+    self.showsTimeline = showsTimeline
+    self.showsInspector = showsInspector
+  }
 
   var body: some View {
     VStack(spacing: 0) {
@@ -573,19 +1083,35 @@ struct ViewerAnalysisWorkspacePane: View {
       ViewerPerformanceDashboardView(coordinator: analysis)
         .accessibilityIdentifier("nearwire.workspace.performance-dashboard")
     } else {
-      HSplitView {
-        eventTimeline
-          .frame(
-            minWidth: ViewerWorkspaceLayout.timelineMinimumWidth,
-            idealWidth: ViewerWorkspaceLayout.timelineIdealWidth
+      ZStack {
+        HSplitView {
+          if showsTimeline {
+            eventTimeline
+              .frame(
+                minWidth: ViewerWorkspaceLayout.timelineMinimumWidth,
+                idealWidth: ViewerWorkspaceLayout.timelineIdealWidth,
+                maxWidth: .infinity
+              )
+              .accessibilityIdentifier("nearwire.workspace.event-timeline")
+          }
+          if showsInspector {
+            eventInspector
+              .frame(
+                minWidth: ViewerWorkspaceLayout.inspectorMinimumWidth,
+                idealWidth: ViewerWorkspaceLayout.inspectorIdealWidth,
+                maxWidth: .infinity
+              )
+              .accessibilityIdentifier("nearwire.workspace.event-inspector")
+          }
+        }
+        if !showsTimeline && !showsInspector {
+          ViewerEmptyState(
+            title: "Event Panels Hidden",
+            systemImage: "rectangle.dashed",
+            description: "Use the Timeline or Inspector buttons at the top to restore a panel. Event capture continues."
           )
-          .accessibilityIdentifier("nearwire.workspace.event-timeline")
-        eventInspector
-          .frame(
-            minWidth: ViewerWorkspaceLayout.inspectorMinimumWidth,
-            idealWidth: ViewerWorkspaceLayout.inspectorIdealWidth
-          )
-          .accessibilityIdentifier("nearwire.workspace.event-inspector")
+          .accessibilityIdentifier("nearwire.workspace.events-hidden")
+        }
       }
     }
   }
@@ -622,7 +1148,7 @@ struct ViewerAnalysisWorkspacePane: View {
   @ViewBuilder
   private var eventInspector: some View {
     if let explorer {
-      ViewerExplorerInspectorView(explorer: explorer)
+      ViewerExplorerInspectorView(explorer: explorer, tab: $inspectorTab)
     } else {
       VStack(spacing: 0) {
         paneHeader(title: "Event Inspector", systemImage: "sidebar.right")

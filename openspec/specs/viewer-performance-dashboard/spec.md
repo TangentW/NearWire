@@ -5,31 +5,21 @@ TBD - created by archiving change viewer-performance-dashboard. Update Purpose a
 ## Requirements
 ### Requirement: Performance projection is a rebuildable bounded view of raw Events
 
-The Viewer SHALL recognize only exact Core V1 `nearwire.performance.snapshot` Events. Raw durable
-Events and bounded transient observations SHALL remain the only sources of truth. Known fields SHALL
-decode through Core `PerformanceSnapshot`; unknown future fields and unavailable keys SHALL remain
-raw-only. No projection schema, table, index, database, raw JSON cache, or derived export SHALL exist.
+The Performance dashboard SHALL be a rebuildable projection of raw `nearwire.performance.snapshot` Events in the one current working Session. It SHALL never become a second persistence source, recording, or history owner. Clear and Session import SHALL advance the shared Store/presentation generation, cancel predecessor scans and chart preparation, clear stale buckets/tooltips/raw locators, and rebuild only from successor current-Session Events.
 
-One serial memory owner SHALL retain only decoded summaries, bucket state, bounded diagnostics, and
-stable journal keys. Durable and transient copies SHALL reconcile once by journal key, preferring a
-durable locator without changing time, bucket, metric contribution, or representative selection.
-Content above exactly 65,536 canonical UTF-8 bytes SHALL be classified from Store/live metadata as
-Invalid snapshot without copying its JSON. Malformed/Core-invalid content, duplicate known
-unavailable keys, or a known metric both present and unavailable SHALL also invalidate the complete
-typed snapshot. No metric from an invalid snapshot SHALL project; raw Explorer inspection SHALL
-remain available.
+Each accepted snapshot SHALL retain the existing Core decoding, availability, finite-value, time-basis, bounded range, and aggregation semantics. Imported device aliases remain offline pseudonyms and SHALL NOT be treated as connected control targets.
 
-#### Scenario: Unknown future field is present
+#### Scenario: Current Session is cleared
 
-- **WHEN** a valid V1 snapshot contains an unknown optional field or unknown unavailable key
-- **THEN** known metrics project normally while the unknown value remains only in the raw Event
-- **AND** no schema migration or typed failure is introduced
+- **WHEN** a Performance scan or chart delivery belongs to the pre-Clear generation
+- **THEN** it cannot update the cleared dashboard
+- **AND** later current-Session snapshots rebuild the projection normally
 
-#### Scenario: Contradictory availability is decoded by Core
+#### Scenario: A complete Session is imported
 
-- **WHEN** one known metric is both present and unavailable or its unavailable key is duplicated
-- **THEN** Viewer classifies the typed snapshot Invalid and publishes none of its metrics
-- **AND** the bounded identity can still open the raw Event
+- **WHEN** import atomically installs valid raw Performance Events under a successor generation
+- **THEN** the dashboard rebuilds from those raw Events using normal bounded projection
+- **AND** no imported Device is presented as an active transport target
 
 ### Requirement: One exact device scope freezes live before Store and uses deterministic ranges
 

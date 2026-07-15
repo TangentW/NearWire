@@ -605,7 +605,7 @@ struct ViewerPerformanceDashboardContent: View {
     if let guidance {
       performanceStatus(
         title: guidance.message,
-        detail: "Choose one exact App session in Sources & Devices.",
+        detail: "Choose one exact App session in the Devices strip.",
         systemImage: "iphone.gen3"
       )
     } else {
@@ -625,7 +625,7 @@ struct ViewerPerformanceDashboardContent: View {
       case .failed:
         performanceStatus(
           title: "Performance data unavailable",
-          detail: "Refresh the selected source or choose another App session.",
+          detail: "Refresh the current Session data or choose another App session.",
           systemImage: "exclamationmark.triangle"
         )
       case .empty:
@@ -1062,7 +1062,7 @@ struct ViewerPerformanceDashboardContent: View {
               openRawEvent(bucket.index, metric)
             }
           } label: {
-            Label("Open Source Event", systemImage: "arrow.right.circle")
+            Label("Open Raw Event", systemImage: "arrow.right.circle")
           }
           .disabled(
             crosshair.selectedMetric.flatMap {

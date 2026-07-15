@@ -19,11 +19,11 @@ enum ViewerAnalysisGuidance: Equatable, Sendable {
     case .deviceNotReady:
       return "The selected device is not ready for performance analysis."
     case .sourceUnavailable:
-      return "The selected performance source is no longer available."
+      return "Performance data for the selected Device is no longer available."
     case .rawEvent(let guidance):
       return guidance.message
     case .rawEventResolutionFailed:
-      return "The source Event could not be opened. Try again."
+      return "The raw Event could not be opened. Try again."
     }
   }
 }

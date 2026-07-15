@@ -1448,7 +1448,7 @@ final class ViewerStoreTests: XCTestCase {
     temporaryDirectories.removeAll()
   }
 
-  func testStoreCreatesFreshNormalPoolAndVersionTwoSchemaWithOwnerOnlyPermissions() throws {
+  func testStoreCreatesFreshNormalPoolAndVersionThreeSchemaWithOwnerOnlyPermissions() throws {
     let paths = try makePaths()
     let pool = try ViewerSQLitePool(migrating: paths)
     defer { pool.close() }
@@ -1460,7 +1460,7 @@ final class ViewerStoreTests: XCTestCase {
       try pool.writer.run {
         try ViewerStoreSchema.scalarInt64("PRAGMA user_version", database: $0)
       },
-      2
+      3
     )
     for connection in [pool.writer, pool.queryReader, pool.exportReader] {
       XCTAssertEqual(
@@ -1573,6 +1573,54 @@ final class ViewerStoreTests: XCTestCase {
     )
   }
 
+  func testVersionTwoMigrationAddsRetainedCountersForExistingContent() throws {
+    let paths = try makeVersionTwoStore(recordingLogicalID: "v2-retained-counter-migration")
+    let temporaryDirectory = try makePrivateTemporaryDirectory()
+    let phases = LockedViewerMigrationPhases()
+    let control = ViewerStoreMigrationControl(
+      paths: paths,
+      temporaryDirectory: temporaryDirectory,
+      phaseObserver: { phases.append($0) }
+    )
+
+    let pool = try ViewerSQLitePool(migrating: paths, migrationControl: control)
+    defer { pool.close() }
+
+    XCTAssertEqual(phases.value, [.preparing, .validating])
+    XCTAssertEqual(
+      try pool.writer.run {
+        try ViewerStoreSchema.scalarInt64("PRAGMA user_version", database: $0)
+      },
+      3
+    )
+    for (key, table) in [
+      ("retainedEventCount", "Events"),
+      ("retainedGapCount", "GapVersions"),
+      ("retainedAnnotationCount", "AnnotationVersions"),
+    ] {
+      XCTAssertEqual(
+        try pool.writer.run { database in
+          try ViewerStoreSchema.scalarInt64(
+            "SELECT integerValue FROM StoreMetadata WHERE key='\(key)'",
+            database: database
+          )
+        },
+        try pool.writer.run { database in
+          try ViewerStoreSchema.scalarInt64("SELECT COUNT(*) FROM \(table)", database: database)
+        }
+      )
+    }
+    XCTAssertEqual(
+      try pool.writer.run { database in
+        try ViewerStoreSchema.scalarInt64(
+          "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name LIKE 'Retained%Count%'",
+          database: database
+        )
+      },
+      6
+    )
+  }
+
   func testVersionOneMigrationPreservesContentAndPublishesOnlyFreshNormalConnections() throws {
     let paths = try makeVersionOneStore(
       recordingLogicalID: "migration-preserve",
@@ -1609,7 +1657,7 @@ final class ViewerStoreTests: XCTestCase {
       try pool.writer.run {
         try ViewerStoreSchema.scalarInt64("PRAGMA user_version", database: $0)
       },
-      2
+      3
     )
     XCTAssertEqual(
       try pool.writer.run {
@@ -1715,7 +1763,7 @@ final class ViewerStoreTests: XCTestCase {
       try ViewerStoreMigrationControl(
         paths: paths,
         temporaryDirectory: wrongMode
-      ).prepareForVersionOne()
+      ).prepareForLegacyMigration()
     ) { error in
       XCTAssertEqual(error as? ViewerStoreError, .invalidPath)
     }
@@ -1731,7 +1779,7 @@ final class ViewerStoreTests: XCTestCase {
       try ViewerStoreMigrationControl(
         paths: paths,
         temporaryDirectory: symbolicLink
-      ).prepareForVersionOne()
+      ).prepareForLegacyMigration()
     ) { error in
       XCTAssertEqual(error as? ViewerStoreError, .invalidPath)
     }
@@ -1750,7 +1798,7 @@ final class ViewerStoreTests: XCTestCase {
           volumeIdentifier: { directory in
             directory.standardizedFileURL == paths.directory.standardizedFileURL ? 1 : 2
           }
-        ).prepareForVersionOne()
+        ).prepareForLegacyMigration()
       ) { error in
         XCTAssertEqual(error as? ViewerStoreError, .capacityExceeded)
       }
@@ -1762,7 +1810,7 @@ final class ViewerStoreTests: XCTestCase {
         temporaryDirectory: validTemporaryDirectory,
         diskGuard: ViewerStoreDiskGuard { _ in Int64.max },
         allocatedFootprintOverride: { Int64.max }
-      ).prepareForVersionOne()
+      ).prepareForLegacyMigration()
     ) { error in
       XCTAssertEqual(error as? ViewerStoreError, .capacityExceeded)
     }
@@ -1774,7 +1822,7 @@ final class ViewerStoreTests: XCTestCase {
         temporaryDirectory: validTemporaryDirectory,
         diskGuard: ViewerStoreDiskGuard { sameVolumeCapacity.available(at: $0) },
         volumeIdentifier: { _ in 1 }
-      ).prepareForVersionOne()
+      ).prepareForLegacyMigration()
     )
     XCTAssertEqual(sameVolumeCapacity.callCount, 1)
 
@@ -1863,7 +1911,7 @@ final class ViewerStoreTests: XCTestCase {
     phaseGate.release()
     waitUntil { runtime.status().state == ViewerStoreStatus.State.available }
     XCTAssertNil(runtime.status().migration)
-    XCTAssertEqual(try scalar("PRAGMA user_version", at: paths), 2)
+    XCTAssertEqual(try scalar("PRAGMA user_version", at: paths), 3)
     runtime.closeStorage()
   }
 
@@ -1901,7 +1949,7 @@ final class ViewerStoreTests: XCTestCase {
     runtime.retryStorage()
     waitUntil { runtime.status().state == ViewerStoreStatus.State.available }
     XCTAssertEqual(authorization.callCount, 2)
-    XCTAssertEqual(try scalar("PRAGMA user_version", at: paths), 2)
+    XCTAssertEqual(try scalar("PRAGMA user_version", at: paths), 3)
     runtime.closeStorage()
   }
 
@@ -1952,7 +2000,7 @@ final class ViewerStoreTests: XCTestCase {
       try pool.writer.run {
         try ViewerStoreSchema.scalarInt64("PRAGMA user_version", database: $0)
       },
-      2
+      3
     )
     XCTAssertTrue(
       ViewerStoreSchema.schemaVersion2IndexStatements.allSatisfy { statement in
@@ -2613,7 +2661,7 @@ final class ViewerStoreTests: XCTestCase {
     XCTAssertEqual(completeTicket.disclosure, .current)
     XCTAssertEqual(
       completeTicket.disclosure.warning,
-      "Event content can contain secrets, personal information, or identifying data."
+      "Session metadata and notes, annotations and diagnostic gaps, Event metadata and content, and peer-provided App display name, identifier, and version are exported verbatim and can contain identifying or sensitive data."
     )
     XCTAssertTrue(completeTicket.disclosure.unencrypted)
     XCTAssertTrue(completeTicket.disclosure.aliasesArePseudonymsNotRedaction)
@@ -7315,7 +7363,7 @@ final class ViewerStoreTests: XCTestCase {
     )
     do {
       let raw = try ViewerSQLiteConnection(role: .writer, path: paths.database.path)
-      try raw.execute("PRAGMA user_version=2")
+      try raw.execute("PRAGMA user_version=3")
     }
 
     fault.failNext()
@@ -7405,7 +7453,7 @@ final class ViewerStoreTests: XCTestCase {
 
     do {
       let raw = try ViewerSQLiteConnection(role: .writer, path: paths.database.path)
-      try raw.execute("PRAGMA user_version=2")
+      try raw.execute("PRAGMA user_version=3")
       raw.close()
     }
     await runtime.runtimeEnded(
@@ -7475,7 +7523,7 @@ final class ViewerStoreTests: XCTestCase {
     )
     do {
       let raw = try ViewerSQLiteConnection(role: .writer, path: paths.database.path)
-      try raw.execute("PRAGMA user_version=2")
+      try raw.execute("PRAGMA user_version=3")
       raw.close()
     }
 
@@ -7564,7 +7612,7 @@ final class ViewerStoreTests: XCTestCase {
     )
     do {
       let raw = try ViewerSQLiteConnection(role: .writer, path: paths.database.path)
-      try raw.execute("PRAGMA user_version=2")
+      try raw.execute("PRAGMA user_version=3")
       raw.close()
     }
 
@@ -7643,7 +7691,7 @@ final class ViewerStoreTests: XCTestCase {
     )
     do {
       let raw = try ViewerSQLiteConnection(role: .writer, path: paths.database.path)
-      try raw.execute("PRAGMA user_version=2")
+      try raw.execute("PRAGMA user_version=3")
       raw.close()
     }
 
@@ -7903,9 +7951,10 @@ final class ViewerStoreTests: XCTestCase {
         )) == 1)
     }
     XCTAssertGreaterThan(runtime.status().storeGeneration, firstStoreGeneration)
+    XCTAssertEqual(try scalar("SELECT COUNT(*) FROM Recordings", at: paths), 1)
     XCTAssertEqual(
       try latestRecordingStateCount(at: paths, logicalID: firstLogicalID, state: "closed"),
-      1
+      0
     )
     XCTAssertEqual(
       try recordingStorageUnavailableGapCount(at: paths, logicalID: secondLogicalID),
@@ -7978,9 +8027,10 @@ final class ViewerStoreTests: XCTestCase {
           logicalID: secondLogicalID
         )) == 1)
     }
+    XCTAssertEqual(try scalar("SELECT COUNT(*) FROM Recordings", at: paths), 1)
     XCTAssertEqual(
       try latestRecordingStateCount(at: paths, logicalID: firstLogicalID, state: "closed"),
-      1
+      0
     )
     XCTAssertEqual(try scalar("SELECT COUNT(*) FROM DeviceSessions", at: paths), 0)
     await runtime.runtimeEnded(
@@ -8081,9 +8131,10 @@ final class ViewerStoreTests: XCTestCase {
       try recordingStorageUnavailableGapCount(at: paths, logicalID: laterLogicalID),
       1
     )
+    XCTAssertEqual(try scalar("SELECT COUNT(*) FROM Recordings", at: paths), 1)
     XCTAssertEqual(
       try latestRecordingStateCount(at: paths, logicalID: firstLogicalID, state: "closed"),
-      1
+      0
     )
     await runtime.runtimeEnded(
       logicalID: laterLogicalID,
@@ -8439,7 +8490,7 @@ final class ViewerStoreTests: XCTestCase {
     }
 
     XCTAssertEqual(reopenGate.value, 2)
-    XCTAssertEqual(try scalar("SELECT COUNT(*) FROM Recordings", at: paths), 2)
+    XCTAssertEqual(try scalar("SELECT COUNT(*) FROM Recordings", at: paths), 1)
     XCTAssertEqual(
       try latestRecordingStateCount(at: paths, logicalID: blockedLogicalID, state: "active"),
       0
@@ -8997,8 +9048,12 @@ final class ViewerStoreTests: XCTestCase {
     )
     XCTAssertEqual(
       Set(root.keys),
-      Set(["schemaVersion", "disclosure", "session", "devices", "events", "gaps", "annotations"])
+      Set([
+        "schemaVersion", "scope", "disclosure", "session", "devices", "events", "gaps",
+        "annotations",
+      ])
     )
+    XCTAssertEqual(root["scope"] as? String, "completeSession")
     XCTAssertEqual((root["events"] as? [[String: Any]])?.count, 1)
     let exportedCausality =
       (root["events"] as? [[String: Any]])?.first?["causality"]
@@ -12558,7 +12613,7 @@ final class ViewerStoreTests: XCTestCase {
     }
     XCTAssertEqual(model.status, .failed(.identityUnavailable))
     let countAfterRetry = try scalar("SELECT COUNT(*) FROM Recordings", at: paths)
-    XCTAssertTrue((1...2).contains(countAfterRetry))
+    XCTAssertEqual(countAfterRetry, 1)
     XCTAssertEqual(
       try latestRecordingStateCount(at: paths, state: "closed"), countAfterRetry)
 
@@ -12573,7 +12628,7 @@ final class ViewerStoreTests: XCTestCase {
 
     _ = await model.prepareForTermination()
     let finalCount = try scalar("SELECT COUNT(*) FROM Recordings", at: paths)
-    XCTAssertTrue((countAfterRetry...3).contains(finalCount))
+    XCTAssertEqual(finalCount, 1)
     XCTAssertEqual(try latestRecordingStateCount(at: paths, state: "closed"), finalCount)
     XCTAssertEqual(try latestRecordingStateCount(at: paths, state: "active"), 0)
     runtime.closeStorage()
@@ -12680,6 +12735,1068 @@ final class ViewerStoreTests: XCTestCase {
     for _ in 0..<20 where model.storeStatus != expectedStatus { await Task.yield() }
     XCTAssertEqual(model.storeStatus, expectedStatus)
     XCTAssertFalse(model.updateStorage(capacityGiB: String(Int64.max), historyRetentionDays: "30"))
+  }
+
+  func testProcessWorkspaceIsUniqueMarkedAndRemovedExactly() throws {
+    let first = ViewerStorePaths.processWorkspace(nonce: UUID())
+    let second = ViewerStorePaths.processWorkspace(nonce: UUID())
+    XCTAssertNotEqual(first.directory, second.directory)
+
+    let pool = try ViewerSQLitePool(migrating: first)
+    XCTAssertTrue(FileManager.default.fileExists(atPath: first.database.path))
+    XCTAssertEqual(
+      try Data(contentsOf: first.processWorkspaceMarker),
+      Data(first.directory.lastPathComponent.utf8)
+    )
+    pool.close()
+    try first.removeProcessWorkspace()
+    XCTAssertFalse(FileManager.default.fileExists(atPath: first.directory.path))
+
+    let ordinary = try makePaths()
+    try FileManager.default.createDirectory(at: ordinary.directory, withIntermediateDirectories: true)
+    XCTAssertThrowsError(try ordinary.removeProcessWorkspace()) { error in
+      XCTAssertEqual(error as? ViewerStoreError, .invalidPath)
+    }
+  }
+
+  func testCompleteSessionTransferProducerAndImporterShareExactBounds() throws {
+    XCTAssertNoThrow(
+      try ViewerSessionTransferLimits.validateCounts(
+        deviceCount: ViewerSessionTransferLimits.maximumDeviceCount,
+        eventCount: ViewerSessionTransferLimits.maximumEventCount,
+        gapCount: ViewerSessionTransferLimits.maximumGapCount,
+        annotationCount: ViewerSessionTransferLimits.maximumAnnotationCount
+      )
+    )
+    XCTAssertNoThrow(
+      try ViewerSessionTransferLimits.validateFileBytes(
+        ViewerSessionTransferLimits.maximumFileBytes
+      )
+    )
+
+    let overflowCases: [(Int64, Int64, Int64, Int64)] = [
+      (ViewerSessionTransferLimits.maximumDeviceCount + 1, 0, 0, 0),
+      (0, ViewerSessionTransferLimits.maximumEventCount + 1, 0, 0),
+      (0, 0, ViewerSessionTransferLimits.maximumGapCount + 1, 0),
+      (0, 0, 0, ViewerSessionTransferLimits.maximumAnnotationCount + 1),
+    ]
+    for counts in overflowCases {
+      XCTAssertThrowsError(
+        try ViewerSessionTransferLimits.validateCounts(
+          deviceCount: counts.0,
+          eventCount: counts.1,
+          gapCount: counts.2,
+          annotationCount: counts.3
+        )
+      ) { error in
+        XCTAssertEqual(error as? ViewerStoreError, .workLimitExceeded)
+      }
+    }
+    XCTAssertThrowsError(
+      try ViewerSessionTransferLimits.validateFileBytes(
+        ViewerSessionTransferLimits.maximumFileBytes + 1
+      )
+    ) { error in
+      XCTAssertEqual(error as? ViewerStoreError, .workLimitExceeded)
+    }
+  }
+
+  @MainActor
+  func testApplicationTerminationRetainsWorkingStoreCleanupAfterBoundedTimeout() async throws {
+    let paths = ViewerStorePaths.processWorkspace(nonce: UUID())
+    let pool = try ViewerSQLitePool(migrating: paths)
+    let closeGate = ArmableViewerExecutionGate()
+    closeGate.arm()
+    let dependencies = ViewerRuntimeDependencies(
+      loadIdentity: { throw ViewerStoreError.unavailable },
+      resetTLSIdentity: {},
+      resetAllIdentity: {},
+      generatePairingCode: { throw ViewerStoreError.unavailable },
+      cleanupTimeoutNanoseconds: 10_000_000,
+      closeWorkingStore: {
+        await Task.detached {
+          closeGate.run()
+          pool.close()
+          try? paths.removeProcessWorkspace()
+        }.value
+      }
+    )
+    let model = ViewerApplicationModel(
+      preferences: ViewerPreferences(requiresApproval: { false }, setRequiresApproval: { _ in }),
+      dependencies: dependencies
+    )
+    model.openWindow()
+    await waitForApplicationStatus(.failed(.identityUnavailable), in: model)
+
+    let replied = expectation(description: "App delegate replied after bounded cleanup wait")
+    let delegate = ViewerAppDelegate()
+    delegate.beginTermination(using: model) { shouldTerminate in
+      XCTAssertTrue(shouldTerminate)
+      replied.fulfill()
+    }
+    let closeBlocked = await closeGate.waitUntilBlockedAsync()
+    XCTAssertEqual(closeBlocked, .success)
+    await fulfillment(of: [replied], timeout: 1)
+    XCTAssertTrue(FileManager.default.fileExists(atPath: paths.directory.path))
+
+    closeGate.release()
+    await model.waitForTerminalCleanup()
+    XCTAssertFalse(FileManager.default.fileExists(atPath: paths.directory.path))
+  }
+
+  func testClearCurrentSessionRemovesEventDerivedRowsAndPreservesDeviceCapture() throws {
+    let paths = try makePaths()
+    let pool = try ViewerSQLitePool(migrating: paths)
+    defer { pool.close() }
+    let store = ViewerEventStore(pool: pool, configuration: { .default })
+    let recording = try store.beginRecording(
+      wallMilliseconds: 1_000,
+      monotonicNanoseconds: 2_000,
+      reason: "clear-current-session-test"
+    )
+    let device = try store.beginDeviceSession(
+      recording: recording,
+      installationID: "clear-device",
+      wallMilliseconds: 1_000,
+      monotonicNanoseconds: 2_000,
+      partialHistory: false,
+      displayName: "Clear Device"
+    )
+    _ = try store.appendEvent(
+      makeObservation(recording: recording, device: device, sequence: 1, value: "before-clear")
+    )
+    try store.appendStructural(
+      .drop(
+        device: device,
+        sequence: 1,
+        wallMilliseconds: 1_100,
+        monotonicNanoseconds: 2_100,
+        reason: "testDrop",
+        count: 1
+      )
+    )
+    try store.appendStructural(
+      .gap(
+        recording: recording,
+        device: device,
+        sequence: 1,
+        reason: "testGap",
+        count: 1,
+        firstWallMilliseconds: 1_100,
+        lastWallMilliseconds: 1_100,
+        directions: "appToViewer",
+        firstWireSequence: 1,
+        lastWireSequence: 1
+      )
+    )
+    let maintenance = ViewerStoreMaintenance(
+      pool: pool,
+      leases: ViewerStoreLeaseRegistry(),
+      configuration: { .default }
+    )
+    _ = try maintenance.appendAnnotation(
+      recordingID: recording.rowID,
+      body: "remove me",
+      wallMilliseconds: 1_200
+    )
+
+    let result = try store.clearCurrentSessionEvents(recording: recording)
+    XCTAssertEqual(result.deletedEventCount, 1)
+    XCTAssertGreaterThan(result.reclaimedQuotaBytes, 0)
+    XCTAssertEqual(try scalar("SELECT COUNT(*) FROM Events", at: paths), 0)
+    XCTAssertEqual(try scalar("SELECT COUNT(*) FROM EventDispositionVersions", at: paths), 0)
+    XCTAssertEqual(try scalar("SELECT COUNT(*) FROM DropVersions", at: paths), 0)
+    XCTAssertEqual(try scalar("SELECT COUNT(*) FROM GapVersions", at: paths), 0)
+    XCTAssertEqual(try scalar("SELECT COUNT(*) FROM AnnotationVersions", at: paths), 0)
+    XCTAssertEqual(try scalar("SELECT COUNT(*) FROM DeviceSessions", at: paths), 1)
+    XCTAssertEqual(try scalar("SELECT COUNT(*) FROM RecordingVersions", at: paths), 1)
+
+    _ = try store.appendEvent(
+      makeObservation(recording: recording, device: device, sequence: 2, value: "after-clear")
+    )
+    XCTAssertEqual(try scalar("SELECT COUNT(*) FROM Events", at: paths), 1)
+  }
+
+  func testWorkspaceMutationDrainsAdmittedEventAndStructuralIngressPrefixes() throws {
+    let sourcePaths = try makePaths()
+    let sourcePool = try ViewerSQLitePool(migrating: sourcePaths)
+    defer { sourcePool.close() }
+    let sourceStore = ViewerEventStore(pool: sourcePool, configuration: { .default })
+    let sourceRecording = try sourceStore.beginRecording(
+      wallMilliseconds: 1,
+      monotonicNanoseconds: 1,
+      reason: "mutation-prefix-import-source"
+    )
+    _ = try sourceStore.beginDeviceSession(
+      recording: sourceRecording,
+      installationID: "imported-prefix-device",
+      wallMilliseconds: 1,
+      monotonicNanoseconds: 1,
+      partialHistory: false,
+      displayName: "Imported Prefix Device"
+    )
+    let importURL = sourcePaths.directory.appendingPathComponent("prefix-import.json")
+    try ViewerStoreExportService(
+      pool: sourcePool,
+      leases: ViewerStoreLeaseRegistry()
+    ).export(recordingID: sourceRecording.rowID, to: importURL)
+
+    let paths = try makePaths()
+    let writeGate = ArmableViewerExecutionGate()
+    let coordinator = try ViewerStoreCoordinator(paths: paths, writeGate: { writeGate.run() })
+    defer { coordinator.closeStorage() }
+    let runtimeLogicalID = UUID()
+    let context = try makeAdmissionContext(suffix: "mutation-prefix")
+    XCTAssertTrue(
+      coordinator.runtimeStarted(
+        logicalID: runtimeLogicalID,
+        wallMilliseconds: 1_000,
+        monotonicNanoseconds: 2_000
+      )
+    )
+    XCTAssertTrue(coordinator.sessionStarted(context))
+    waitUntil { (try? self.scalar("SELECT COUNT(*) FROM DeviceSessions", at: paths)) == 1 }
+
+    let appID = context.appHello.installationID
+    let viewerID = context.viewerHello.installationID
+    let envelope = try EventEnvelope(
+      id: EventID(),
+      type: EventType.user("test.mutation-prefix"),
+      content: .object(["value": .integer(1)]),
+      createdAt: Date(timeIntervalSince1970: 1),
+      monotonicTimestampNanoseconds: 3_000,
+      source: EventEndpoint(role: .app, id: appID),
+      target: EventEndpoint(role: .viewer, id: viewerID),
+      direction: .appToViewer,
+      sessionEpoch: SessionEpoch(),
+      sequence: EventSequence(1),
+      priority: .normal,
+      ttl: .default,
+      causality: EventCausality()
+    )
+    let encodedBytes = try WireEventRecord(
+      envelope: envelope,
+      remainingTTLNanoseconds: 10_000_000_000
+    ).deterministicEncodedByteCount()
+    let observation = try ViewerCommittedEventObservation(
+      runtimeLogicalID: runtimeLogicalID,
+      context: context,
+      nickname: nil,
+      envelope: envelope,
+      viewerWallMilliseconds: 1_000,
+      viewerMonotonicNanoseconds: 3_000,
+      deterministicEventBytes: encodedBytes,
+      initialDisposition: .buffered
+    )
+
+    writeGate.arm()
+    coordinator.eventCommitted(observation) { _ in }
+    coordinator.dropsChanged(
+      connectionID: context.connectionID,
+      samples: [.init(reason: .localOverflow, count: 1)],
+      monotonicNanoseconds: 3_100
+    )
+    XCTAssertEqual(writeGate.waitUntilBlocked(), .success)
+    let clearFinished = expectation(description: "Clear drained ingress prefix")
+    XCTAssertTrue(
+      coordinator.clearCurrentSession { result in
+        if case .failure(let error) = result { XCTFail("Clear failed: \(error)") }
+        clearFinished.fulfill()
+      }
+    )
+    writeGate.release()
+    wait(for: [clearFinished], timeout: 2)
+    XCTAssertEqual(try scalar("SELECT COUNT(*) FROM Events", at: paths), 0)
+    XCTAssertEqual(try scalar("SELECT COUNT(*) FROM DropVersions", at: paths), 0)
+
+    writeGate.arm()
+    XCTAssertTrue(
+      coordinator.sessionEnded(
+        connectionID: context.connectionID,
+        wallMilliseconds: 2_000,
+        monotonicNanoseconds: 4_000
+      )
+    )
+    XCTAssertEqual(writeGate.waitUntilBlocked(), .success)
+    let importFinished = expectation(description: "Import drained structural ingress prefix")
+    XCTAssertTrue(
+      coordinator.importCurrentSession(from: importURL) { result in
+        if case .failure(let error) = result { XCTFail("Import failed: \(error)") }
+        importFinished.fulfill()
+      }
+    )
+    writeGate.release()
+    wait(for: [importFinished], timeout: 2)
+    XCTAssertEqual(try scalar("SELECT COUNT(*) FROM DeviceSessions", at: paths), 1)
+    XCTAssertEqual(
+      try scalar("SELECT COUNT(*) FROM DeviceSessionVersions WHERE state='active'", at: paths),
+      0
+    )
+  }
+
+  func testImportedCoordinatorGapSequenceAdvancesBeforeNewRuntimeGap() throws {
+    let sourcePaths = try makePaths()
+    let sourcePool = try ViewerSQLitePool(migrating: sourcePaths)
+    defer { sourcePool.close() }
+    let sourceStore = ViewerEventStore(pool: sourcePool, configuration: { .default })
+    let sourceRecording = try sourceStore.beginRecording(
+      wallMilliseconds: 1,
+      monotonicNanoseconds: 1,
+      reason: "imported-gap-sequence-source"
+    )
+    try sourceStore.appendStructural(
+      .gap(
+        recording: sourceRecording,
+        device: nil,
+        sequence: 1,
+        reason: "imported-runtime-gap",
+        count: 1,
+        firstWallMilliseconds: 1,
+        lastWallMilliseconds: 1,
+        directions: "unknown",
+        firstWireSequence: nil,
+        lastWireSequence: nil
+      )
+    )
+    let importURL = sourcePaths.directory.appendingPathComponent("runtime-gap-import.json")
+    try ViewerStoreExportService(
+      pool: sourcePool,
+      leases: ViewerStoreLeaseRegistry()
+    ).export(recordingID: sourceRecording.rowID, to: importURL)
+
+    let targetPaths = try makePaths()
+    let coordinator = try ViewerStoreCoordinator(paths: targetPaths)
+    defer { coordinator.closeStorage() }
+    let runtimeLogicalID = UUID()
+    XCTAssertTrue(
+      coordinator.runtimeStarted(
+        logicalID: runtimeLogicalID,
+        wallMilliseconds: 10,
+        monotonicNanoseconds: 10
+      )
+    )
+    waitUntil { (try? self.scalar("SELECT COUNT(*) FROM Recordings", at: targetPaths)) == 1 }
+
+    let imported = expectation(description: "Imported Session with runtime gap")
+    XCTAssertTrue(
+      coordinator.importCurrentSession(from: importURL) { result in
+        if case .failure(let error) = result { XCTFail("Import failed: \(error)") }
+        imported.fulfill()
+      }
+    )
+    wait(for: [imported], timeout: 2)
+    XCTAssertEqual(
+      try scalar("SELECT COUNT(*) FROM GapVersions WHERE deviceSessionID IS NULL", at: targetPaths),
+      1
+    )
+
+    XCTAssertTrue(
+      coordinator.recoverRuntime(
+        logicalID: runtimeLogicalID,
+        wallMilliseconds: 20,
+        monotonicNanoseconds: 20,
+        missedObservationCount: 1
+      )
+    )
+    waitUntil {
+      (try? self.scalar(
+        "SELECT COUNT(*) FROM GapVersions WHERE deviceSessionID IS NULL",
+        at: targetPaths
+      )) == 2
+    }
+    XCTAssertEqual(
+      try scalar(
+        "SELECT COUNT(DISTINCT sequence) FROM GapVersions WHERE deviceSessionID IS NULL",
+        at: targetPaths
+      ),
+      2
+    )
+    XCTAssertEqual(coordinator.services.eventStore.status().state, .available)
+  }
+
+  func testReopenedCoordinatorResumesDurableGapSequence() throws {
+    let paths = try makePaths()
+    let firstCoordinator = try ViewerStoreCoordinator(paths: paths)
+    let firstRuntimeID = UUID()
+    XCTAssertTrue(
+      firstCoordinator.runtimeStarted(
+        logicalID: firstRuntimeID,
+        wallMilliseconds: 1,
+        monotonicNanoseconds: 1
+      )
+    )
+    XCTAssertTrue(
+      firstCoordinator.recoverRuntime(
+        logicalID: firstRuntimeID,
+        wallMilliseconds: 2,
+        monotonicNanoseconds: 2,
+        missedObservationCount: 1
+      )
+    )
+    waitUntil {
+      (try? self.scalar(
+        "SELECT COUNT(*) FROM GapVersions WHERE deviceSessionID IS NULL",
+        at: paths
+      )) == 1
+    }
+    firstCoordinator.closeStorage()
+
+    let reopenedCoordinator = try ViewerStoreCoordinator(paths: paths)
+    defer { reopenedCoordinator.closeStorage() }
+    let reopenedRuntimeID = UUID()
+    XCTAssertTrue(
+      reopenedCoordinator.runtimeStarted(
+        logicalID: reopenedRuntimeID,
+        wallMilliseconds: 3,
+        monotonicNanoseconds: 3
+      )
+    )
+    XCTAssertTrue(
+      reopenedCoordinator.recoverRuntime(
+        logicalID: reopenedRuntimeID,
+        wallMilliseconds: 4,
+        monotonicNanoseconds: 4,
+        missedObservationCount: 1
+      )
+    )
+    waitUntil {
+      (try? self.scalar(
+        "SELECT COUNT(*) FROM GapVersions WHERE deviceSessionID IS NULL",
+        at: paths
+      )) == 2
+    }
+    XCTAssertEqual(
+      try scalar(
+        "SELECT COUNT(DISTINCT sequence) FROM GapVersions WHERE deviceSessionID IS NULL",
+        at: paths
+      ),
+      2
+    )
+    XCTAssertEqual(reopenedCoordinator.services.eventStore.status().state, .available)
+  }
+
+  func testSessionImportCancellationInterruptsBulkDeleteAndRollsBackCurrentSession() throws {
+    let sourcePaths = try makePaths()
+    let sourcePool = try ViewerSQLitePool(migrating: sourcePaths)
+    defer { sourcePool.close() }
+    let sourceStore = ViewerEventStore(pool: sourcePool, configuration: { .default })
+    let sourceRecording = try sourceStore.beginRecording(
+      wallMilliseconds: 1,
+      monotonicNanoseconds: 1,
+      reason: "bulk-delete-cancellation-source"
+    )
+    _ = try sourceStore.beginDeviceSession(
+      recording: sourceRecording,
+      installationID: "bulk-delete-imported-device",
+      wallMilliseconds: 1,
+      monotonicNanoseconds: 1,
+      partialHistory: false,
+      displayName: "Imported Device"
+    )
+    let importURL = sourcePaths.directory.appendingPathComponent("bulk-delete-import.json")
+    try ViewerStoreExportService(
+      pool: sourcePool,
+      leases: ViewerStoreLeaseRegistry()
+    ).export(recordingID: sourceRecording.rowID, to: importURL)
+
+    let paths = try makePaths()
+    let pool = try ViewerSQLitePool(migrating: paths)
+    defer { pool.close() }
+    let store = ViewerEventStore(pool: pool, configuration: { .default })
+    let recording = try store.beginRecording(
+      wallMilliseconds: 10,
+      monotonicNanoseconds: 10,
+      reason: "bulk-delete-cancellation-target"
+    )
+    let device = try store.beginDeviceSession(
+      recording: recording,
+      installationID: "bulk-delete-existing-device",
+      wallMilliseconds: 10,
+      monotonicNanoseconds: 10,
+      partialHistory: false,
+      displayName: "Existing Device"
+    )
+    let retainedEventCount = 4_096
+    for start in stride(from: 0, to: retainedEventCount, by: 256) {
+      let end = min(start + 256, retainedEventCount)
+      let observations = try (start..<end).map { index in
+        try makeObservation(
+          recording: recording,
+          device: device,
+          sequence: UInt64(index + 1),
+          value: "existing-\(index)"
+        )
+      }
+      _ = try store.appendEvents(observations)
+    }
+    let document = try ViewerSessionImportDocument.open(
+      importURL,
+      maximumFileBytes: ViewerSessionTransferLimits.maximumFileBytes,
+      snapshotDirectory: paths.directory
+    )
+    let cancellation = ViewerSessionImportCancellation()
+    let phase = LockedViewerImportPhase()
+    let progressGate = ArmableViewerExecutionGate()
+    progressGate.arm()
+    let errors = LockedViewerStoreErrors()
+    let finished = expectation(description: "Cancelled bulk replacement rolled back")
+
+    DispatchQueue.global(qos: .utility).async {
+      do {
+        _ = try store.replaceCurrentSession(
+          recording: recording,
+          with: document,
+          cancellation: cancellation,
+          progress: { phase.set($0) },
+          transactionProgress: {
+            if phase.value == .recording { progressGate.run() }
+          }
+        )
+        errors.append(nil)
+      } catch {
+        errors.append(error as? ViewerStoreError)
+      }
+      finished.fulfill()
+    }
+
+    XCTAssertEqual(progressGate.waitUntilBlocked(), .success)
+    cancellation.cancel()
+    progressGate.release()
+    wait(for: [finished], timeout: 5)
+    XCTAssertEqual(errors.values, [.cancelled])
+    XCTAssertEqual(try scalar("SELECT COUNT(*) FROM Events", at: paths), Int64(retainedEventCount))
+    XCTAssertEqual(try scalar("SELECT COUNT(*) FROM DeviceSessions", at: paths), 1)
+  }
+
+  func testCompleteSessionRoundTripRegeneratesOfflineIdentityAndCancellationRollsBack() throws {
+    let sourcePaths = try makePaths()
+    let sourcePool = try ViewerSQLitePool(migrating: sourcePaths)
+    defer { sourcePool.close() }
+    let sourceStore = ViewerEventStore(pool: sourcePool, configuration: { .default })
+    let sourceRecording = try sourceStore.beginRecording(
+      wallMilliseconds: 1_000,
+      monotonicNanoseconds: 2_000,
+      reason: "round-trip-source"
+    )
+    let firstDevice = try sourceStore.beginDeviceSession(
+      recording: sourceRecording,
+      installationID: "raw-installation-never-imported",
+      wallMilliseconds: 1_000,
+      monotonicNanoseconds: 2_000,
+      partialHistory: false,
+      displayName: "Imported App",
+      applicationIdentifier: "com.example.imported",
+      applicationVersion: "1.0"
+    )
+    let secondDevice = try sourceStore.beginDeviceSession(
+      recording: sourceRecording,
+      installationID: "raw-installation-never-imported",
+      wallMilliseconds: 1_100,
+      monotonicNanoseconds: 2_100,
+      partialHistory: false,
+      displayName: "Imported App"
+    )
+    let repeatedPeerEventID = EventID()
+    _ = try sourceStore.appendEvent(
+      makeObservation(
+        recording: sourceRecording,
+        device: firstDevice,
+        sequence: 1,
+        value: "one",
+        eventID: repeatedPeerEventID,
+        content: .object([
+          "decimal": .number(1),
+          "exponent": .number(100),
+        ])
+      )
+    )
+    _ = try sourceStore.appendEvent(
+      makeObservation(
+        recording: sourceRecording,
+        device: secondDevice,
+        sequence: 1,
+        value: "two",
+        eventID: repeatedPeerEventID
+      )
+    )
+    try sourceStore.appendStructural(
+      .gap(
+        recording: sourceRecording,
+        device: firstDevice,
+        sequence: 1,
+        reason: "roundTripGap",
+        count: 1,
+        firstWallMilliseconds: 1_200,
+        lastWallMilliseconds: 1_200,
+        directions: "appToViewer",
+        firstWireSequence: 1,
+        lastWireSequence: 1
+      )
+    )
+    let sourceLeases = ViewerStoreLeaseRegistry()
+    let sourceMaintenance = ViewerStoreMaintenance(
+      pool: sourcePool,
+      leases: sourceLeases,
+      configuration: { .default }
+    )
+    _ = try sourceMaintenance.appendAnnotation(
+      recordingID: sourceRecording.rowID,
+      body: "round trip annotation",
+      wallMilliseconds: 1_300
+    )
+    let exportURL = sourcePaths.directory.appendingPathComponent("round-trip.json")
+    try ViewerStoreExportService(pool: sourcePool, leases: sourceLeases).export(
+      recordingID: sourceRecording.rowID,
+      to: exportURL
+    )
+    let document = try ViewerSessionImportDocument.open(
+      exportURL,
+      maximumFileBytes: 64 * 1_024 * 1_024,
+      snapshotDirectory: sourcePaths.directory
+    )
+
+    let targetPaths = try makePaths()
+    let targetPool = try ViewerSQLitePool(migrating: targetPaths)
+    defer { targetPool.close() }
+    let targetStore = ViewerEventStore(pool: targetPool, configuration: { .default })
+    let targetRecording = try targetStore.beginRecording(
+      wallMilliseconds: 9_000,
+      monotonicNanoseconds: 9_000,
+      reason: "round-trip-target"
+    )
+    let imported = try targetStore.replaceCurrentSession(
+      recording: targetRecording,
+      with: document
+    )
+    XCTAssertEqual(imported.deviceCount, 2)
+    XCTAssertEqual(imported.eventCount, 2)
+    XCTAssertEqual(imported.gapCount, 1)
+    XCTAssertEqual(imported.annotationCount, 1)
+    XCTAssertEqual(try scalar("SELECT COUNT(*) FROM InstallationAliases", at: targetPaths), 1)
+    XCTAssertEqual(try scalar("SELECT COUNT(*) FROM DeviceSessions", at: targetPaths), 2)
+    XCTAssertEqual(try scalar("SELECT COUNT(*) FROM Events", at: targetPaths), 2)
+    XCTAssertEqual(
+      try scalar("SELECT COUNT(DISTINCT eventUUID) FROM Events", at: targetPaths),
+      1
+    )
+    XCTAssertEqual(try scalar("SELECT COUNT(*) FROM GapVersions", at: targetPaths), 1)
+    XCTAssertEqual(try scalar("SELECT COUNT(*) FROM AnnotationVersions", at: targetPaths), 1)
+    let importedNumericContent: JSONValue = try targetPool.queryReader.run { database in
+      let statement = try ViewerSQLiteStatement(
+        database: database,
+        sql: "SELECT contentJSON FROM Events WHERE wireSequence=1 ORDER BY rowID LIMIT 1"
+      )
+      guard try statement.step() else { throw ViewerStoreError.corruptStore }
+      return try JSONValue.decodeJSON(from: statement.data(at: 0))
+    }
+    XCTAssertEqual(
+      importedNumericContent,
+      .object(["decimal": .number(1), "exponent": .number(100)])
+    )
+    XCTAssertEqual(
+      try scalar("SELECT COUNT(*) FROM DeviceSessionVersions WHERE state='closed'", at: targetPaths),
+      2
+    )
+    XCTAssertEqual(
+      try scalar(
+        "SELECT COUNT(*) FROM InstallationAliases WHERE installationID='raw-installation-never-imported'",
+        at: targetPaths
+      ),
+      0
+    )
+
+    let midImportCancellation = ViewerSessionImportCancellation()
+    XCTAssertThrowsError(
+      try targetStore.replaceCurrentSession(
+        recording: targetRecording,
+        with: document,
+        cancellation: midImportCancellation,
+        progress: { phase in
+          if phase == .event { midImportCancellation.cancel() }
+        }
+      )
+    ) { error in
+      XCTAssertEqual(error as? ViewerStoreError, .cancelled)
+    }
+    XCTAssertEqual(try scalar("SELECT COUNT(*) FROM Events", at: targetPaths), 2)
+    XCTAssertEqual(try scalar("SELECT COUNT(*) FROM DeviceSessions", at: targetPaths), 2)
+    XCTAssertEqual(targetStore.status().state, .available)
+
+    let cancellation = ViewerSessionImportCancellation()
+    cancellation.cancel()
+    XCTAssertThrowsError(
+      try targetStore.replaceCurrentSession(
+        recording: targetRecording,
+        with: document,
+        cancellation: cancellation
+      )
+    ) { error in
+      XCTAssertEqual(error as? ViewerStoreError, .cancelled)
+    }
+    XCTAssertEqual(try scalar("SELECT COUNT(*) FROM Events", at: targetPaths), 2)
+
+    let symbolicLink = targetPaths.directory.appendingPathComponent("import-link.json")
+    XCTAssertEqual(symlink(exportURL.path, symbolicLink.path), 0)
+    XCTAssertThrowsError(
+      try ViewerSessionImportDocument.open(
+        symbolicLink,
+        maximumFileBytes: 64 * 1_024 * 1_024,
+        snapshotDirectory: targetPaths.directory
+      )
+    ) { error in
+      XCTAssertEqual(error as? ViewerStoreError, .invalidPath)
+    }
+  }
+
+  func testCompleteSessionImportAcceptsLegacyVersionOneDisclosureWarning() throws {
+    let sourcePaths = try makePaths()
+    let sourcePool = try ViewerSQLitePool(migrating: sourcePaths)
+    defer { sourcePool.close() }
+    let sourceStore = ViewerEventStore(pool: sourcePool, configuration: { .default })
+    let sourceRecording = try sourceStore.beginRecording(
+      wallMilliseconds: 1_000,
+      monotonicNanoseconds: 2_000,
+      reason: "legacy-disclosure-source"
+    )
+    let sourceDevice = try sourceStore.beginDeviceSession(
+      recording: sourceRecording,
+      installationID: "legacy-disclosure-device",
+      wallMilliseconds: 1_000,
+      monotonicNanoseconds: 2_000,
+      partialHistory: false,
+      displayName: "Legacy App"
+    )
+    _ = try sourceStore.appendEvent(
+      makeObservation(
+        recording: sourceRecording,
+        device: sourceDevice,
+        sequence: 1,
+        value: "legacy-disclosure-event"
+      )
+    )
+
+    let exportURL = sourcePaths.directory.appendingPathComponent("legacy-disclosure.json")
+    try ViewerStoreExportService(
+      pool: sourcePool,
+      leases: ViewerStoreLeaseRegistry()
+    ).export(recordingID: sourceRecording.rowID, to: exportURL)
+    var root = try XCTUnwrap(
+      JSONSerialization.jsonObject(with: Data(contentsOf: exportURL)) as? [String: Any]
+    )
+    var disclosure = try XCTUnwrap(root["disclosure"] as? [String: Any])
+    disclosure["warning"] =
+      "Event content can contain secrets, personal information, or identifying data."
+    root["disclosure"] = disclosure
+    try JSONSerialization.data(withJSONObject: root).write(to: exportURL, options: .atomic)
+
+    let document = try ViewerSessionImportDocument.open(
+      exportURL,
+      maximumFileBytes: ViewerSessionTransferLimits.maximumFileBytes,
+      snapshotDirectory: sourcePaths.directory
+    )
+    let targetPaths = try makePaths()
+    let targetPool = try ViewerSQLitePool(migrating: targetPaths)
+    defer { targetPool.close() }
+    let targetStore = ViewerEventStore(pool: targetPool, configuration: { .default })
+    let targetRecording = try targetStore.beginRecording(
+      wallMilliseconds: 9_000,
+      monotonicNanoseconds: 9_000,
+      reason: "legacy-disclosure-target"
+    )
+
+    let result = try targetStore.replaceCurrentSession(
+      recording: targetRecording,
+      with: document
+    )
+    XCTAssertEqual(result.deviceCount, 1)
+    XCTAssertEqual(result.eventCount, 1)
+  }
+
+  func testCompleteSessionRoundTripSupportsReconnectRowsBeyondConcurrentDeviceLimit() throws {
+    let sourcePaths = try makePaths()
+    let sourcePool = try ViewerSQLitePool(migrating: sourcePaths)
+    defer { sourcePool.close() }
+    let sourceStore = ViewerEventStore(pool: sourcePool, configuration: { .default })
+    let sourceRecording = try sourceStore.beginRecording(
+      wallMilliseconds: 1_000,
+      monotonicNanoseconds: 2_000,
+      reason: "reconnect-device-import-source"
+    )
+    for index in 0..<17 {
+      _ = try sourceStore.beginDeviceSession(
+        recording: sourceRecording,
+        installationID: "reconnect-device-\(index)",
+        wallMilliseconds: Int64(1_000 + index),
+        monotonicNanoseconds: UInt64(2_000 + index),
+        partialHistory: false,
+        displayName: "Imported App \(index)"
+      )
+    }
+    let exportURL = sourcePaths.directory.appendingPathComponent("seventeen-devices.json")
+    try ViewerStoreExportService(pool: sourcePool, leases: ViewerStoreLeaseRegistry()).export(
+      recordingID: sourceRecording.rowID,
+      to: exportURL
+    )
+
+    let targetPaths = try makePaths()
+    let targetPool = try ViewerSQLitePool(migrating: targetPaths)
+    defer { targetPool.close() }
+    let targetStore = ViewerEventStore(pool: targetPool, configuration: { .default })
+    let targetRecording = try targetStore.beginRecording(
+      wallMilliseconds: 9_000,
+      monotonicNanoseconds: 9_000,
+      reason: "oversized-device-import-target"
+    )
+    let targetDevice = try targetStore.beginDeviceSession(
+      recording: targetRecording,
+      installationID: "preserved-target-device",
+      wallMilliseconds: 9_000,
+      monotonicNanoseconds: 9_000,
+      partialHistory: false,
+      displayName: "Preserved App"
+    )
+    _ = try targetStore.appendEvent(
+      makeObservation(
+        recording: targetRecording,
+        device: targetDevice,
+        sequence: 1,
+        value: "preserved"
+      )
+    )
+    let document = try ViewerSessionImportDocument.open(
+      exportURL,
+      maximumFileBytes: 64 * 1_024 * 1_024,
+      snapshotDirectory: targetPaths.directory
+    )
+
+    let result = try targetStore.replaceCurrentSession(
+      recording: targetRecording,
+      with: document
+    )
+    XCTAssertEqual(result.deviceCount, 17)
+    XCTAssertEqual(try scalar("SELECT COUNT(*) FROM DeviceSessions", at: targetPaths), 17)
+    XCTAssertEqual(try scalar("SELECT COUNT(*) FROM Events", at: targetPaths), 0)
+    XCTAssertEqual(targetStore.status().state, .available)
+  }
+
+  func testSessionImportCancellationInterruptsRootStructuralScan() throws {
+    let paths = try makePaths()
+    try FileManager.default.createDirectory(
+      at: paths.directory,
+      withIntermediateDirectories: true
+    )
+    let source = paths.directory.appendingPathComponent("large-root-scan.json")
+    var bytes = Data("{".utf8)
+    bytes.append(Data(repeating: UInt8(ascii: " "), count: 256 * 1_024))
+    bytes.append(Data("}".utf8))
+    try bytes.write(to: source, options: .atomic)
+    let cancellation = ViewerSessionImportCancellation()
+
+    XCTAssertThrowsError(
+      try ViewerSessionImportDocument.open(
+        source,
+        maximumFileBytes: Int64(bytes.count + 1),
+        snapshotDirectory: paths.directory,
+        cancellation: cancellation,
+        structuralScanProgress: { offset in
+          if offset >= 64 * 1_024 { cancellation.cancel() }
+        }
+      )
+    ) { error in
+      XCTAssertEqual(error as? ViewerStoreError, .cancelled)
+    }
+  }
+
+  func testSessionImportCancellationInterruptsSecondPassArrayWhitespace() throws {
+    let paths = try makePaths()
+    let pool = try ViewerSQLitePool(migrating: paths)
+    defer { pool.close() }
+    let store = ViewerEventStore(pool: pool, configuration: { .default })
+    let recording = try store.beginRecording(
+      wallMilliseconds: 1_000,
+      monotonicNanoseconds: 2_000,
+      reason: "second-pass-cancellation"
+    )
+    let exported = paths.directory.appendingPathComponent("second-pass-source.json")
+    try ViewerStoreExportService(
+      pool: pool,
+      leases: ViewerStoreLeaseRegistry()
+    ).export(recordingID: recording.rowID, to: exported)
+    var bytes = try Data(contentsOf: exported)
+    let emptyDevices = Data("\"devices\":[]".utf8)
+    let range = try XCTUnwrap(bytes.range(of: emptyDevices))
+    var expandedDevices = Data("\"devices\":[".utf8)
+    expandedDevices.append(Data(repeating: UInt8(ascii: " "), count: 256 * 1_024))
+    expandedDevices.append(UInt8(ascii: "]"))
+    bytes.replaceSubrange(range, with: expandedDevices)
+    try bytes.write(to: exported, options: .atomic)
+
+    let cancellation = ViewerSessionImportCancellation()
+    let document = try ViewerSessionImportDocument.open(
+      exported,
+      maximumFileBytes: Int64(bytes.count + 1),
+      snapshotDirectory: paths.directory,
+      cancellation: cancellation
+    )
+    cancellation.cancel()
+    XCTAssertThrowsError(try document.forEachDevice { _ in }) { error in
+      XCTAssertEqual(error as? ViewerStoreError, .cancelled)
+    }
+  }
+
+  func testWorkLimitRejectionsDrainIngressAndLeaveClearReusable() async throws {
+    let paths = try makePaths()
+    let pool = try ViewerSQLitePool(migrating: paths)
+    defer { pool.close() }
+    let store = ViewerEventStore(
+      pool: pool,
+      configuration: { .default },
+      maximumRetainedEventCount: 1,
+      maximumRetainedGapCount: 1
+    )
+    let recording = try store.beginRecording(
+      wallMilliseconds: 1_000,
+      monotonicNanoseconds: 2_000,
+      reason: "work-limit-drain"
+    )
+    let device = try store.beginDeviceSession(
+      recording: recording,
+      installationID: "work-limit-device",
+      wallMilliseconds: 1_000,
+      monotonicNanoseconds: 2_000,
+      partialHistory: false,
+      displayName: "Work Limit Device"
+    )
+    let ingress = ViewerStoreIngress(store: store)
+    let eventOutcomes = LockedViewerJournalOutcomes()
+    let rejectedStructural = LockedViewerStoreErrors()
+    ingress.setRejectedStructuralHandler { _, error in
+      rejectedStructural.append(error)
+    }
+
+    XCTAssertEqual(
+      ingress.admit(
+        try makeObservation(recording: recording, device: device, sequence: 1, value: "first")
+      ),
+      .admitted
+    )
+    let initialFlushOutcome = await ingress.flush()
+    XCTAssertEqual(initialFlushOutcome, .drained)
+    XCTAssertEqual(
+      ingress.admit(
+        try makeObservation(recording: recording, device: device, sequence: 2, value: "rejected"),
+        outcome: { eventOutcomes.append($0) }
+      ),
+      .admitted
+    )
+    let eventLimitFlushOutcome = await ingress.flush()
+    XCTAssertEqual(eventLimitFlushOutcome, .drained)
+    XCTAssertEqual(eventOutcomes.values, [.unavailable])
+
+    XCTAssertEqual(
+      ingress.admit(
+        .gap(
+          recording: recording,
+          device: device,
+          sequence: 1,
+          reason: "firstGap",
+          count: 1,
+          firstWallMilliseconds: 1_000,
+          lastWallMilliseconds: 1_000,
+          directions: "appToViewer",
+          firstWireSequence: 1,
+          lastWireSequence: 1
+        )
+      ),
+      .admitted
+    )
+    let gapLimitFlushOutcome = await ingress.flush()
+    XCTAssertEqual(gapLimitFlushOutcome, .drained)
+    XCTAssertEqual(
+      ingress.admit(
+        .gap(
+          recording: recording,
+          device: device,
+          sequence: 2,
+          reason: "rejectedGap",
+          count: 1,
+          firstWallMilliseconds: 2_000,
+          lastWallMilliseconds: 2_000,
+          directions: "appToViewer",
+          firstWireSequence: 2,
+          lastWireSequence: 2
+        )
+      ),
+      .admitted
+    )
+    let clearFlushOutcome = await ingress.flush()
+    XCTAssertEqual(clearFlushOutcome, .drained)
+    XCTAssertEqual(rejectedStructural.values, [.workLimitExceeded])
+
+    let clear = try store.clearCurrentSessionEvents(recording: recording)
+    XCTAssertEqual(clear.deletedEventCount, 1)
+    XCTAssertEqual(
+      ingress.admit(
+        try makeObservation(recording: recording, device: device, sequence: 3, value: "after-clear")
+      ),
+      .admitted
+    )
+    XCTAssertEqual(
+      ingress.admit(
+        .gap(
+          recording: recording,
+          device: device,
+          sequence: 3,
+          reason: "afterClearGap",
+          count: 1,
+          firstWallMilliseconds: 3_000,
+          lastWallMilliseconds: 3_000,
+          directions: "appToViewer",
+          firstWireSequence: 3,
+          lastWireSequence: 3
+        )
+      ),
+      .admitted
+    )
+    let recoveryFlushOutcome = await ingress.flush()
+    XCTAssertEqual(recoveryFlushOutcome, .drained)
+    XCTAssertEqual(try scalar("SELECT COUNT(*) FROM Events", at: paths), 1)
+    XCTAssertEqual(try scalar("SELECT COUNT(*) FROM GapVersions", at: paths), 1)
+  }
+
+  func testCompleteExportByteBudgetFailsEarlyAndPreservesDestination() throws {
+    let paths = try makePaths()
+    let pool = try ViewerSQLitePool(migrating: paths)
+    defer { pool.close() }
+    let store = ViewerEventStore(pool: pool, configuration: { .default })
+    let recording = try store.beginRecording(
+      wallMilliseconds: 1_000,
+      monotonicNanoseconds: 2_000,
+      reason: "bounded-complete-export"
+    )
+    let destination = paths.directory.appendingPathComponent("bounded-export.json")
+    let original = Data("preserve-existing-destination".utf8)
+    try original.write(to: destination)
+    let exporter = ViewerStoreExportService(
+      pool: pool,
+      leases: ViewerStoreLeaseRegistry(),
+      maximumCompleteFileBytes: 64
+    )
+
+    XCTAssertThrowsError(
+      try exporter.export(recordingID: recording.rowID, to: destination)
+    ) { error in
+      XCTAssertEqual(error as? ViewerStoreError, .workLimitExceeded)
+    }
+    XCTAssertEqual(try Data(contentsOf: destination), original)
+    let temporaryPrefix = ".\(destination.lastPathComponent)."
+    XCTAssertFalse(
+      try FileManager.default.contentsOfDirectory(atPath: paths.directory.path)
+        .contains { $0.hasPrefix(temporaryPrefix) && $0.hasSuffix(".tmp") }
+    )
+    XCTAssertTrue(
+      ViewerStoreExplorerFailure.exportTooLarge.operatorMessage.contains("Clear unneeded Events")
+    )
   }
 
   @MainActor
@@ -12920,9 +14037,87 @@ final class ViewerStoreTests: XCTestCase {
       for name in ["EventCausalityLookup", "GapTimelineAllDevices", "GapTimelineByDevice"] {
         try ViewerSQLiteConnection.execute("DROP INDEX \(name)", on: database)
       }
+      for name in [
+        "RetainedEventCountInsert", "RetainedEventCountDelete", "RetainedGapCountInsert",
+        "RetainedGapCountDelete", "RetainedAnnotationCountInsert",
+        "RetainedAnnotationCountDelete",
+      ] {
+        try ViewerSQLiteConnection.execute("DROP TRIGGER \(name)", on: database)
+      }
+      try ViewerSQLiteConnection.execute(
+        "DELETE FROM StoreMetadata WHERE key IN ('retainedEventCount','retainedGapCount','retainedAnnotationCount')",
+        on: database
+      )
       try ViewerSQLiteConnection.execute("PRAGMA user_version=1", on: database)
     }
     pool.close()
+    return paths
+  }
+
+  private func makeVersionTwoStore(recordingLogicalID: String) throws -> ViewerStorePaths {
+    let paths = try makePaths()
+    let pool = try ViewerSQLitePool(migrating: paths)
+    let store = ViewerEventStore(pool: pool, configuration: { .default })
+    let recording = try store.beginRecording(
+      wallMilliseconds: 1,
+      monotonicNanoseconds: 1,
+      reason: recordingLogicalID
+    )
+    let device = try store.beginDeviceSession(
+      recording: recording,
+      installationID: "v2-installation",
+      wallMilliseconds: 1,
+      monotonicNanoseconds: 1,
+      partialHistory: false,
+      displayName: "V2 App"
+    )
+    _ = try store.appendEvent(
+      makeObservation(recording: recording, device: device, sequence: 1, value: "v2")
+    )
+    try store.appendStructural(
+      .gap(
+        recording: recording,
+        device: device,
+        sequence: 1,
+        reason: "v2-gap",
+        count: 1,
+        firstWallMilliseconds: 1,
+        lastWallMilliseconds: 1,
+        directions: "appToViewer",
+        firstWireSequence: 1,
+        lastWireSequence: 1
+      )
+    )
+    _ = try ViewerStoreMaintenance(
+      pool: pool,
+      leases: ViewerStoreLeaseRegistry(),
+      configuration: { .default }
+    ).appendAnnotation(recordingID: recording.rowID, body: "v2-note", wallMilliseconds: 1)
+    pool.close()
+
+    let writer = try ViewerSQLiteConnection(role: .writer, path: paths.database.path)
+    try writer.run { database in
+      try ViewerSQLiteConnection.execute("BEGIN IMMEDIATE", on: database)
+      do {
+        for name in [
+          "RetainedEventCountInsert", "RetainedEventCountDelete", "RetainedGapCountInsert",
+          "RetainedGapCountDelete", "RetainedAnnotationCountInsert",
+          "RetainedAnnotationCountDelete",
+        ] {
+          try ViewerSQLiteConnection.execute("DROP TRIGGER \(name)", on: database)
+        }
+        try ViewerSQLiteConnection.execute(
+          "DELETE FROM StoreMetadata WHERE key IN ('retainedEventCount','retainedGapCount','retainedAnnotationCount')",
+          on: database
+        )
+        try ViewerSQLiteConnection.execute("PRAGMA user_version=2", on: database)
+        try ViewerSQLiteConnection.execute("COMMIT", on: database)
+      } catch {
+        try? ViewerSQLiteConnection.execute("ROLLBACK", on: database)
+        throw error
+      }
+    }
+    writer.close()
     return paths
   }
 
@@ -13560,6 +14755,40 @@ private final class LockedViewerStoreErrors: @unchecked Sendable {
   func append(_ value: ViewerStoreError?) {
     lock.lock()
     storage.append(value)
+    lock.unlock()
+  }
+}
+
+private final class LockedViewerJournalOutcomes: @unchecked Sendable {
+  private let lock = NSLock()
+  private var storage: [ViewerEventJournalOutcome] = []
+
+  var values: [ViewerEventJournalOutcome] {
+    lock.lock()
+    defer { lock.unlock() }
+    return storage
+  }
+
+  func append(_ value: ViewerEventJournalOutcome) {
+    lock.lock()
+    storage.append(value)
+    lock.unlock()
+  }
+}
+
+private final class LockedViewerImportPhase: @unchecked Sendable {
+  private let lock = NSLock()
+  private var storage: ViewerSessionImportPhase?
+
+  var value: ViewerSessionImportPhase? {
+    lock.lock()
+    defer { lock.unlock() }
+    return storage
+  }
+
+  func set(_ value: ViewerSessionImportPhase) {
+    lock.lock()
+    storage = value
     lock.unlock()
   }
 }

@@ -5,78 +5,29 @@ TBD - created by archiving change viewer-local-store-search. Update Purpose afte
 ## Requirements
 ### Requirement: Viewer owns one local SQLite store with explicit schema and failure boundaries
 
-The Viewer SHALL use the system SQLite library with exactly one serial writer connection, one serial interactive-query connection, and one serial export connection. Each connection SHALL confine every statement and pointer to its executor. Startup SHALL open only a migration writer on a serial off-MainActor executor, complete migration and in-transaction probes, close that connection, then open and probe a fresh normal writer before either read connection. The fresh writer and later readers SHALL use `temp_store=MEMORY` and an explicit 8-MiB cache target; the migration-only FILE-temp/32-MiB settings SHALL never be published. The store SHALL use schema version 2 with immutable recording/device bases, installation aliases, immutable Events, append-only recording/device/disposition/policy/drop/gap/annotation versions, store metadata, a transactional FTS5 index, and explorer indexes for scoped Event UUID lookup and gap diagnostics. Migration from schema 1 SHALL add only those bounded indexes in one writer transaction and SHALL rewrite no Event/content row. Startup SHALL validate JSON1, FTS5, foreign keys, expected tables/indexes, accepted plans, accepted connection settings, and accepted schema version before writes. An unknown newer schema, corruption, migration failure, or missing required SQLite feature SHALL fail closed without deleting or recreating data and SHALL NOT prevent the network listener or bounded live projection from operating.
+Viewer SHALL own one SQLite working Store for the current process-scoped Session under a unique exact NearWire-owned directory. SQLite SHALL remain an internal bounded query, filter, detail, performance, Clear, import, and export engine; its internal recording row SHALL NOT become a user-visible Source. The working Store SHALL use the existing explicit schema, three serialized connections, WAL, foreign keys, defensive/trusted-schema settings, permissions, cancellation, and safe failure boundaries. Viewer SHALL NOT reopen the directory as historical Viewer state in a later process.
 
-The Application Support directory SHALL be mode `0700`. Main database, WAL, SHM, rollback-journal/migration, and export-temporary artifacts SHALL be regular nonsymlink owner-only files with mode `0600` and SHALL be inspected while WAL is active and after close. SQLite SHALL use defensive/trusted-schema restrictions, memory-only temporary storage for normal connections, and `secure_delete=ON` where supported. Schema-1 index migration MAY use disk-backed SQLite temporary sorting only through the system default VFS and the process-provided sandbox/private temporary directory after verifying that directory is current-user-owned, mode `0700`, and nonsymlink. NearWire SHALL NOT read or mutate SQLite/process-global temporary-directory state, environment variables, or install a custom VFS. SQLite-created sorter files SHALL contain only index keys, SHALL use the system delete-on-close lifecycle, and SHALL have no remaining process file descriptor after the migration receipt completes. Documentation SHALL describe retention and OS temporary-file reclamation as logical cleanup, not guaranteed erasure from WAL history, temporary storage, filesystem snapshots, or backups.
+Terminal application cleanup SHALL close every connection before removing only the exact non-symlink working directory and its NearWire ownership marker. Termination SHALL wait at most one second; the retained cleanup owner SHALL use bounded removal retries while the process remains alive and SHALL NOT block application exit indefinitely. A timeout, permanent removal failure, or crash MAY leave a temporary directory for operating-system cleanup; a later Viewer process SHALL NOT adopt its Session content. Store unavailability SHALL preserve bounded live presentation and fixed recovery guidance without creating a historical fallback.
 
-Schema-1 migration SHALL own one exact operation token, one index statement at a time, a 32-MiB SQLite page/cache target, and no application row array. Before beginning, checked arithmetic SHALL require both database and OS temporary volumes, once if identical, to have free capacity of at least `512 MiB + 6 * allocated(main database + WAL + SHM)`; unsafe temporary root, insufficient capacity, or overflow SHALL not begin a transaction. A progress callback at most every 10,000 VM instructions SHALL cancel on token invalidation or when either volume's remaining capacity falls below 256 MiB. The populated-fixture acceptance gate SHALL keep process-heap growth above the idle writer baseline at or below 128 MiB and acknowledge injected in-SQLite cancellation within 250 ms; total migration duration SHALL be diagnostic only. Viewer SHALL attempt automatically at most once per process and SHALL retry only after explicit Retry Storage or a later launch.
+Schema version 3 SHALL add transactionally maintained retained Event, gap, and annotation counters. A valid schema-version-2 working Store encountered during same-process recovery SHALL migrate those counters and their triggers atomically from durable row counts before normal connections open. Migration failure or cancellation SHALL leave the schema-version-2 Store unchanged.
 
-Migration status SHALL use only `Preparing history update`, numbered index phase, `Validating history update`, `Migration needs more disk space`, `Migration cancelled`, or `Migration failed`. While schema 1 is intact or migrating, persistence/query/export SHALL remain unavailable while networking/live presentation may continue. All indexes, plan/schema/feature probes, and `user_version=2` SHALL complete inside one transaction. The migration connection SHALL close after commit or rollback and zero sorter descriptors SHALL remain. On success, a fresh normal writer SHALL probe schema 2, `temp_store=MEMORY`, the 8-MiB cache target, hardening, features, indexes, and plans before two equally normal fresh readers open and availability publishes. Post-open failure SHALL close them and fail unavailable. Cancellation, termination, resource or injected failure SHALL roll back to probe-valid schema 1, close every SQLite sorter descriptor, publish no schema 2, and join cleanup before completion.
+#### Scenario: Viewer launches twice
 
-Read operations SHALL use short transactions with SQLite progress budgets. Every interactive-read operation SHALL have an enqueue-to-completion token. Generation-bound cancellation MAY call `sqlite3_interrupt` only while that exact token is active on that exact read connection and SHALL NOT interrupt a queued, completed, superseded, or following operation. Export cancellation SHALL remain exact to the export generation.
-
-When journal insertion encounters an existing exact `(recordingID, deviceSessionID, direction, wireSequence)` row, equality SHALL use the same durable projection as live ingress: Event ID/type, canonical content JSON bytes, App-created time normalized once to nearest integer milliseconds since 1970, App monotonic time, priority, TTL, schema version, correlation/reply IDs, and initial disposition. Source/target/session epoch SHALL already be exact-session transport invariants and cannot reach journal insertion when mismatched. Session metadata, deterministic byte accounting, and the later observation's newly sampled Viewer receive times SHALL not participate. Equality SHALL be an idempotent no-op preserving the first accounting/receive values. A different compared field SHALL preserve the existing immutable row and return one typed content-free `journalConflict` outcome to the live projection without changing store availability. Equality SHALL compare fields/bytes rather than trust a hash alone. It SHALL NOT rewrite the row, create a second durable row, expose content, or convert an expected duplicate collision into generic corruption.
-
-#### Scenario: First launch creates schema version 2
-
-- **WHEN** the expected Application Support database does not exist
-- **THEN** Viewer creates schema version 2 and every sidecar/temporary artifact under the owner-only nonsymlink policy in one migration transaction
-- **AND** no SQLite dependency is added to Core, SDK, the root package manifest, or the podspec
-
-#### Scenario: Schema version 1 is opened
-
-- **WHEN** a valid schema-1 store is opened after this change
-- **THEN** the off-MainActor migration preflights headroom, exposes bounded safe progress, and one writer transaction adds the scoped Event UUID and gap-diagnostic indexes, probes final plans/schema, and sets version 2 without rewriting Event/content rows
-- **AND** success closes the migration writer and publishes only a freshly probed memory-temp/8-MiB-cache normal pool, while cancellation, termination, unsafe OS temporary storage, insufficient resources, or failure closes every sorter descriptor, rolls back to intact schema 1, and leaves persistence/query/export unavailable rather than partially upgraded or retrying in a loop
-
-#### Scenario: Existing schema is unsupported
-
-- **WHEN** the database reports an unknown newer schema version or fails integrity/schema validation
-- **THEN** persistence, query, and export become unavailable with one closed safe category
-- **AND** Viewer neither recreates the database nor terminates active network sessions
+- **WHEN** a later Viewer process starts after an earlier working Session ended or crashed
+- **THEN** it creates a distinct empty working Session and does not catalog or reopen the earlier recording
+- **AND** no prior Event appears unless the operator explicitly imports a supported export
 
 #### Scenario: Query cancellation races completion
 
-- **WHEN** cancellation for operation A arrives after A completes and operation B becomes active
-- **THEN** A's token is a no-op and only a cancellation carrying B's exact token may interrupt B
-- **AND** the following operation observes no stale interrupt or leaked statement
+- **WHEN** one query token is cancelled as its SQLite operation completes
+- **THEN** only that exact operation observes cancellation
+- **AND** queued or successor working-Session operations are not poisoned
 
-### Requirement: Viewer automatically records runtime and device-session lifecycle
+#### Scenario: Existing schema-version-2 Store recovers
 
-Each live Viewer runtime SHALL create one stable logical recording context before device transfer begins. A durable recording row SHALL exist only after its parent admission commits. A durable device row SHALL exist only after that recording and the exact device-start admission commit in causal order; Event/sample rows SHALL require the durable device parent. Pairing refresh SHALL preserve the context. Shutdown SHALL close durable device rows before the durable recording row through reserved structural capacity and bounded final flush. A later runtime SHALL use a new context while retaining prior history.
-
-If storage is unavailable at start, Viewer SHALL keep networking live without claiming durable rows. A successful same-runtime retry SHALL materialize the original recording identity/time, one coalesced unavailable gap, and only device contexts still live; later Events become eligible after those commits. Queue admission alone SHALL NOT count as recovery. The missed-observation aggregate SHALL remain owned by a generation-bound in-flight claim until materialization and bounded gap ownership complete; failure SHALL merge the claim with observations received during the attempt without overflow. Devices that started and ended entirely during the outage SHALL be represented only by the gap.
-
-Every successful database reopen SHALL reconcile exactly one prior recording group per transaction and at most eight immediate group turns. One group SHALL contain at most 16 open device children; the transaction SHALL append every child interruption version before the parent interruption version and commit all or none. More children SHALL fail as schema corruption. Cleanup SHALL not select an unreconciled open parent. A new durable recording SHALL wait for zero prior open groups; if the turn bound is exhausted first, networking MAY continue non-durably until a later explicit retry.
-
-#### Scenario: Several devices share one Viewer runtime
-
-- **WHEN** four Apps connect, disconnect, and reconnect while one Viewer window remains live
-- **THEN** all logical connections belong to one recording context and each durably admitted exact connection has one distinct device-session row
-
-#### Scenario: Viewer reopens
-
-- **WHEN** the last window closes cleanly and a later window starts listening
-- **THEN** the earlier recording session is closed and queryable
-- **AND** the later runtime uses a new recording session without deleting prior history
-
-#### Scenario: Store becomes available mid-runtime
-
-- **WHEN** Viewer started without storage and an explicit retry succeeds after one device ended and another remains live
-- **THEN** the recording parent and live device materialize in causal order with a partial-history marker and one bounded unavailable gap
-- **AND** the ended device and missing Events are not reconstructed as false complete rows
-
-#### Scenario: Admitted recovery work fails before materialization
-
-- **WHEN** Viewer admits same-runtime recovery work but recording or live-device materialization fails
-- **THEN** Viewer remains unavailable and does not publish successful recovery
-- **AND** the exact claimed missed-observation aggregate remains available to one later explicit retry
-
-#### Scenario: Prior process left open rows
-
-- **WHEN** startup finds durable recording/device rows left open by crash or failed final flush
-- **THEN** bounded reconciliation closes them idempotently before admitting the new recording
-- **AND** no orphan remains permanently protected as active
+- **WHEN** same-process recovery opens a valid schema-version-2 Store that predates retained counters
+- **THEN** Viewer installs schema-version-3 counters and triggers in one migration transaction
+- **AND** every initialized counter equals its authoritative durable row count
 
 ### Requirement: Validated bidirectional Event outcomes are journaled without becoming protocol authority
 
@@ -437,3 +388,71 @@ quota, retention, pin, deletion, export, secure-file, and cleanup behavior.
 - **WHEN** two 129-row scopes retain identical 128 irrelevant carriers but only one hidden tail is performance-applicable
 - **THEN** both report `hasMoreRows` while only the applicable-tail receipt reports `hasMoreApplicableGaps`
 - **AND** a classification budget failure cannot report the hidden tail as irrelevant-only
+
+### Requirement: Viewer automatically records one working-Session lifecycle
+
+Every accepted Viewer runtime SHALL materialize exactly one internal current recording, support up to 16 concurrently connected Devices, and retain at most 4,096 durable reconnect Device-session rows for the process-scoped working Session. The Store, complete exporter, and importer SHALL share retained-count bounds of 4,096 Devices, 2,000,000 Events, 500,000 gaps, and 100,000 annotations. Complete transfer files SHALL be limited to 4 GiB. Event, gap, and annotation retained-count checks SHALL use transactionally maintained constant-time counters. If a retained bound is exhausted, the offending ingress entry or Event batch SHALL be rejected and released through the bounded unavailable-storage path; ingress flush and a later Clear SHALL remain live. Reconnects, connected Devices, Events, dispositions, gaps, drops, and Performance inputs SHALL remain bound to that Session. Viewer SHALL expose no recording history, pin, retention, rename, note, annotation, or historical Source selection UI.
+
+The Store MAY recover during the same process and replay bounded runtime/device lifecycle metadata needed to resume current capture, but a later process SHALL start an empty Session. The runtime logical ID remains the only current source identity used by Explorer and Performance.
+
+Coordinator gap sequence allocation SHALL resume from the durable maximum coordinator sequence for the current recording. Clear MAY reset the sequence to one only after all current gaps are deleted. Import SHALL advance the successor beyond every imported coordinator gap so a later runtime diagnostic cannot collide with imported or pre-recovery rows.
+
+#### Scenario: Several Devices share one Viewer runtime
+
+- **WHEN** several Apps connect, disconnect, and reconnect during the process
+- **THEN** their Device rows and Events remain queryable under the one current working Session
+- **AND** Devices never become separate Sources
+
+#### Scenario: Viewer reopens
+
+- **WHEN** the application starts in a new process
+- **THEN** it exposes one empty current Session
+- **AND** the prior process Session is available only through an explicit previously exported file
+
+### Requirement: Current Session Clear is atomic and generation safe
+
+The Store SHALL expose one serialized destructive Clear operation for the current working Session. After explicit operator confirmation, it SHALL establish a write boundary, reject or cancel predecessor query/export/import leases, and delete current Event rows, Event disposition and full-text rows, gaps, drops, annotations, and other Event-derived Performance inputs in one transaction. It SHALL preserve the current internal recording, Device-session lifecycle rows, active connection ownership, listener state, rate policy, and Viewer identity.
+
+Clear success SHALL advance Store and presentation generations. The live window SHALL discard every pre-boundary Event and diagnostic value before successor presentation is admitted. Pre-clear page, detail, renderer, Performance, or export completion SHALL update no UI. Events admitted after the boundary SHALL remain. Failure or cancellation SHALL leave all Session data unchanged.
+
+#### Scenario: Event commit races Clear
+
+- **WHEN** one Event write is admitted before the serialized Clear boundary and another is admitted after it
+- **THEN** the earlier Event is absent and the later Event remains
+- **AND** neither a stale durable page nor a stale live row can restore the earlier Event
+
+#### Scenario: Clear transaction fails
+
+- **WHEN** any dependent delete or generation update fails
+- **THEN** the Store rolls back the complete Clear
+- **AND** the existing timeline and Performance projection remain authoritative
+
+### Requirement: Session JSON transfer is bounded, explicit, and atomic
+
+Complete current-Session export SHALL retain the existing unencrypted JSON disclosure, finite export lease, frozen snapshot, bounded streaming, cancellation, and atomic destination replacement. The file SHALL identify whether it is a complete Session. Filtered exports SHALL NOT be accepted as Session imports.
+
+Import SHALL require a separate destructive replacement disclosure and SHALL be admitted only when there is no active, negotiating, or disconnecting Device and no pending App approval. It SHALL accept only a regular non-symlink complete NearWire JSON export at the supported schema version. A mapped structural scanner SHALL decode one bounded value at a time, validate file and per-record limits, strict cross-references, canonical Event fields, JSON content, and Session completeness without materializing the complete document graph.
+
+The import scanner SHALL observe cancellation during snapshot copying, root structural scanning, per-record validation, and transactional staging at bounded intervals. The SQLite progress handler SHALL interrupt a cancelled bulk replacement and roll back the transaction. Peer Event UUIDs SHALL remain non-unique content; only the canonical Device/direction/wire-sequence journal key SHALL be unique.
+
+Imported aliases SHALL remain offline pseudonyms. Complete export disclosure SHALL state that Session metadata and notes, annotations and diagnostic gaps, Event metadata and content, and peer-provided App display name, application identifier, and application version are included verbatim; App hints remain unauthenticated. Viewer SHALL generate new local runtime/device identities and SHALL NOT import installation identifiers, TLS material, pairing state, endpoints, raw connection IDs, queue state, control capabilities, delivery acknowledgements, or trust. Import SHALL stage all rows and atomically replace current Session Event-derived data. Failure, cancellation, unsupported schema, filtered input, ambiguity, invalid content, or configured Store capacity exhaustion SHALL change nothing and expose a fixed safe category with applicable operator guidance. Import and export destinations SHALL never persist.
+
+The complete exporter SHALL validate the same retained-count and file-size limits as the importer. It SHALL enforce the file limit incrementally before streamed bytes exceed the bound and verify the completed temporary file again. If the frozen snapshot or streamed temporary file exceeds a shared transfer limit, export SHALL fail before replacing the operator's destination and SHALL provide fixed guidance to reduce or Clear the Session rather than filter-query guidance.
+
+#### Scenario: Complete Session round trip
+
+- **WHEN** the operator exports the current Session, clears it, and imports that complete file while no Device is active
+- **THEN** bounded Events, device pseudonyms, dispositions, gaps, and supported metadata rematerialize under new local identities
+- **AND** no transport identity, control capability, or delivery claim is restored
+
+#### Scenario: Import is attempted while a Device is active
+
+- **WHEN** any Device connection or pending approval belongs to the current runtime
+- **THEN** import is rejected before file selection or Store mutation with fixed guidance
+- **AND** capture and the current Session remain unchanged
+
+#### Scenario: Import validation fails
+
+- **WHEN** the file is a filtered export, unsupported schema, symbolic link, oversized record, malformed JSON, or has an unresolved Device reference
+- **THEN** no current row is changed
+- **AND** no untrusted imported value appears in diagnostics or logs

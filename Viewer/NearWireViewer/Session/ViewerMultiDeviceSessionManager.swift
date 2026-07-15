@@ -636,6 +636,12 @@ final class ViewerMultiDeviceSessionManager: ViewerAdmissionHandoffOwning, Viewe
     return entries.count
   }
 
+  var hasWorkspaceMutationBlockingSessions: Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    return !entries.isEmpty || !displacedEntries.isEmpty
+  }
+
   var displacedSessionCount: Int {
     lock.lock()
     defer { lock.unlock() }

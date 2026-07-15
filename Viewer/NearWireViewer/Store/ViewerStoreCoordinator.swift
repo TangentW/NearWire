@@ -156,6 +156,7 @@ final class ViewerStoreCoordinator: @unchecked Sendable, CustomReflectable,
   private var nondurableUnavailableFirstWallMilliseconds: Int64?
   private var nondurableUnavailableLastWallMilliseconds: Int64?
   private let preparationDropLock = NSLock()
+  private let importLock = NSLock()
   private let storageCloseLock = NSLock()
   private let storageCloseGroup = DispatchGroup()
   private let runtimeEndLock = NSLock()
@@ -164,6 +165,7 @@ final class ViewerStoreCoordinator: @unchecked Sendable, CustomReflectable,
   private var runtimeEndWaiters: [CheckedContinuation<Bool, Never>] = []
   private var preparationDrops: [UUID: Int64] = [:]
   private var unattributedPreparationDrops: Int64 = 0
+  private var activeImportCancellation: ViewerSessionImportCancellation?
 
   init(
     paths: ViewerStorePaths,
@@ -263,6 +265,118 @@ final class ViewerStoreCoordinator: @unchecked Sendable, CustomReflectable,
 
   func afterCurrentPreparationPrefix(_ handler: @escaping @Sendable () -> Void) {
     preparationQueue.afterCurrentPrefix(handler)
+  }
+
+  @discardableResult
+  func clearCurrentSession(
+    completion: @escaping @Sendable (Result<ViewerCurrentSessionClearResult, ViewerStoreError>) -> Void
+  ) -> Bool {
+    preparationQueue.offer(bytes: ViewerStoreQuota.structuralReservation, kind: .lifecycle) {
+      [weak self] _ in
+      guard let self, let recording = self.currentRecording else {
+        completion(.failure(.unavailable))
+        return
+      }
+      do {
+        guard self.ingress.flushSynchronously() == .drained else {
+          throw ViewerStoreError.unavailable
+        }
+        let result = try self.eventStore.clearCurrentSessionEvents(recording: recording)
+        self.pendingGaps.removeAll(keepingCapacity: true)
+        self.nextGapSequence = 1
+        for connectionID in Array(self.devices.keys) {
+          self.devices[connectionID]?.nextDropSequence = 1
+          self.devices[connectionID]?.projectedDropCounts.removeAll(keepingCapacity: true)
+        }
+        completion(.success(result))
+      } catch let error as ViewerStoreError {
+        completion(.failure(error))
+      } catch {
+        completion(.failure(.unavailable))
+      }
+    }
+  }
+
+  @discardableResult
+  func importCurrentSession(
+    from url: URL,
+    completion: @escaping @Sendable (
+      Result<ViewerCurrentSessionImportResult, ViewerStoreError>
+    ) -> Void
+  ) -> Bool {
+    let cancellation = ViewerSessionImportCancellation()
+    importLock.lock()
+    guard activeImportCancellation == nil else {
+      importLock.unlock()
+      completion(.failure(.busy))
+      return false
+    }
+    activeImportCancellation = cancellation
+    importLock.unlock()
+
+    let accepted = preparationQueue.offer(
+      bytes: ViewerStoreQuota.structuralReservation,
+      kind: .lifecycle
+    ) {
+      [weak self] _ in
+      defer { self?.completeImport(cancellation) }
+      guard let self, let recording = self.currentRecording else {
+        completion(.failure(.unavailable))
+        return
+      }
+      guard self.devices.isEmpty, self.nondurableConnections.isEmpty else {
+        completion(.failure(.busy))
+        return
+      }
+      do {
+        guard self.ingress.flushSynchronously() == .drained else {
+          throw ViewerStoreError.unavailable
+        }
+        let document = try ViewerSessionImportDocument.open(
+          url,
+          maximumFileBytes: ViewerSessionTransferLimits.maximumFileBytes,
+          snapshotDirectory: self.pool.paths.directory,
+          cancellation: cancellation,
+          reserveSnapshotBytes: { bytes in
+            try self.pool.diskGuard.requireReserve(
+              at: self.pool.paths.directory,
+              plannedBytes: bytes
+            )
+          }
+        )
+        try cancellation.check()
+        let result = try self.eventStore.replaceCurrentSession(
+          recording: recording,
+          with: document,
+          cancellation: cancellation
+        )
+        self.pendingGaps.removeAll(keepingCapacity: true)
+        guard let importedGapCount = UInt64(exactly: result.gapCount),
+          importedGapCount < UInt64.max
+        else { preconditionFailure("Validated import gap count exceeded UInt64") }
+        self.nextGapSequence = importedGapCount + 1
+        completion(.success(result))
+      } catch let error as ViewerStoreError {
+        completion(.failure(error))
+      } catch {
+        completion(.failure(.invalidValue))
+      }
+    }
+    if !accepted { completeImport(cancellation) }
+    return accepted
+  }
+
+  func cancelCurrentSessionImport() {
+    importLock.lock()
+    let cancellation = activeImportCancellation
+    importLock.unlock()
+    cancellation?.cancel()
+  }
+
+  private func completeImport(_ cancellation: ViewerSessionImportCancellation) {
+    importLock.lock()
+    if activeImportCancellation === cancellation { activeImportCancellation = nil }
+    importLock.unlock()
   }
 
   var services: Services {
@@ -874,14 +988,16 @@ final class ViewerStoreCoordinator: @unchecked Sendable, CustomReflectable,
       let wallMilliseconds = runtimeStartedWallMilliseconds,
       let monotonicNanoseconds = runtimeStartedMonotonicNanoseconds
     else { throw ViewerStoreError.unavailable }
-    let recording = try eventStore.beginRecording(
+    let recording = try eventStore.resumeOrBeginCurrentRecording(
       logicalID: logicalID,
       wallMilliseconds: wallMilliseconds,
       monotonicNanoseconds: monotonicNanoseconds,
       reason: partial ? "midRuntimeRetry" : "liveStart",
       recoveryPermit: recoveryPermit
     )
+    let durableNextGapSequence = try eventStore.nextCoordinatorGapSequence(recording: recording)
     currentRecording = recording
+    nextGapSequence = durableNextGapSequence
     activeRecordings.replace([recording.rowID])
     if nondurableUnavailableCount > 0 {
       recordGap(
@@ -1030,8 +1146,9 @@ final class ViewerStoreCoordinator: @unchecked Sendable, CustomReflectable,
       }
       pendingGaps[key] = pending
     } else {
+      guard nextGapSequence <= UInt64(Int64.max) else { return }
       let sequence = nextGapSequence
-      nextGapSequence = nextGapSequence == UInt64.max ? 1 : nextGapSequence + 1
+      nextGapSequence += 1
       pendingGaps[key] = PendingGap(
         sequence: sequence,
         count: max(1, count),
@@ -1334,7 +1451,8 @@ private final class ViewerStoreReopenConstructionLease: @unchecked Sendable {
   }
 }
 
-final class ViewerStoreRuntime: ViewerSessionJournaling, @unchecked Sendable,
+final class ViewerStoreRuntime: ViewerSessionJournaling, ViewerWorkspaceSessionControlling,
+  @unchecked Sendable,
   CustomReflectable, CustomStringConvertible, CustomDebugStringConvertible
 {
   private struct RuntimeContext {
@@ -1368,6 +1486,7 @@ final class ViewerStoreRuntime: ViewerSessionJournaling, @unchecked Sendable,
   private let reopenExecutionGate: @Sendable () -> Void
   private let reopenResourceObserver: @Sendable (ViewerStoreReopenResourceEvent) -> Void
   private let outwardStatusSignal = ViewerStoreStatusSignal()
+  private let terminalCleanupGroup = DispatchGroup()
   let explorerGateway: ViewerStoreExplorerGateway
   private var coordinator: ViewerStoreCoordinator?
   private var coordinatorRuntimeLogicalID: UUID?
@@ -1386,6 +1505,8 @@ final class ViewerStoreRuntime: ViewerSessionJournaling, @unchecked Sendable,
   private var recoveryAttemptGeneration: UInt64 = 0
   private var recoveryInFlight = false
   private var recoveryClaimedMissedCount: Int64 = 0
+  private var terminalClosing = false
+  private var workspaceMutationStatusSuppressed = false
 
   init(
     preferences: ViewerStoragePreferences = ViewerStoragePreferences(),
@@ -1440,9 +1561,8 @@ final class ViewerStoreRuntime: ViewerSessionJournaling, @unchecked Sendable,
         status: self.status()
       )
     }
-    let signal = outwardStatusSignal
-    coordinator?.services.statusSignal.setHandler { [weak signal] snapshot in
-      signal?.publish(changedRecordingIDs: Set(snapshot.changedRecordingIDs))
+    coordinator?.services.statusSignal.setHandler { [weak self] snapshot in
+      self?.forwardCoordinatorStatus(snapshot)
     }
     if let coordinator { explorerGateway.install(coordinator) }
     if startupMode == .asynchronous, paths != nil {
@@ -1534,6 +1654,151 @@ final class ViewerStoreRuntime: ViewerSessionJournaling, @unchecked Sendable,
     coordinatorSnapshot()?.requestMaintenance(.explicit)
   }
 
+  func clearCurrentSession(
+    afterCommit: @escaping @Sendable () -> Void,
+    completion: @escaping @Sendable (Result<Void, ViewerWorkspaceMutationFailure>) -> Void
+  ) {
+    lock.lock()
+    let coordinator = coordinator
+    let runtimeLogicalID = runtimeContext?.logicalID
+    let runtimeIsCurrent = runtimeLogicalID != nil && runtimeLogicalID == coordinatorRuntimeLogicalID
+    let mayMutate = runtimeIsCurrent && coordinator != nil && !workspaceMutationStatusSuppressed
+    if mayMutate { workspaceMutationStatusSuppressed = true }
+    lock.unlock()
+    guard mayMutate, let coordinator else {
+      completion(.failure(.unavailable))
+      return
+    }
+
+    let priorGeneration = explorerGateway.sealAndWait(originatingFrom: coordinator)
+    guard coordinator.clearCurrentSession(completion: { [weak self, weak coordinator] result in
+      guard let self, let coordinator else {
+        completion(.failure(.unavailable))
+        return
+      }
+      self.lock.lock()
+      let remainsCurrent = self.coordinator === coordinator
+        && self.runtimeContext?.logicalID == self.coordinatorRuntimeLogicalID
+      self.lock.unlock()
+      guard remainsCurrent else {
+        self.finishWorkspaceMutationStatusSuppression(coordinator: coordinator, publish: true)
+        completion(.failure(.unavailable))
+        return
+      }
+      switch result {
+      case .success:
+        afterCommit()
+        self.explorerGateway.install(coordinator)
+        self.finishWorkspaceMutationStatusSuppression(coordinator: coordinator, publish: true)
+        completion(.success(()))
+      case .failure(.busy), .failure(.sqliteBusy):
+        self.explorerGateway.install(coordinator, preservingGeneration: priorGeneration)
+        self.finishWorkspaceMutationStatusSuppression(coordinator: coordinator, publish: true)
+        completion(.failure(.busy))
+      case .failure(.cancelled):
+        self.explorerGateway.install(coordinator, preservingGeneration: priorGeneration)
+        self.finishWorkspaceMutationStatusSuppression(coordinator: coordinator, publish: true)
+        completion(.failure(.cancelled))
+      case .failure:
+        self.explorerGateway.install(coordinator, preservingGeneration: priorGeneration)
+        self.finishWorkspaceMutationStatusSuppression(coordinator: coordinator, publish: true)
+        completion(.failure(.unavailable))
+      }
+    }) else {
+      explorerGateway.install(coordinator, preservingGeneration: priorGeneration)
+      finishWorkspaceMutationStatusSuppression(coordinator: coordinator, publish: true)
+      completion(.failure(.busy))
+      return
+    }
+  }
+
+  func importCurrentSession(
+    from url: URL,
+    afterCommit: @escaping @Sendable () -> Void,
+    completion: @escaping @Sendable (Result<Void, ViewerWorkspaceMutationFailure>) -> Void
+  ) {
+    lock.lock()
+    let coordinator = coordinator
+    let runtimeLogicalID = runtimeContext?.logicalID
+    let runtimeIsCurrent = runtimeLogicalID != nil && runtimeLogicalID == coordinatorRuntimeLogicalID
+    let mayMutate = runtimeIsCurrent && coordinator != nil && !workspaceMutationStatusSuppressed
+    if mayMutate { workspaceMutationStatusSuppressed = true }
+    lock.unlock()
+    guard mayMutate, let coordinator else {
+      completion(.failure(.unavailable))
+      return
+    }
+
+    let priorGeneration = explorerGateway.sealAndWait(originatingFrom: coordinator)
+    guard coordinator.importCurrentSession(from: url, completion: { [weak self, weak coordinator] result in
+      guard let self, let coordinator else {
+        completion(.failure(.unavailable))
+        return
+      }
+      self.lock.lock()
+      let remainsCurrent = self.coordinator === coordinator
+        && self.runtimeContext?.logicalID == self.coordinatorRuntimeLogicalID
+      self.lock.unlock()
+      guard remainsCurrent else {
+        self.finishWorkspaceMutationStatusSuppression(coordinator: coordinator, publish: true)
+        completion(.failure(.unavailable))
+        return
+      }
+      switch result {
+      case .success:
+        afterCommit()
+        self.explorerGateway.install(coordinator)
+        self.finishWorkspaceMutationStatusSuppression(coordinator: coordinator, publish: true)
+        completion(.success(()))
+      case .failure(let error):
+        self.explorerGateway.install(coordinator, preservingGeneration: priorGeneration)
+        self.finishWorkspaceMutationStatusSuppression(coordinator: coordinator, publish: true)
+        completion(.failure(Self.workspaceImportFailure(for: error)))
+      }
+    }) else {
+      explorerGateway.install(coordinator, preservingGeneration: priorGeneration)
+      finishWorkspaceMutationStatusSuppression(coordinator: coordinator, publish: true)
+      completion(.failure(.busy))
+      return
+    }
+  }
+
+  static func workspaceImportFailure(
+    for error: ViewerStoreError
+  ) -> ViewerWorkspaceMutationFailure {
+    switch error {
+    case .busy, .sqliteBusy: return .busy
+    case .cancelled: return .cancelled
+    case .unsupportedSchema: return .unsupportedFile
+    case .invalidPath, .invalidValue: return .invalidFile
+    case .capacityExceeded: return .capacityExceeded
+    default: return .unavailable
+    }
+  }
+
+  private func forwardCoordinatorStatus(_ snapshot: ViewerStoreChangeSnapshot) {
+    lock.lock()
+    let suppressed = workspaceMutationStatusSuppressed
+    lock.unlock()
+    guard !suppressed else { return }
+    outwardStatusSignal.publish(changedRecordingIDs: Set(snapshot.changedRecordingIDs))
+  }
+
+  private func finishWorkspaceMutationStatusSuppression(
+    coordinator: ViewerStoreCoordinator,
+    publish: Bool
+  ) {
+    coordinator.services.statusSignal.waitForIdle()
+    lock.lock()
+    workspaceMutationStatusSuppressed = false
+    lock.unlock()
+    if publish { outwardStatusSignal.publish() }
+  }
+
+  func cancelCurrentSessionImport() {
+    coordinatorSnapshot()?.cancelCurrentSessionImport()
+  }
+
   func closeStorage() {
     lock.lock()
     let coordinator = coordinator
@@ -1552,6 +1817,49 @@ final class ViewerStoreRuntime: ViewerSessionJournaling, @unchecked Sendable,
     reopenConstructionLease?.waitSynchronously()
     if let coordinator { explorerGateway.sealAndWait(originatingFrom: coordinator) }
     coordinator?.closeStorage()
+  }
+
+  func closeStorageAfterQuiescence() async {
+    let detached = detachForTerminalClose()
+    let coordinator = detached.coordinator
+    let reopenConstructionLease = detached.reopenConstructionLease
+
+    if let reopenConstructionLease { await reopenConstructionLease.waitUntilFinished() }
+    if let coordinator {
+      explorerGateway.sealAndWait(originatingFrom: coordinator)
+      let wall = Int64((Date().timeIntervalSince1970 * 1_000).rounded())
+      let monotonic = DispatchTime.now().uptimeNanoseconds
+      await coordinator.runtimeEnded(
+        wallMilliseconds: wall,
+        monotonicNanoseconds: monotonic
+      )
+    }
+    let group = terminalCleanupGroup
+    await withCheckedContinuation { continuation in
+      group.notify(queue: .global(qos: .utility)) { continuation.resume() }
+    }
+  }
+
+  private func detachForTerminalClose() -> (
+    coordinator: ViewerStoreCoordinator?,
+    reopenConstructionLease: ViewerStoreReopenConstructionLease?
+  ) {
+    lock.lock()
+    terminalClosing = true
+    let coordinator = coordinator
+    let reopenConstructionLease = reopenConstruction?.lease
+    self.coordinator = nil
+    coordinatorRuntimeLogicalID = nil
+    runtimeContext = nil
+    activeSessions.removeAll(keepingCapacity: false)
+    missedObservationCount = 0
+    invalidateRecoveryAttemptLocked()
+    invalidateReopenAttemptLocked()
+    needsRuntimeReopen = false
+    coordinatorNeedsRecovery = false
+    workspaceMutationStatusSuppressed = false
+    lock.unlock()
+    return (coordinator, reopenConstructionLease)
   }
 
   func runtimeStarted(
@@ -1837,6 +2145,8 @@ final class ViewerStoreRuntime: ViewerSessionJournaling, @unchecked Sendable,
     wallMilliseconds: Int64,
     monotonicNanoseconds: UInt64
   ) async {
+    terminalCleanupGroup.enter()
+    defer { terminalCleanupGroup.leave() }
     let (coordinator, successorRuntimeLogicalID, reopenConstructionLease) =
       detachRuntime(logicalID: logicalID)
     if let reopenConstructionLease {
@@ -1888,7 +2198,7 @@ final class ViewerStoreRuntime: ViewerSessionJournaling, @unchecked Sendable,
 
   private func scheduleReopen(_ request: ReopenRequest) {
     lock.lock()
-    guard beginReopenRequestLocked(request) != nil else {
+    guard !terminalClosing, beginReopenRequestLocked(request) != nil else {
       lock.unlock()
       return
     }
@@ -1982,9 +2292,8 @@ final class ViewerStoreRuntime: ViewerSessionJournaling, @unchecked Sendable,
       return
     }
     reopenResourceObserver(.coordinatorConstructed)
-    let signal = outwardStatusSignal
-    replacement.services.statusSignal.setHandler { [weak signal] snapshot in
-      signal?.publish(changedRecordingIDs: Set(snapshot.changedRecordingIDs))
+    replacement.services.statusSignal.setHandler { [weak self] snapshot in
+      self?.forwardCoordinatorStatus(snapshot)
     }
     lock.lock()
     guard isCurrentReopenRequestLocked(request, generation: generation) else {
@@ -2040,7 +2349,7 @@ final class ViewerStoreRuntime: ViewerSessionJournaling, @unchecked Sendable,
   }
 
   private func beginReopenRequestLocked(_ request: ReopenRequest) -> UInt64? {
-    guard coordinator == nil, !reopenScheduled,
+    guard !terminalClosing, coordinator == nil, !reopenScheduled,
       reopenRequestMatchesCurrentRuntimeLocked(request)
     else { return nil }
     reopenAttemptGeneration =

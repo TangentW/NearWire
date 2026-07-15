@@ -32,7 +32,9 @@ enum ViewerStoreWriteFailureDisposition: Sendable {
     context: ViewerStoreWriteContext
   ) -> ViewerStoreWriteFailureDisposition {
     if error == .capacityExceeded { return .capacityPaused }
-    if error == .staleObservation || error == .writeNotAuthorized {
+    if error == .staleObservation || error == .writeNotAuthorized
+      || error == .workLimitExceeded
+    {
       return .operationLocal
     }
     if context == .interactiveMutation {
@@ -63,6 +65,14 @@ struct ViewerStorePaths: Sendable, Equatable {
   var exportTemporary: URL {
     directory.appendingPathComponent("NearWire-export.json.tmp", isDirectory: false)
   }
+  var processWorkspaceMarker: URL {
+    directory.appendingPathComponent(".nearwire-viewer-workspace", isDirectory: false)
+  }
+
+  var isProcessWorkspace: Bool {
+    directory.deletingLastPathComponent().lastPathComponent == "NearWire-Viewer-Workspaces"
+      && directory.lastPathComponent.hasPrefix("workspace-")
+  }
 
   static func applicationSupport(fileManager: FileManager = .default) throws -> ViewerStorePaths {
     guard let base = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
@@ -72,10 +82,213 @@ struct ViewerStorePaths: Sendable, Equatable {
       database: base.appendingPathComponent("NearWire/NearWire.sqlite", isDirectory: false)
     )
   }
+
+  static func processWorkspace(
+    fileManager: FileManager = .default,
+    processIdentifier: Int32 = ProcessInfo.processInfo.processIdentifier,
+    nonce: UUID = UUID()
+  ) -> ViewerStorePaths {
+    let root = fileManager.temporaryDirectory.appendingPathComponent(
+      "NearWire-Viewer-Workspaces",
+      isDirectory: true
+    )
+    let directory = root.appendingPathComponent(
+      "workspace-\(processIdentifier)-\(nonce.uuidString.lowercased())",
+      isDirectory: true
+    )
+    return ViewerStorePaths(
+      directory: directory,
+      database: directory.appendingPathComponent("NearWire.sqlite", isDirectory: false)
+    )
+  }
+
+  func removeProcessWorkspace(fileManager: FileManager = .default) throws {
+    let parent = directory.deletingLastPathComponent()
+    let base = parent.deletingLastPathComponent()
+    guard parent.lastPathComponent == "NearWire-Viewer-Workspaces",
+      directory.lastPathComponent.hasPrefix("workspace-"),
+      directory.standardizedFileURL.deletingLastPathComponent() == parent.standardizedFileURL
+    else { throw ViewerStoreError.invalidPath }
+
+    let baseDescriptor = Darwin.open(base.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+    guard baseDescriptor >= 0 else { throw ViewerStoreError.invalidPath }
+    defer { Darwin.close(baseDescriptor) }
+    let rootDescriptor = openat(
+      baseDescriptor,
+      parent.lastPathComponent,
+      O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+    )
+    if rootDescriptor < 0 {
+      guard errno == ENOENT else { throw ViewerStoreError.invalidPath }
+      return
+    }
+    defer { Darwin.close(rootDescriptor) }
+    try ViewerStoreFileSecurity.validateOwnedPrivateDirectory(rootDescriptor)
+
+    let leafDescriptor = openat(
+      rootDescriptor,
+      directory.lastPathComponent,
+      O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+    )
+    if leafDescriptor < 0 {
+      guard errno == ENOENT else { throw ViewerStoreError.invalidPath }
+      return
+    }
+    defer { Darwin.close(leafDescriptor) }
+    try ViewerStoreFileSecurity.validateOwnedPrivateDirectory(leafDescriptor)
+    try ViewerStoreFileSecurity.validateProcessWorkspaceMarker(
+      directoryDescriptor: leafDescriptor,
+      expected: Data(directory.lastPathComponent.utf8)
+    )
+
+    let ownedNames = [
+      "NearWire.sqlite", "NearWire.sqlite-wal", "NearWire.sqlite-shm",
+      "NearWire.sqlite-journal", "NearWire.sqlite.migration", "NearWire-export.json.tmp",
+      "NearWire-import.json.snapshot", ".nearwire-viewer-workspace",
+    ]
+    for name in ownedNames {
+      if unlinkat(leafDescriptor, name, 0) != 0, errno != ENOENT {
+        throw ViewerStoreError.invalidPath
+      }
+    }
+    guard unlinkat(rootDescriptor, directory.lastPathComponent, AT_REMOVEDIR) == 0 else {
+      throw ViewerStoreError.invalidPath
+    }
+    if unlinkat(baseDescriptor, parent.lastPathComponent, AT_REMOVEDIR) != 0,
+      errno != ENOTEMPTY, errno != EEXIST
+    {
+      throw ViewerStoreError.invalidPath
+    }
+  }
 }
 
 enum ViewerStoreFileSecurity {
+  static func prepareProcessWorkspaceMarkerIfNeeded(
+    _ paths: ViewerStorePaths,
+    fileManager: FileManager = .default
+  ) throws {
+    guard paths.isProcessWorkspace else { return }
+    let expected = Data(paths.directory.lastPathComponent.utf8)
+    let directoryDescriptor = Darwin.open(
+      paths.directory.path,
+      O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+    )
+    guard directoryDescriptor >= 0 else { throw ViewerStoreError.invalidPath }
+    defer { Darwin.close(directoryDescriptor) }
+    try validateOwnedPrivateDirectory(directoryDescriptor)
+    let descriptor = openat(
+      directoryDescriptor,
+      ".nearwire-viewer-workspace",
+      O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+      S_IRUSR | S_IWUSR
+    )
+    if descriptor < 0 {
+      guard errno == EEXIST else { throw ViewerStoreError.invalidPath }
+      try validateProcessWorkspaceMarker(
+        directoryDescriptor: directoryDescriptor,
+        expected: expected
+      )
+      return
+    }
+    defer { Darwin.close(descriptor) }
+    var written = 0
+    while written < expected.count {
+      let result = expected.withUnsafeBytes { bytes in
+        Darwin.write(
+          descriptor,
+          bytes.baseAddress?.advanced(by: written),
+          bytes.count - written
+        )
+      }
+      if result < 0, errno == EINTR { continue }
+      guard result > 0 else {
+        _ = unlinkat(directoryDescriptor, ".nearwire-viewer-workspace", 0)
+        throw ViewerStoreError.unavailable
+      }
+      written += result
+    }
+    guard fsync(descriptor) == 0 else {
+      _ = unlinkat(directoryDescriptor, ".nearwire-viewer-workspace", 0)
+      throw ViewerStoreError.unavailable
+    }
+  }
+
+  static func validateProcessWorkspaceMarker(at marker: URL, expected: Data) throws {
+    let descriptor = Darwin.open(marker.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+    guard descriptor >= 0 else { throw ViewerStoreError.invalidPath }
+    defer { Darwin.close(descriptor) }
+
+    var info = stat()
+    guard fstat(descriptor, &info) == 0,
+      (info.st_mode & S_IFMT) == S_IFREG,
+      info.st_uid == geteuid(),
+      (info.st_mode & 0o077) == 0,
+      info.st_size == Int64(expected.count)
+    else { throw ViewerStoreError.invalidPath }
+
+    var bytes = [UInt8](repeating: 0, count: expected.count)
+    var readCount = 0
+    while readCount < bytes.count {
+      let result = bytes.withUnsafeMutableBytes { buffer in
+        Darwin.read(
+          descriptor,
+          buffer.baseAddress?.advanced(by: readCount),
+          buffer.count - readCount
+        )
+      }
+      if result < 0, errno == EINTR { continue }
+      guard result > 0 else { throw ViewerStoreError.invalidPath }
+      readCount += result
+    }
+    guard Data(bytes) == expected else { throw ViewerStoreError.invalidPath }
+  }
+
+  static func validateProcessWorkspaceMarker(
+    directoryDescriptor: Int32,
+    expected: Data
+  ) throws {
+    let descriptor = openat(
+      directoryDescriptor,
+      ".nearwire-viewer-workspace",
+      O_RDONLY | O_CLOEXEC | O_NOFOLLOW
+    )
+    guard descriptor >= 0 else { throw ViewerStoreError.invalidPath }
+    defer { Darwin.close(descriptor) }
+    try validateMarkerDescriptor(descriptor, expected: expected)
+  }
+
+  private static func validateMarkerDescriptor(_ descriptor: Int32, expected: Data) throws {
+    var info = stat()
+    guard fstat(descriptor, &info) == 0,
+      (info.st_mode & S_IFMT) == S_IFREG,
+      info.st_uid == geteuid(),
+      (info.st_mode & 0o077) == 0,
+      info.st_size == Int64(expected.count)
+    else { throw ViewerStoreError.invalidPath }
+    var bytes = [UInt8](repeating: 0, count: expected.count)
+    var readCount = 0
+    while readCount < bytes.count {
+      let result = bytes.withUnsafeMutableBytes { buffer in
+        Darwin.read(
+          descriptor,
+          buffer.baseAddress?.advanced(by: readCount),
+          buffer.count - readCount
+        )
+      }
+      if result < 0, errno == EINTR { continue }
+      guard result > 0 else { throw ViewerStoreError.invalidPath }
+      readCount += result
+    }
+    guard Data(bytes) == expected else { throw ViewerStoreError.invalidPath }
+  }
+
   static func prepareDirectory(_ url: URL, fileManager: FileManager = .default) throws {
+    if url.deletingLastPathComponent().lastPathComponent == "NearWire-Viewer-Workspaces",
+      url.lastPathComponent.hasPrefix("workspace-")
+    {
+      try prepareProcessWorkspaceDirectory(url)
+      return
+    }
     try rejectSymbolicLink(at: url, allowMissing: true, fileManager: fileManager)
     try fileManager.createDirectory(
       at: url,
@@ -84,6 +297,60 @@ enum ViewerStoreFileSecurity {
     )
     try rejectSymbolicLink(at: url, allowMissing: false, fileManager: fileManager)
     guard chmod(url.path, 0o700) == 0 else { throw ViewerStoreError.invalidPath }
+  }
+
+  static func validateOwnedPrivateDirectory(_ descriptor: Int32) throws {
+    var info = stat()
+    guard fstat(descriptor, &info) == 0,
+      (info.st_mode & S_IFMT) == S_IFDIR,
+      info.st_uid == geteuid(),
+      (info.st_mode & 0o077) == 0
+    else { throw ViewerStoreError.invalidPath }
+  }
+
+  private static func prepareProcessWorkspaceDirectory(_ url: URL) throws {
+    let root = url.deletingLastPathComponent()
+    let base = root.deletingLastPathComponent()
+    let baseDescriptor = Darwin.open(
+      base.path,
+      O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+    )
+    guard baseDescriptor >= 0 else { throw ViewerStoreError.invalidPath }
+    defer { Darwin.close(baseDescriptor) }
+
+    if mkdirat(baseDescriptor, root.lastPathComponent, 0o700) != 0, errno != EEXIST {
+      throw ViewerStoreError.invalidPath
+    }
+    let rootDescriptor = openat(
+      baseDescriptor,
+      root.lastPathComponent,
+      O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+    )
+    guard rootDescriptor >= 0 else { throw ViewerStoreError.invalidPath }
+    defer { Darwin.close(rootDescriptor) }
+    var rootInfo = stat()
+    guard fstat(rootDescriptor, &rootInfo) == 0, rootInfo.st_uid == geteuid() else {
+      throw ViewerStoreError.invalidPath
+    }
+    guard fchmod(rootDescriptor, 0o700) == 0 else { throw ViewerStoreError.invalidPath }
+    try validateOwnedPrivateDirectory(rootDescriptor)
+
+    if mkdirat(rootDescriptor, url.lastPathComponent, 0o700) != 0, errno != EEXIST {
+      throw ViewerStoreError.invalidPath
+    }
+    let leafDescriptor = openat(
+      rootDescriptor,
+      url.lastPathComponent,
+      O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+    )
+    guard leafDescriptor >= 0 else { throw ViewerStoreError.invalidPath }
+    defer { Darwin.close(leafDescriptor) }
+    var leafInfo = stat()
+    guard fstat(leafDescriptor, &leafInfo) == 0, leafInfo.st_uid == geteuid() else {
+      throw ViewerStoreError.invalidPath
+    }
+    guard fchmod(leafDescriptor, 0o700) == 0 else { throw ViewerStoreError.invalidPath }
+    try validateOwnedPrivateDirectory(leafDescriptor)
   }
 
   static func secureRegularFileIfPresent(_ url: URL, fileManager: FileManager = .default) throws {
@@ -272,7 +539,7 @@ final class ViewerStoreMigrationControl: @unchecked Sendable {
     self.phaseGate = phaseGate
   }
 
-  func prepareForVersionOne() throws {
+  func prepareForLegacyMigration() throws {
     guard authorizeAttempt() else { throw ViewerStoreError.unavailable }
     stateLock.lock()
     beganMigration = true
@@ -828,6 +1095,10 @@ final class ViewerSQLitePool: @unchecked Sendable {
     self.paths = paths
     self.diskGuard = diskGuard
     try ViewerStoreFileSecurity.prepareDirectory(paths.directory, fileManager: fileManager)
+    try ViewerStoreFileSecurity.prepareProcessWorkspaceMarkerIfNeeded(
+      paths,
+      fileManager: fileManager
+    )
     // Fail before creating or opening SQLite files when the volume cannot preserve the reserve.
     try diskGuard.requireReserve(at: paths.directory, plannedBytes: 4 * 1_024 * 1_024)
     try ViewerStoreFileSecurity.secureStoreFiles(paths, fileManager: fileManager)

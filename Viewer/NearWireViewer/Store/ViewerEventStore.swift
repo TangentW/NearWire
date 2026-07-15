@@ -111,6 +111,32 @@ struct ViewerEventStoreCommitResult: Equatable, Sendable {
   let outcome: ViewerEventJournalOutcome
 }
 
+struct ViewerCurrentSessionClearResult: Equatable, Sendable {
+  let deletedEventCount: Int64
+  let reclaimedQuotaBytes: Int64
+}
+
+struct ViewerCurrentSessionImportResult: Equatable, Sendable {
+  let deviceCount: Int
+  let eventCount: Int
+  let gapCount: Int
+  let annotationCount: Int
+}
+
+private struct ViewerCurrentSessionImportPlan {
+  let replacementQuotaBytes: Int64
+  let diskReservationBytes: Int64
+}
+
+enum ViewerSessionImportPhase: String, Sendable {
+  case recording
+  case device
+  case event
+  case gap
+  case annotation
+  case commit
+}
+
 extension ViewerPreparedEventObservation: CustomReflectable, CustomStringConvertible,
   CustomDebugStringConvertible
 {
@@ -393,6 +419,10 @@ final class ViewerStoreStatusSignal: @unchecked Sendable {
     completionGroup.wait()
   }
 
+  func waitForIdle() {
+    completionGroup.wait()
+  }
+
   var hasScheduledWorkForTesting: Bool {
     lock.lock()
     defer { lock.unlock() }
@@ -475,6 +505,8 @@ final class ViewerEventStore: @unchecked Sendable {
   private let configuration: @Sendable () -> ViewerStorageConfiguration
   private let writeGate: @Sendable () throws -> Void
   private let automaticWriteAuthorizationObserver: @Sendable () -> Void
+  private let maximumRetainedEventCount: Int64
+  private let maximumRetainedGapCount: Int64
   let writeStateRelay: ViewerStoreStateRelay
   private let stateLock = NSLock()
   private var state: ViewerStoreStatus.State = .available
@@ -492,8 +524,12 @@ final class ViewerEventStore: @unchecked Sendable {
     automaticWriteAuthorizationObserver: @escaping @Sendable () -> Void = {},
     writeStateRelay: ViewerStoreStateRelay = ViewerStoreStateRelay(),
     statusMetadata: ViewerStoreStatusMetadataBox = ViewerStoreStatusMetadataBox(),
-    statusSignal: ViewerStoreStatusSignal = ViewerStoreStatusSignal()
+    statusSignal: ViewerStoreStatusSignal = ViewerStoreStatusSignal(),
+    maximumRetainedEventCount: Int64 = ViewerSessionTransferLimits.maximumEventCount,
+    maximumRetainedGapCount: Int64 = ViewerSessionTransferLimits.maximumGapCount
   ) {
+    precondition((1...ViewerSessionTransferLimits.maximumEventCount).contains(maximumRetainedEventCount))
+    precondition((1...ViewerSessionTransferLimits.maximumGapCount).contains(maximumRetainedGapCount))
     self.pool = pool
     self.configuration = configuration
     self.writeGate = writeGate
@@ -501,6 +537,8 @@ final class ViewerEventStore: @unchecked Sendable {
     self.writeStateRelay = writeStateRelay
     self.statusMetadata = statusMetadata
     self.statusSignal = statusSignal
+    self.maximumRetainedEventCount = maximumRetainedEventCount
+    self.maximumRetainedGapCount = maximumRetainedGapCount
     statusSignal.setSnapshotProvider { [weak self] in self?.changeSnapshot() }
     writeStateRelay.bind(eventStore: self)
   }
@@ -556,6 +594,131 @@ final class ViewerEventStore: @unchecked Sendable {
     )
   }
 
+  func resumeOrBeginCurrentRecording(
+    logicalID: UUID,
+    wallMilliseconds: Int64,
+    monotonicNanoseconds: UInt64,
+    reason: String,
+    recoveryPermit: ViewerStoreStateRelay.RecoveryPermit? = nil
+  ) throws -> ViewerRecordingHandle {
+    try writeTransaction(
+      recoveryPermit: recoveryPermit,
+      plan: { database in
+        let countStatement = try ViewerSQLiteStatement(
+          database: database,
+          sql:
+            "SELECT COUNT(*) FROM Recordings WHERE rowID NOT IN (SELECT recordingID FROM Tombstones)"
+        )
+        guard try countStatement.step() else { throw ViewerStoreError.corruptStore }
+        let count = countStatement.int64(at: 0)
+        guard count <= 1 else { throw ViewerStoreError.corruptStore }
+        guard count == 1 else { return 2 * ViewerStoreQuota.structuralReservation }
+        let state = try ViewerSQLiteStatement(
+          database: database,
+          sql:
+            "SELECT state FROM RecordingVersions WHERE recordingID=(SELECT rowID FROM Recordings WHERE rowID NOT IN (SELECT recordingID FROM Tombstones) LIMIT 1) ORDER BY revision DESC LIMIT 1"
+        )
+        guard try state.step() else { return ViewerStoreQuota.structuralReservation }
+        return state.string(at: 0) == "active" ? 0 : ViewerStoreQuota.structuralReservation
+      },
+      changedRecordingIDs: { [$0.rowID] },
+      { database in
+        let existing = try ViewerSQLiteStatement(
+          database: database,
+          sql:
+            "SELECT rowID FROM Recordings WHERE rowID NOT IN (SELECT recordingID FROM Tombstones) ORDER BY rowID LIMIT 2"
+        )
+        guard try existing.step() else {
+          let quota = ViewerStoreQuota.structuralReservation
+          let insert = try ViewerSQLiteStatement(
+            database: database,
+            sql:
+              "INSERT INTO Recordings(logicalID, startedWallMs, startedMonotonicNs, durableStartReason, quotaBytes, liveQuotaBytes) VALUES(?1, ?2, ?3, ?4, ?5, 0)"
+          )
+          try insert.bind(logicalID.uuidString.lowercased(), at: 1)
+          try insert.bind(wallMilliseconds, at: 2)
+          try insert.bind(checkedInt64(monotonicNanoseconds), at: 3)
+          try insert.bind(reason, at: 4)
+          try insert.bind(quota, at: 5)
+          _ = try insert.step()
+          let rowID = sqlite3_last_insert_rowid(database)
+          try self.reserveQuota(quota, recordingID: rowID, database: database)
+          try self.insertRecordingVersion(
+            recordingID: rowID,
+            revision: 1,
+            wallMilliseconds: wallMilliseconds,
+            name: nil,
+            note: nil,
+            pinned: false,
+            state: "active",
+            endedWallMilliseconds: nil,
+            endedMonotonicNanoseconds: nil,
+            database: database
+          )
+          return ViewerRecordingHandle(logicalID: logicalID, rowID: rowID)
+        }
+
+        let rowID = existing.int64(at: 0)
+        guard try existing.step() == false else { throw ViewerStoreError.corruptStore }
+        let latest = try ViewerSQLiteStatement(
+          database: database,
+          sql:
+            "SELECT revision,name,note,pinned,state FROM RecordingVersions WHERE recordingID=?1 ORDER BY revision DESC LIMIT 1"
+        )
+        try latest.bind(rowID, at: 1)
+        let hasLatest = try latest.step()
+        let revision = hasLatest ? latest.int64(at: 0) : 0
+        let name = hasLatest ? self.optionalString(latest, at: 1) : nil
+        let note = hasLatest ? self.optionalString(latest, at: 2) : nil
+        let pinned = hasLatest && latest.int64(at: 3) == 1
+        let state = hasLatest ? latest.string(at: 4) : "closed"
+
+        let update = try ViewerSQLiteStatement(
+          database: database,
+          sql: "UPDATE Recordings SET logicalID=?1 WHERE rowID=?2"
+        )
+        try update.bind(logicalID.uuidString.lowercased(), at: 1)
+        try update.bind(rowID, at: 2)
+        _ = try update.step()
+        guard sqlite3_changes(database) == 1 else { throw ViewerStoreError.corruptStore }
+
+        if state != "active" {
+          let quota = ViewerStoreQuota.structuralReservation
+          try self.reserveQuota(quota, recordingID: rowID, database: database)
+          try self.insertRecordingVersion(
+            recordingID: rowID,
+            revision: revision + 1,
+            wallMilliseconds: wallMilliseconds,
+            name: name,
+            note: note,
+            pinned: pinned,
+            state: "active",
+            endedWallMilliseconds: nil,
+            endedMonotonicNanoseconds: nil,
+            database: database
+          )
+        }
+        return ViewerRecordingHandle(logicalID: logicalID, rowID: rowID)
+      }
+    )
+  }
+
+  func nextCoordinatorGapSequence(recording: ViewerRecordingHandle) throws -> UInt64 {
+    try pool.writer.run { database in
+      let statement = try ViewerSQLiteStatement(
+        database: database,
+        sql:
+          "SELECT MAX(sequence) FROM GapVersions WHERE recordingID=?1 AND namespace='coordinator'"
+      )
+      try statement.bind(recording.rowID, at: 1)
+      guard try statement.step() else { throw ViewerStoreError.corruptStore }
+      guard !statement.isNull(at: 0) else { return 1 }
+      let maximum = statement.int64(at: 0)
+      guard maximum >= 0 else { throw ViewerStoreError.corruptStore }
+      return UInt64(maximum) + 1
+    }
+  }
+
   func beginDeviceSession(
     recording: ViewerRecordingHandle,
     installationID: String,
@@ -593,6 +756,14 @@ final class ViewerEventStore: @unchecked Sendable {
       },
       changedRecordingIDs: { [$0.recordingID] },
       { database in
+        let durableSessionCount = try self.scalarForRecording(
+          "SELECT COUNT(*) FROM DeviceSessions WHERE recordingID=?1",
+          recordingID: recording.rowID,
+          database: database
+        )
+        guard durableSessionCount < ViewerSessionTransferLimits.maximumDeviceCount else {
+          throw ViewerStoreError.workLimitExceeded
+        }
         let alias = try installationAlias(
           recordingID: recording.rowID,
           installationID: installationID,
@@ -681,7 +852,13 @@ final class ViewerEventStore: @unchecked Sendable {
         }
       }, changedRecordingIDs: { _ in changedRecordingIDs },
       { database in
-        try observations.map { try appendEvent($0, database: database) }
+        let results = try observations.map { try appendEvent($0, database: database) }
+        guard try self.retainedCount("retainedEventCount", database: database)
+          <= self.maximumRetainedEventCount
+        else {
+          throw ViewerStoreError.workLimitExceeded
+        }
+        return results
       }
     )
   }
@@ -689,7 +866,7 @@ final class ViewerEventStore: @unchecked Sendable {
   func appendStructural(_ observation: ViewerStructuralObservation) throws {
     try validateStructuralObservation(observation)
     let changedRecordingID = recordingID(of: observation)
-    try writeTransaction(
+    return try writeTransaction(
       plan: { database in
         try self.plannedStructuralReservation(observation, database: database)
       }, changedRecordingIDs: { _ in [changedRecordingID] },
@@ -889,6 +1066,587 @@ final class ViewerEventStore: @unchecked Sendable {
         }
       }
     )
+  }
+
+  func clearCurrentSessionEvents(
+    recording: ViewerRecordingHandle
+  ) throws -> ViewerCurrentSessionClearResult {
+    try writeTransaction(
+      context: .interactiveMutation,
+      diskPlan: { database in
+        try self.deletionWALReservation(
+          recordingID: recording.rowID,
+          database: database
+        )
+      },
+      changedRecordingIDs: { _ in [recording.rowID] },
+      { database in
+        let recordingExists = try ViewerSQLiteStatement(
+          database: database,
+          sql:
+            "SELECT 1 FROM Recordings WHERE rowID=?1 AND logicalID=?2 AND rowID NOT IN (SELECT recordingID FROM Tombstones)"
+        )
+        try recordingExists.bind(recording.rowID, at: 1)
+        try recordingExists.bind(recording.logicalID.uuidString.lowercased(), at: 2)
+        guard try recordingExists.step() else { throw ViewerStoreError.staleObservation }
+
+        let deletedEventCount = try self.scalarForRecording(
+          "SELECT COUNT(*) FROM Events WHERE recordingID=?1",
+          recordingID: recording.rowID,
+          database: database
+        )
+        let quotaQueries = [
+          "SELECT COALESCE(SUM(quotaBytes),0) FROM Events WHERE recordingID=?1",
+          "SELECT COALESCE(SUM(quotaBytes),0) FROM EventDispositionVersions WHERE eventID IN (SELECT rowID FROM Events WHERE recordingID=?1)",
+          "SELECT COALESCE(SUM(quotaBytes),0) FROM DropVersions WHERE deviceSessionID IN (SELECT rowID FROM DeviceSessions WHERE recordingID=?1)",
+          "SELECT COALESCE(SUM(quotaBytes),0) FROM GapVersions WHERE recordingID=?1",
+          "SELECT COALESCE(SUM(quotaBytes),0) FROM AnnotationVersions WHERE recordingID=?1",
+        ]
+        let reclaimedQuotaBytes = try quotaQueries.reduce(Int64(0)) { partial, sql in
+          let value = try self.scalarForRecording(
+            sql,
+            recordingID: recording.rowID,
+            database: database
+          )
+          let (sum, overflow) = partial.addingReportingOverflow(value)
+          guard !overflow, sum >= 0 else { throw ViewerStoreError.corruptStore }
+          return sum
+        }
+
+        let deletions = [
+          "DELETE FROM EventDispositionVersions WHERE eventID IN (SELECT rowID FROM Events WHERE recordingID=?1)",
+          "DELETE FROM Events WHERE recordingID=?1",
+          "DELETE FROM DropVersions WHERE deviceSessionID IN (SELECT rowID FROM DeviceSessions WHERE recordingID=?1)",
+          "DELETE FROM GapVersions WHERE recordingID=?1",
+          "DELETE FROM AnnotationVersions WHERE recordingID=?1",
+        ]
+        for sql in deletions {
+          let statement = try ViewerSQLiteStatement(database: database, sql: sql)
+          try statement.bind(recording.rowID, at: 1)
+          _ = try statement.step()
+        }
+
+        if reclaimedQuotaBytes > 0 {
+          let recordingQuota = try ViewerSQLiteStatement(
+            database: database,
+            sql:
+              "UPDATE Recordings SET liveQuotaBytes=liveQuotaBytes-?1 WHERE rowID=?2 AND liveQuotaBytes>=?1"
+          )
+          try recordingQuota.bind(reclaimedQuotaBytes, at: 1)
+          try recordingQuota.bind(recording.rowID, at: 2)
+          _ = try recordingQuota.step()
+          guard sqlite3_changes(database) == 1 else { throw ViewerStoreError.corruptStore }
+
+          let totalQuota = try ViewerSQLiteStatement(
+            database: database,
+            sql:
+              "UPDATE StoreMetadata SET integerValue=integerValue-?1 WHERE key='logicalQuotaBytes' AND integerValue>=?1"
+          )
+          try totalQuota.bind(reclaimedQuotaBytes, at: 1)
+          _ = try totalQuota.step()
+          guard sqlite3_changes(database) == 1 else { throw ViewerStoreError.corruptStore }
+        }
+
+        return ViewerCurrentSessionClearResult(
+          deletedEventCount: deletedEventCount,
+          reclaimedQuotaBytes: reclaimedQuotaBytes
+        )
+      }
+    )
+  }
+
+  func replaceCurrentSession(
+    recording: ViewerRecordingHandle,
+    with document: ViewerSessionImportDocument,
+    cancellation: ViewerSessionImportCancellation = ViewerSessionImportCancellation(),
+    progress: @escaping @Sendable (ViewerSessionImportPhase) -> Void = { _ in },
+    transactionProgress: @escaping @Sendable () -> Void = {}
+  ) throws -> ViewerCurrentSessionImportResult {
+    let importPlan = try preflightCurrentSessionImport(
+      document,
+      cancellation: cancellation,
+      progress: progress
+    )
+    return try writeTransaction(
+      context: .interactiveMutation,
+      progressCheck: {
+        transactionProgress()
+        return cancellation.isCancelled ? ViewerStoreError.cancelled : nil
+      },
+      plan: { database in
+        let reclaimable = try self.replaceableSessionQuota(
+          recordingID: recording.rowID,
+          database: database
+        )
+        return max(0, importPlan.replacementQuotaBytes - reclaimable)
+      },
+      diskPlan: { database in
+        try Self.checkedReservationSum(
+          importPlan.diskReservationBytes,
+          self.deletionWALReservation(
+            recordingID: recording.rowID,
+            database: database
+          )
+        )
+      },
+      beforeCommit: { _ in
+        progress(.commit)
+        try cancellation.check()
+      },
+      changedRecordingIDs: { _ in [recording.rowID] },
+      { database in
+        progress(.recording)
+        try cancellation.check()
+        try self.requireCurrentRecording(recording, database: database)
+        try self.removeReplaceableSessionContent(
+          recordingID: recording.rowID,
+          database: database
+        )
+
+        let updateRecording = try ViewerSQLiteStatement(
+          database: database,
+          sql: "UPDATE Recordings SET startedWallMs=?1,startedMonotonicNs=0 WHERE rowID=?2"
+        )
+        try updateRecording.bind(document.session.startedAtMilliseconds, at: 1)
+        try updateRecording.bind(recording.rowID, at: 2)
+        _ = try updateRecording.step()
+        guard sqlite3_changes(database) == 1 else { throw ViewerStoreError.corruptStore }
+
+        let nextRecordingRevision = try self.nextInt64(
+          "SELECT COALESCE(MAX(revision),0)+1 FROM RecordingVersions WHERE recordingID=?1",
+          binding: recording.rowID,
+          database: database
+        )
+        try self.insertRecordingVersion(
+          recordingID: recording.rowID,
+          revision: nextRecordingRevision,
+          wallMilliseconds: document.session.startedAtMilliseconds,
+          name: document.session.name,
+          note: document.session.note,
+          pinned: false,
+          state: "active",
+          endedWallMilliseconds: nil,
+          endedMonotonicNanoseconds: nil,
+          database: database
+        )
+
+        var deviceHandles: [String: ViewerDeviceSessionHandle] = [:]
+        var importedInstallationIDs: [String: String] = [:]
+        var importedDeviceCount = 0
+        try document.forEachDevice { imported in
+          progress(.device)
+          try cancellation.check()
+          guard deviceHandles[imported.referenceKey] == nil else {
+            throw ViewerStoreError.invalidValue
+          }
+          let installationID: String
+          if let existing = importedInstallationIDs[imported.device] {
+            installationID = existing
+          } else {
+            installationID = try ViewerDurableMetadataRules.installationID(
+              "imported-device-\(importedInstallationIDs.count + 1)"
+            )
+            importedInstallationIDs[imported.device] = installationID
+          }
+          let displayName = try imported.displayName.map(ViewerDurableMetadataRules.displayName)
+          let applicationIdentifier = try imported.applicationIdentifier.map(
+            ViewerDurableMetadataRules.applicationIdentifier
+          )
+          let applicationVersion = try imported.applicationVersion.map(
+            ViewerDurableMetadataRules.applicationVersion
+          )
+          let alias = try self.installationAlias(
+            recordingID: recording.rowID,
+            installationID: installationID,
+            database: database
+          )
+          let connectionOrdinal = try self.nextInt64(
+            "SELECT COALESCE(MAX(connectionOrdinal),0)+1 FROM DeviceSessions WHERE recordingID=?1",
+            binding: recording.rowID,
+            database: database
+          )
+          let quota = ViewerStoreQuota.structuralReservation
+          try self.reserveQuota(quota, recordingID: recording.rowID, database: database)
+          let logicalID = UUID()
+          let insert = try ViewerSQLiteStatement(
+            database: database,
+            sql:
+              "INSERT INTO DeviceSessions(logicalID,recordingID,installationAliasID,connectionOrdinal,applicationIdentifier,applicationVersion,startedWallMs,startedMonotonicNs,quotaBytes) VALUES(?1,?2,?3,?4,?5,?6,?7,0,?8)"
+          )
+          try insert.bind(logicalID.uuidString.lowercased(), at: 1)
+          try insert.bind(recording.rowID, at: 2)
+          try insert.bind(alias.rowID, at: 3)
+          try insert.bind(connectionOrdinal, at: 4)
+          if let value = applicationIdentifier {
+            try insert.bind(value, at: 5)
+          } else {
+            try insert.bindNull(at: 5)
+          }
+          if let value = applicationVersion {
+            try insert.bind(value, at: 6)
+          } else {
+            try insert.bindNull(at: 6)
+          }
+          try insert.bind(imported.startedAtMilliseconds, at: 7)
+          try insert.bind(quota, at: 8)
+          _ = try insert.step()
+          guard sqlite3_changes(database) == 1 else { throw ViewerStoreError.corruptStore }
+          let rowID = sqlite3_last_insert_rowid(database)
+          try self.insertDeviceVersion(
+            deviceSessionID: rowID,
+            recordingID: recording.rowID,
+            revision: 1,
+            wallMilliseconds: imported.endedAtMilliseconds ?? imported.startedAtMilliseconds,
+            displayName: displayName,
+            state: "closed",
+            partialHistory: imported.partialHistory,
+            endedWallMilliseconds: imported.endedAtMilliseconds ?? imported.startedAtMilliseconds,
+            endedMonotonicNanoseconds: 0,
+            database: database
+          )
+          deviceHandles[imported.referenceKey] = ViewerDeviceSessionHandle(
+            logicalID: logicalID,
+            rowID: rowID,
+            recordingID: recording.rowID,
+            installationOrdinal: alias.ordinal,
+            connectionOrdinal: connectionOrdinal
+          )
+          importedDeviceCount += 1
+        }
+
+        var eventCount = 0
+        var importedMonotonic: UInt64 = 1
+        try document.forEachEvent { imported in
+          progress(.event)
+          try cancellation.check()
+          guard let device = deviceHandles[imported.deviceReferenceKey],
+            importedMonotonic < UInt64.max
+          else { throw ViewerStoreError.invalidValue }
+          let prepared = try self.prepareImportedEvent(imported)
+          let observation = try ViewerPreparedEventObservation(
+            recording: recording,
+            device: device,
+            envelope: prepared.envelope,
+            viewerMonotonicNanoseconds: importedMonotonic,
+            viewerWallMilliseconds: imported.viewerReceivedAtMilliseconds,
+            deterministicEventBytes: prepared.deterministicByteCount,
+            initialDisposition: prepared.disposition
+          )
+          let result = try self.appendEvent(observation, database: database)
+          guard result.outcome == .accepted else { throw ViewerStoreError.invalidValue }
+          importedMonotonic += 1
+          eventCount += 1
+        }
+
+        var gapCount = 0
+        var gapSequence: UInt64 = 1
+        try document.forEachGap { imported in
+          progress(.gap)
+          try cancellation.check()
+          let device: ViewerDeviceSessionHandle?
+          if let key = imported.deviceReferenceKey {
+            guard let value = deviceHandles[key] else { throw ViewerStoreError.invalidValue }
+            device = value
+          } else {
+            device = nil
+          }
+          try self.appendGapVersion(
+            recording: recording,
+            device: device,
+            sequence: gapSequence,
+            namespace: "coordinator",
+            reason: imported.reason,
+            count: imported.count,
+            firstWallMilliseconds: imported.firstViewerTimeMilliseconds,
+            lastWallMilliseconds: imported.lastViewerTimeMilliseconds,
+            directions: imported.directions,
+            firstWireSequence: imported.firstWireSequence,
+            lastWireSequence: imported.lastWireSequence,
+            database: database
+          )
+          gapSequence += 1
+          gapCount += 1
+        }
+
+        var annotationCount = 0
+        try document.forEachAnnotation { imported in
+          progress(.annotation)
+          try cancellation.check()
+          let quota = try ViewerStoreQuota.textReservation(imported.body)
+          try self.reserveQuota(quota, recordingID: recording.rowID, database: database)
+          let insert = try ViewerSQLiteStatement(
+            database: database,
+            sql:
+              "INSERT INTO AnnotationVersions(recordingID,revision,createdWallMs,body,quotaBytes) VALUES(?1,?2,?3,?4,?5)"
+          )
+          try insert.bind(recording.rowID, at: 1)
+          try insert.bind(Int64(annotationCount + 1), at: 2)
+          try insert.bind(imported.createdAtMilliseconds, at: 3)
+          try insert.bind(imported.body, at: 4)
+          try insert.bind(quota, at: 5)
+          _ = try insert.step()
+          guard sqlite3_changes(database) == 1 else { throw ViewerStoreError.corruptStore }
+          annotationCount += 1
+        }
+
+        return ViewerCurrentSessionImportResult(
+          deviceCount: importedDeviceCount,
+          eventCount: eventCount,
+          gapCount: gapCount,
+          annotationCount: annotationCount
+        )
+      }
+    )
+  }
+
+  private func requireCurrentRecording(
+    _ recording: ViewerRecordingHandle,
+    database: OpaquePointer
+  ) throws {
+    let statement = try ViewerSQLiteStatement(
+      database: database,
+      sql:
+        "SELECT 1 FROM Recordings WHERE rowID=?1 AND logicalID=?2 AND rowID NOT IN (SELECT recordingID FROM Tombstones)"
+    )
+    try statement.bind(recording.rowID, at: 1)
+    try statement.bind(recording.logicalID.uuidString.lowercased(), at: 2)
+    guard try statement.step() else { throw ViewerStoreError.staleObservation }
+  }
+
+  private func preflightCurrentSessionImport(
+    _ document: ViewerSessionImportDocument,
+    cancellation: ViewerSessionImportCancellation,
+    progress: @escaping @Sendable (ViewerSessionImportPhase) -> Void
+  ) throws -> ViewerCurrentSessionImportPlan {
+    try cancellation.check()
+    var replacementQuota = ViewerStoreQuota.structuralReservation
+    var deviceReferences: Set<String> = []
+    var importedInstallationIDs: [String: String] = [:]
+
+    try document.forEachDevice { imported in
+      progress(.device)
+      try cancellation.check()
+      guard deviceReferences.insert(imported.referenceKey).inserted else {
+        throw ViewerStoreError.invalidValue
+      }
+      _ = try imported.displayName.map(ViewerDurableMetadataRules.displayName)
+      _ = try imported.applicationIdentifier.map(ViewerDurableMetadataRules.applicationIdentifier)
+      _ = try imported.applicationVersion.map(ViewerDurableMetadataRules.applicationVersion)
+      if importedInstallationIDs[imported.device] == nil {
+        let installationID = try ViewerDurableMetadataRules.installationID(
+          "imported-device-\(importedInstallationIDs.count + 1)"
+        )
+        importedInstallationIDs[imported.device] = installationID
+        replacementQuota = try Self.checkedReservationSum(
+          replacementQuota,
+          ViewerStoreQuota.textReservation(installationID)
+        )
+      }
+      replacementQuota = try Self.checkedReservationSum(
+        replacementQuota,
+        2 * ViewerStoreQuota.structuralReservation
+      )
+    }
+
+    try document.forEachEvent { imported in
+      progress(.event)
+      try cancellation.check()
+      guard deviceReferences.contains(imported.deviceReferenceKey) else {
+        throw ViewerStoreError.invalidValue
+      }
+      let prepared = try prepareImportedEvent(imported)
+      replacementQuota = try Self.checkedReservationSum(
+        replacementQuota,
+        ViewerStoreQuota.eventReservation(canonicalEventBytes: prepared.deterministicByteCount)
+      )
+      if prepared.disposition != nil {
+        replacementQuota = try Self.checkedReservationSum(
+          replacementQuota,
+          ViewerStoreQuota.structuralReservation
+        )
+      }
+    }
+
+    try document.forEachGap { imported in
+      progress(.gap)
+      try cancellation.check()
+      guard imported.deviceReferenceKey.map(deviceReferences.contains) ?? true else {
+        throw ViewerStoreError.invalidValue
+      }
+      replacementQuota = try Self.checkedReservationSum(
+        replacementQuota,
+        ViewerStoreQuota.structuralReservation
+      )
+    }
+
+    var annotationRevisions: Set<Int64> = []
+    try document.forEachAnnotation { imported in
+      progress(.annotation)
+      try cancellation.check()
+      guard annotationRevisions.insert(imported.revision).inserted else {
+        throw ViewerStoreError.invalidValue
+      }
+      replacementQuota = try Self.checkedReservationSum(
+        replacementQuota,
+        ViewerStoreQuota.textReservation(imported.body)
+      )
+    }
+
+    let (diskReservation, diskOverflow) = replacementQuota.multipliedReportingOverflow(by: 2)
+    guard !diskOverflow else { throw ViewerStoreError.capacityExceeded }
+    return ViewerCurrentSessionImportPlan(
+      replacementQuotaBytes: replacementQuota,
+      diskReservationBytes: diskReservation
+    )
+  }
+
+  private func prepareImportedEvent(
+    _ imported: ViewerSessionImportEvent
+  ) throws -> (
+    envelope: EventEnvelope,
+    disposition: ViewerStoredDisposition?,
+    deterministicByteCount: Int
+  ) {
+    let type: EventType
+    if imported.eventType == "nearwire" || imported.eventType.hasPrefix("nearwire.") {
+      type = try EventType.platform(imported.eventType)
+    } else {
+      type = try EventType.user(imported.eventType)
+    }
+    let sourceRole: EndpointRole = imported.direction == .appToViewer ? .app : .viewer
+    let targetRole: EndpointRole = imported.direction == .appToViewer ? .viewer : .app
+    let envelope = try EventEnvelope(
+      id: EventID(rawValue: imported.eventID),
+      type: type,
+      content: imported.content,
+      createdAt: Date(
+        timeIntervalSince1970: Double(imported.createdAtMilliseconds) / 1_000
+      ),
+      monotonicTimestampNanoseconds: imported.originMonotonicNanoseconds,
+      source: EventEndpoint(
+        role: sourceRole,
+        id: try EndpointID(rawValue: sourceRole == .app ? "imported-app" : "imported-viewer")
+      ),
+      target: EventEndpoint(
+        role: targetRole,
+        id: try EndpointID(rawValue: targetRole == .app ? "imported-app" : "imported-viewer")
+      ),
+      direction: imported.direction,
+      sessionEpoch: SessionEpoch(),
+      sequence: EventSequence(imported.wireSequence),
+      priority: imported.priority,
+      ttl: try EventTTL(milliseconds: imported.ttlMilliseconds),
+      causality: EventCausality(
+        correlationID: try imported.causality?.correlationID.map(EventID.init(rawValue:)),
+        replyTo: try imported.causality?.replyTo.map(EventID.init(rawValue:))
+      ),
+      schemaVersion: try EventSchemaVersion(imported.eventSchemaVersion)
+    )
+    let (remainingTTLNanoseconds, ttlOverflow) = imported.ttlMilliseconds
+      .multipliedReportingOverflow(by: 1_000_000)
+    guard !ttlOverflow else { throw ViewerStoreError.invalidValue }
+    let record = try WireEventRecord(
+      envelope: envelope,
+      remainingTTLNanoseconds: remainingTTLNanoseconds
+    )
+    let deterministicByteCount = try record.deterministicEncodedByteCount()
+    guard deterministicByteCount <= WireProtocolLimits.default.maximumEventBytes else {
+      throw ViewerStoreError.invalidValue
+    }
+    let disposition: ViewerStoredDisposition?
+    if let raw = imported.disposition {
+      guard let value = ViewerStoredDisposition(rawValue: raw) else {
+        throw ViewerStoreError.invalidValue
+      }
+      disposition = value
+    } else {
+      disposition = nil
+    }
+    return (envelope, disposition, deterministicByteCount)
+  }
+
+  private func removeReplaceableSessionContent(
+    recordingID: Int64,
+    database: OpaquePointer
+  ) throws {
+    let reclaimed = try replaceableSessionQuota(
+      recordingID: recordingID,
+      database: database
+    )
+    let deletions = [
+      "DELETE FROM EventDispositionVersions WHERE eventID IN (SELECT rowID FROM Events WHERE recordingID=?1)",
+      "DELETE FROM Events WHERE recordingID=?1",
+      "DELETE FROM PolicyVersions WHERE deviceSessionID IN (SELECT rowID FROM DeviceSessions WHERE recordingID=?1)",
+      "DELETE FROM DropVersions WHERE deviceSessionID IN (SELECT rowID FROM DeviceSessions WHERE recordingID=?1)",
+      "DELETE FROM GapVersions WHERE recordingID=?1",
+      "DELETE FROM AnnotationVersions WHERE recordingID=?1",
+      "DELETE FROM DeviceSessionVersions WHERE deviceSessionID IN (SELECT rowID FROM DeviceSessions WHERE recordingID=?1)",
+      "DELETE FROM DeviceSessions WHERE recordingID=?1",
+      "DELETE FROM InstallationAliases WHERE recordingID=?1",
+      "DELETE FROM RecordingVersions WHERE recordingID=?1",
+    ]
+    for sql in deletions {
+      let statement = try ViewerSQLiteStatement(database: database, sql: sql)
+      try statement.bind(recordingID, at: 1)
+      _ = try statement.step()
+    }
+
+    guard reclaimed > 0 else { return }
+    let recordingQuota = try ViewerSQLiteStatement(
+      database: database,
+      sql:
+        "UPDATE Recordings SET liveQuotaBytes=liveQuotaBytes-?1 WHERE rowID=?2 AND liveQuotaBytes>=?1"
+    )
+    try recordingQuota.bind(reclaimed, at: 1)
+    try recordingQuota.bind(recordingID, at: 2)
+    _ = try recordingQuota.step()
+    guard sqlite3_changes(database) == 1 else { throw ViewerStoreError.corruptStore }
+
+    let totalQuota = try ViewerSQLiteStatement(
+      database: database,
+      sql:
+        "UPDATE StoreMetadata SET integerValue=integerValue-?1 WHERE key='logicalQuotaBytes' AND integerValue>=?1"
+    )
+    try totalQuota.bind(reclaimed, at: 1)
+    _ = try totalQuota.step()
+    guard sqlite3_changes(database) == 1 else { throw ViewerStoreError.corruptStore }
+  }
+
+  private func replaceableSessionQuota(
+    recordingID: Int64,
+    database: OpaquePointer
+  ) throws -> Int64 {
+    let quotaQueries = [
+      "SELECT COALESCE(SUM(quotaBytes),0) FROM RecordingVersions WHERE recordingID=?1",
+      "SELECT COALESCE(SUM(quotaBytes),0) FROM InstallationAliases WHERE recordingID=?1",
+      "SELECT COALESCE(SUM(quotaBytes),0) FROM DeviceSessions WHERE recordingID=?1",
+      "SELECT COALESCE(SUM(quotaBytes),0) FROM DeviceSessionVersions WHERE deviceSessionID IN (SELECT rowID FROM DeviceSessions WHERE recordingID=?1)",
+      "SELECT COALESCE(SUM(quotaBytes),0) FROM Events WHERE recordingID=?1",
+      "SELECT COALESCE(SUM(quotaBytes),0) FROM EventDispositionVersions WHERE eventID IN (SELECT rowID FROM Events WHERE recordingID=?1)",
+      "SELECT COALESCE(SUM(quotaBytes),0) FROM PolicyVersions WHERE deviceSessionID IN (SELECT rowID FROM DeviceSessions WHERE recordingID=?1)",
+      "SELECT COALESCE(SUM(quotaBytes),0) FROM DropVersions WHERE deviceSessionID IN (SELECT rowID FROM DeviceSessions WHERE recordingID=?1)",
+      "SELECT COALESCE(SUM(quotaBytes),0) FROM GapVersions WHERE recordingID=?1",
+      "SELECT COALESCE(SUM(quotaBytes),0) FROM AnnotationVersions WHERE recordingID=?1",
+    ]
+    return try quotaQueries.reduce(Int64(0)) { partial, sql in
+      let value = try scalarForRecording(sql, recordingID: recordingID, database: database)
+      let (sum, overflow) = partial.addingReportingOverflow(value)
+      guard !overflow, sum >= 0 else { throw ViewerStoreError.corruptStore }
+      return sum
+    }
+  }
+
+  private func deletionWALReservation(
+    recordingID: Int64,
+    database: OpaquePointer
+  ) throws -> Int64 {
+    let reclaimable = try replaceableSessionQuota(
+      recordingID: recordingID,
+      database: database
+    )
+    let (reservation, overflow) = reclaimable.multipliedReportingOverflow(by: 2)
+    guard !overflow else { throw ViewerStoreError.capacityExceeded }
+    return max(ViewerStoreQuota.structuralReservation, reservation)
   }
 
   private func plannedStructuralReservation(
@@ -1208,6 +1966,11 @@ final class ViewerEventStore: @unchecked Sendable {
     try insert.bind(count, at: 13)
     try insert.bind(quota, at: 14)
     _ = try insert.step()
+    guard try retainedCount("retainedGapCount", database: database)
+      <= maximumRetainedGapCount
+    else {
+      throw ViewerStoreError.workLimitExceeded
+    }
   }
 
   func status() -> ViewerStoreStatus {
@@ -1630,9 +2393,36 @@ final class ViewerEventStore: @unchecked Sendable {
     return statement.int64(at: 0)
   }
 
+  private func scalarForRecording(
+    _ sql: String,
+    recordingID: Int64,
+    database: OpaquePointer
+  ) throws -> Int64 {
+    let statement = try ViewerSQLiteStatement(database: database, sql: sql)
+    try statement.bind(recordingID, at: 1)
+    guard try statement.step() else { throw ViewerStoreError.corruptStore }
+    return statement.int64(at: 0)
+  }
+
+  private func retainedCount(_ key: String, database: OpaquePointer) throws -> Int64 {
+    let statement = try ViewerSQLiteStatement(
+      database: database,
+      sql: "SELECT integerValue FROM StoreMetadata WHERE key=?1"
+    )
+    try statement.bind(key, at: 1)
+    guard try statement.step(), statement.int64(at: 0) >= 0 else {
+      throw ViewerStoreError.corruptStore
+    }
+    return statement.int64(at: 0)
+  }
+
   private func writeTransaction<T>(
     recoveryPermit: ViewerStoreStateRelay.RecoveryPermit? = nil,
+    context: ViewerStoreWriteContext = .eventIngress,
+    progressCheck: (() -> ViewerStoreError?)? = nil,
     plan: (OpaquePointer) throws -> Int64 = { _ in 0 },
+    diskPlan: ((OpaquePointer) throws -> Int64)? = nil,
+    beforeCommit: (OpaquePointer) throws -> Void = { _ in },
     changedRecordingIDs: (T) -> Set<Int64> = { _ in [] },
     _ body: (OpaquePointer) throws -> T
   ) throws -> T {
@@ -1649,6 +2439,7 @@ final class ViewerEventStore: @unchecked Sendable {
       var capacityRecoveryPermit: ViewerStoreStateRelay.RecoveryPermit?
       do {
         let result = try pool.writer.run(
+          progressCheck: progressCheck,
           failureHandler: { error in
             if recoveryPermit == nil, !attemptedCapacityRecovery,
               error as? ViewerStoreError == .capacityExceeded
@@ -1658,7 +2449,7 @@ final class ViewerEventStore: @unchecked Sendable {
                 .automaticCapacityRecovery
               )
             } else {
-              self.reportWriteFailureBeforeWriterRelease(error)
+              self.reportWriteFailureBeforeWriterRelease(error, context: context)
             }
           },
           { database in
@@ -1666,6 +2457,8 @@ final class ViewerEventStore: @unchecked Sendable {
             try self.writeGate()
             plannedReservation = try plan(database)
             guard plannedReservation >= 0 else { throw ViewerStoreError.invalidValue }
+            let diskReservation = try diskPlan?(database) ?? plannedReservation
+            guard diskReservation >= 0 else { throw ViewerStoreError.invalidValue }
             let currentQuota = try ViewerStoreSchema.scalarInt64(
               "SELECT integerValue FROM StoreMetadata WHERE key='logicalQuotaBytes'",
               database: database
@@ -1677,11 +2470,12 @@ final class ViewerEventStore: @unchecked Sendable {
             }
             try pool.diskGuard.requireReserve(
               at: pool.paths.directory,
-              plannedBytes: plannedReservation
+              plannedBytes: diskReservation
             )
             try ViewerSQLiteConnection.execute("BEGIN IMMEDIATE", on: database)
             do {
               let result = try body(database)
+              try beforeCommit(database)
               try ViewerSQLiteConnection.execute("COMMIT", on: database)
               return result
             } catch {
@@ -1718,12 +2512,15 @@ final class ViewerEventStore: @unchecked Sendable {
     }
   }
 
-  private func reportWriteFailureBeforeWriterRelease(_ error: Error) {
+  private func reportWriteFailureBeforeWriterRelease(
+    _ error: Error,
+    context: ViewerStoreWriteContext
+  ) {
     guard let storeError = error as? ViewerStoreError else {
       writeStateRelay.reportFailure(.writeFailed)
       return
     }
-    switch ViewerStoreWriteFailureDisposition.classify(storeError, context: .eventIngress) {
+    switch ViewerStoreWriteFailureDisposition.classify(storeError, context: context) {
     case .capacityPaused:
       writeStateRelay.reportFailure(.capacityPaused)
     case .writeFailed:
@@ -1872,6 +2669,23 @@ final class ViewerJournalPipelineBudget: @unchecked Sendable {
       structuralCount = max(0, structuralCount - 1)
     }
     lock.unlock()
+  }
+}
+
+private final class ViewerStoreIngressFlushResult: @unchecked Sendable {
+  private let lock = NSLock()
+  private var storage = ViewerStoreIngress.FlushOutcome.writeFailed
+
+  func set(_ value: ViewerStoreIngress.FlushOutcome) {
+    lock.lock()
+    storage = value
+    lock.unlock()
+  }
+
+  var value: ViewerStoreIngress.FlushOutcome {
+    lock.lock()
+    defer { lock.unlock() }
+    return storage
   }
 }
 
@@ -2030,6 +2844,18 @@ final class ViewerStoreIngress: @unchecked Sendable, CustomReflectable,
     }
   }
 
+  func flushSynchronously() -> FlushOutcome {
+    let semaphore = DispatchSemaphore(value: 0)
+    let result = ViewerStoreIngressFlushResult()
+    Task {
+      let value = await flush()
+      result.set(value)
+      semaphore.signal()
+    }
+    semaphore.wait()
+    return result.value
+  }
+
   private func scheduleDrainLocked() {
     if drainScheduled {
       drainDirty = true
@@ -2110,6 +2936,42 @@ final class ViewerStoreIngress: @unchecked Sendable, CustomReflectable,
         let rejectionHandler = onRejectedStructural
         lock.unlock()
         if let rejected { rejectionHandler(rejected.observation, error) }
+        continue
+      } catch let error as ViewerStoreError where error == .workLimitExceeded {
+        lock.lock()
+        let rejectionHandler = onRejectedStructural
+        var rejectedStructural: StructuralEntry?
+        if let structuralEntry {
+          rejectedStructural = structural.removeValue(forKey: structuralEntry.0)
+          structuralHead = structuralEntry.0 + 1
+        } else if !eventBatch.isEmpty {
+          let ownedBytes = eventBatch.reduce(0) { $0 + $1.2 }
+          for entry in eventBatch { events.removeValue(forKey: entry.0) }
+          eventHead = eventBatch[eventBatch.count - 1].0 + 1
+          eventBytes -= ownedBytes
+        }
+        let empty = structural.isEmpty && events.isEmpty
+        let waiters: [CheckedContinuation<FlushOutcome, Never>]
+        if empty {
+          eventHead = 1
+          eventTail = 1
+          structuralHead = 1
+          structuralTail = 1
+          drainScheduled = false
+          drainDirty = false
+          waiters = flushWaiters
+          flushWaiters.removeAll()
+        } else {
+          drainDirty = false
+          waiters = []
+        }
+        lock.unlock()
+        if let rejectedStructural {
+          rejectionHandler(rejectedStructural.observation, error)
+        }
+        for entry in eventBatch { entry.3(.unavailable) }
+        for waiter in waiters { waiter.resume(returning: .drained) }
+        if empty { return }
         continue
       } catch {
         lock.lock()

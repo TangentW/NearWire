@@ -5,6 +5,7 @@ import Foundation
 protocol ViewerSessionControlling: AnyObject, Sendable {
   var runtimeLogicalID: UUID { get }
   var managerGeneration: UInt64 { get }
+  var hasWorkspaceMutationBlockingSessions: Bool { get }
 
   func setSnapshotHandler(_ handler: @escaping @Sendable ([ViewerSessionSnapshot]) -> Void)
   func disconnect(connectionID: UUID)
@@ -19,6 +20,10 @@ protocol ViewerSessionControlling: AnyObject, Sendable {
   func setNickname(_ nickname: String?, route: ViewerLogicalRoute) -> Bool
 }
 
+extension ViewerSessionControlling {
+  var hasWorkspaceMutationBlockingSessions: Bool { false }
+}
+
 protocol ViewerLiveObservationProviding: AnyObject, Sendable {
   var runtimeLogicalID: UUID { get }
   func snapshot() -> ViewerLiveProjectionSnapshot
@@ -28,19 +33,91 @@ protocol ViewerLiveObservationProviding: AnyObject, Sendable {
   func storeStateChanged(_ state: ViewerStoreStatus.State)
   func setPresentationPaused(_ paused: Bool)
   func durableRowBecameVisible(key: ViewerEventJournalKey, observationID: UUID)
+  func clearCurrentSession()
 }
 
 extension ViewerLiveObservationProviding {
   func performanceEventLocator(for key: ViewerEventJournalKey) -> ViewerPerformanceEventLocator? {
     nil
   }
+
+  func clearCurrentSession() {}
 }
 
-final class ViewerCompositeSessionJournal: ViewerSessionJournaling, @unchecked Sendable {
+enum ViewerWorkspaceMutationFailure: Error, Equatable, Sendable {
+  case unavailable
+  case busy
+  case invalidFile
+  case unsupportedFile
+  case capacityExceeded
+  case cancelled
+}
+
+enum ViewerWorkspaceMutationKind: Equatable, Sendable {
+  case clearEvents
+  case importSession
+}
+
+protocol ViewerWorkspaceSessionControlling: AnyObject, Sendable {
+  func clearCurrentSession(
+    afterCommit: @escaping @Sendable () -> Void,
+    completion: @escaping @Sendable (Result<Void, ViewerWorkspaceMutationFailure>) -> Void
+  )
+  func importCurrentSession(
+    from url: URL,
+    afterCommit: @escaping @Sendable () -> Void,
+    completion: @escaping @Sendable (Result<Void, ViewerWorkspaceMutationFailure>) -> Void
+  )
+  func cancelCurrentSessionImport()
+}
+
+extension ViewerWorkspaceSessionControlling {
+  func clearCurrentSession(
+    completion: @escaping @Sendable (Result<Void, ViewerWorkspaceMutationFailure>) -> Void
+  ) {
+    clearCurrentSession(afterCommit: {}, completion: completion)
+  }
+
+  func importCurrentSession(
+    from url: URL,
+    completion: @escaping @Sendable (Result<Void, ViewerWorkspaceMutationFailure>) -> Void
+  ) {
+    importCurrentSession(from: url, afterCommit: {}, completion: completion)
+  }
+}
+
+private final class ViewerUnavailableWorkspaceSessionControl: ViewerWorkspaceSessionControlling,
+  @unchecked Sendable
+{
+  func clearCurrentSession(
+    afterCommit: @escaping @Sendable () -> Void,
+    completion: @escaping @Sendable (Result<Void, ViewerWorkspaceMutationFailure>) -> Void
+  ) {
+    completion(.failure(.unavailable))
+  }
+
+  func importCurrentSession(
+    from url: URL,
+    afterCommit: @escaping @Sendable () -> Void,
+    completion: @escaping @Sendable (Result<Void, ViewerWorkspaceMutationFailure>) -> Void
+  ) {
+    completion(.failure(.unavailable))
+  }
+
+  func cancelCurrentSessionImport() {}
+}
+
+final class ViewerCompositeSessionJournal: ViewerSessionJournaling,
+  ViewerWorkspaceSessionControlling, @unchecked Sendable
+{
   let runtimeLogicalID: UUID
 
   private let durableJournal: any ViewerSessionJournaling
+  private let durableWorkspaceControl: any ViewerWorkspaceSessionControlling
   private let liveWindow: ViewerLiveEventWindow
+  private let workspaceMutationGate = DispatchSemaphore(value: 1)
+  private let workspaceEpochLock = NSLock()
+  private var workspaceEpoch: UInt64 = 0
 
   init(
     runtimeLogicalID: UUID,
@@ -50,6 +127,9 @@ final class ViewerCompositeSessionJournal: ViewerSessionJournaling, @unchecked S
     precondition(liveWindow.runtimeLogicalID == runtimeLogicalID)
     self.runtimeLogicalID = runtimeLogicalID
     self.durableJournal = durableJournal
+    durableWorkspaceControl =
+      (durableJournal as? any ViewerWorkspaceSessionControlling)
+      ?? ViewerUnavailableWorkspaceSessionControl()
     self.liveWindow = liveWindow
   }
 
@@ -67,6 +147,8 @@ final class ViewerCompositeSessionJournal: ViewerSessionJournaling, @unchecked S
   }
 
   func sessionStarted(runtimeLogicalID: UUID, _ context: ViewerAdmissionSessionContext) {
+    workspaceMutationGate.wait()
+    defer { workspaceMutationGate.signal() }
     guard runtimeLogicalID == self.runtimeLogicalID else { return }
     if let metadata = try? ViewerFrozenSessionMetadata(context: context, nickname: nil) {
       liveWindow.sessionStarted(metadata, connectionID: context.connectionID)
@@ -78,18 +160,87 @@ final class ViewerCompositeSessionJournal: ViewerSessionJournaling, @unchecked S
     _ observation: ViewerCommittedEventObservation,
     outcome: @escaping @Sendable (ViewerEventJournalOutcome) -> Void
   ) {
+    workspaceMutationGate.wait()
+    defer { workspaceMutationGate.signal() }
     guard observation.key.runtimeLogicalID == runtimeLogicalID else {
       outcome(.sealed)
       return
     }
+    let admittedEpoch = currentWorkspaceEpoch()
     let offer = liveWindow.offer(observation) { [weak self] decision in
       guard let self else {
         outcome(.sealed)
         return
       }
-      self.resolveLiveDecision(decision, observation: observation, outcome: outcome)
+      self.resolveDeferredLiveDecision(
+        decision,
+        admittedEpoch: admittedEpoch,
+        observation: observation,
+        outcome: outcome
+      )
     }
     resolveLiveDecision(offer, observation: observation, outcome: outcome)
+  }
+
+  func clearCurrentSession(
+    afterCommit: @escaping @Sendable () -> Void,
+    completion: @escaping @Sendable (Result<Void, ViewerWorkspaceMutationFailure>) -> Void
+  ) {
+    workspaceMutationGate.wait()
+    liveWindow.flushIngressForWorkspaceMutation()
+    let gate = workspaceMutationGate
+    let liveWindow = liveWindow
+    let advanceWorkspaceEpoch: @Sendable () -> Void = { [weak self] in
+      self?.advanceWorkspaceEpoch()
+    }
+    durableWorkspaceControl.clearCurrentSession(afterCommit: {
+      advanceWorkspaceEpoch()
+      liveWindow.clearCurrentSession()
+      afterCommit()
+    }) { result in
+      gate.signal()
+      completion(result)
+    }
+  }
+
+  func importCurrentSession(
+    from url: URL,
+    afterCommit: @escaping @Sendable () -> Void,
+    completion: @escaping @Sendable (Result<Void, ViewerWorkspaceMutationFailure>) -> Void
+  ) {
+    workspaceMutationGate.wait()
+    liveWindow.flushIngressForWorkspaceMutation()
+    let gate = workspaceMutationGate
+    let liveWindow = liveWindow
+    let advanceWorkspaceEpoch: @Sendable () -> Void = { [weak self] in
+      self?.advanceWorkspaceEpoch()
+    }
+    durableWorkspaceControl.importCurrentSession(from: url, afterCommit: {
+      advanceWorkspaceEpoch()
+      liveWindow.clearCurrentSession()
+      afterCommit()
+    }) { result in
+      gate.signal()
+      completion(result)
+    }
+  }
+
+  func cancelCurrentSessionImport() {
+    durableWorkspaceControl.cancelCurrentSessionImport()
+  }
+
+  func cancelWorkspaceMutationAndWait() -> Task<Void, Never> {
+    durableWorkspaceControl.cancelCurrentSessionImport()
+    let gate = workspaceMutationGate
+    return Task {
+      await withCheckedContinuation { continuation in
+        DispatchQueue.global(qos: .utility).async {
+          gate.wait()
+          gate.signal()
+          continuation.resume()
+        }
+      }
+    }
   }
 
   private func resolveLiveDecision(
@@ -118,6 +269,34 @@ final class ViewerCompositeSessionJournal: ViewerSessionJournaling, @unchecked S
     }
   }
 
+  private func resolveDeferredLiveDecision(
+    _ decision: ViewerLiveEventOfferOutcome,
+    admittedEpoch: UInt64,
+    observation: ViewerCommittedEventObservation,
+    outcome: @escaping @Sendable (ViewerEventJournalOutcome) -> Void
+  ) {
+    workspaceEpochLock.lock()
+    guard workspaceEpoch == admittedEpoch else {
+      workspaceEpochLock.unlock()
+      outcome(.sealed)
+      return
+    }
+    resolveLiveDecision(decision, observation: observation, outcome: outcome)
+    workspaceEpochLock.unlock()
+  }
+
+  private func currentWorkspaceEpoch() -> UInt64 {
+    workspaceEpochLock.lock()
+    defer { workspaceEpochLock.unlock() }
+    return workspaceEpoch
+  }
+
+  private func advanceWorkspaceEpoch() {
+    workspaceEpochLock.lock()
+    workspaceEpoch = workspaceEpoch == UInt64.max ? 0 : workspaceEpoch + 1
+    workspaceEpochLock.unlock()
+  }
+
   func uplinkTerminated(
     runtimeLogicalID: UUID,
     connectionID: UUID,
@@ -126,6 +305,8 @@ final class ViewerCompositeSessionJournal: ViewerSessionJournaling, @unchecked S
     disposition: ViewerStoredDisposition,
     monotonicNanoseconds: UInt64
   ) {
+    workspaceMutationGate.wait()
+    defer { workspaceMutationGate.signal() }
     guard runtimeLogicalID == self.runtimeLogicalID else { return }
     liveWindow.laterDisposition(
       key: ViewerEventJournalKey(
@@ -152,6 +333,8 @@ final class ViewerCompositeSessionJournal: ViewerSessionJournaling, @unchecked S
     policy: ViewerRatePolicy,
     monotonicNanoseconds: UInt64
   ) {
+    workspaceMutationGate.wait()
+    defer { workspaceMutationGate.signal() }
     guard runtimeLogicalID == self.runtimeLogicalID else { return }
     durableJournal.policyChanged(
       runtimeLogicalID: runtimeLogicalID,
@@ -167,6 +350,8 @@ final class ViewerCompositeSessionJournal: ViewerSessionJournaling, @unchecked S
     samples: [ViewerDropJournalSample],
     monotonicNanoseconds: UInt64
   ) {
+    workspaceMutationGate.wait()
+    defer { workspaceMutationGate.signal() }
     guard runtimeLogicalID == self.runtimeLogicalID else { return }
     liveWindow.dropsChanged(connectionID: connectionID, samples: samples)
     durableJournal.dropsChanged(
@@ -183,6 +368,8 @@ final class ViewerCompositeSessionJournal: ViewerSessionJournaling, @unchecked S
     wallMilliseconds: Int64,
     monotonicNanoseconds: UInt64
   ) {
+    workspaceMutationGate.wait()
+    defer { workspaceMutationGate.signal() }
     guard runtimeLogicalID == self.runtimeLogicalID else { return }
     liveWindow.sessionEnded(
       connectionID: connectionID,
@@ -198,6 +385,8 @@ final class ViewerCompositeSessionJournal: ViewerSessionJournaling, @unchecked S
   }
 
   func retryStorage() {
+    workspaceMutationGate.wait()
+    defer { workspaceMutationGate.signal() }
     durableJournal.retryStorage()
   }
 
@@ -206,6 +395,8 @@ final class ViewerCompositeSessionJournal: ViewerSessionJournaling, @unchecked S
     wallMilliseconds: Int64,
     monotonicNanoseconds: UInt64
   ) async {
+    await acquireWorkspaceMutationGate()
+    defer { workspaceMutationGate.signal() }
     guard logicalID == runtimeLogicalID else { return }
     await liveWindow.finishIngress()
     await durableJournal.runtimeEnded(
@@ -215,22 +406,35 @@ final class ViewerCompositeSessionJournal: ViewerSessionJournaling, @unchecked S
     )
     await liveWindow.runtimeEnded()
   }
+
+  private func acquireWorkspaceMutationGate() async {
+    let gate = workspaceMutationGate
+    await withCheckedContinuation { continuation in
+      DispatchQueue.global(qos: .utility).async {
+        gate.wait()
+        continuation.resume()
+      }
+    }
+  }
 }
 
 struct ViewerRuntimeExplorerInputs: @unchecked Sendable {
   let runtimeLogicalID: UUID
   let storeGateway: ViewerStoreExplorerGateway
   let liveObservations: any ViewerLiveObservationProviding
+  let workspaceControl: any ViewerWorkspaceSessionControlling
 
   init(
     runtimeLogicalID: UUID,
     storeGateway: ViewerStoreExplorerGateway,
-    liveObservations: any ViewerLiveObservationProviding
+    liveObservations: any ViewerLiveObservationProviding,
+    workspaceControl: (any ViewerWorkspaceSessionControlling)? = nil
   ) {
     precondition(liveObservations.runtimeLogicalID == runtimeLogicalID)
     self.runtimeLogicalID = runtimeLogicalID
     self.storeGateway = storeGateway
     self.liveObservations = liveObservations
+    self.workspaceControl = workspaceControl ?? ViewerUnavailableWorkspaceSessionControl()
   }
 }
 
@@ -481,6 +685,7 @@ struct ViewerRuntimeComponents: @unchecked Sendable {
   let handoffOwner: any ViewerAdmissionHandoffOwning
   let sessionControl: any ViewerSessionControlling
   let liveObservations: any ViewerLiveObservationProviding
+  let workspaceControl: any ViewerWorkspaceSessionControlling
   let compositeJournal: ViewerCompositeSessionJournal
   let explorerInputs: ViewerRuntimeExplorerInputs
   let cleanupReceipt: ViewerRuntimeCleanupReceipt
@@ -491,6 +696,7 @@ struct ViewerRuntimeComponents: @unchecked Sendable {
     handoffOwner: any ViewerAdmissionHandoffOwning,
     sessionControl: any ViewerSessionControlling,
     liveObservations: any ViewerLiveObservationProviding,
+    workspaceControl: (any ViewerWorkspaceSessionControlling)? = nil,
     compositeJournal: ViewerCompositeSessionJournal,
     explorerInputs: ViewerRuntimeExplorerInputs,
     cleanupReceipt: ViewerRuntimeCleanupReceipt
@@ -507,6 +713,7 @@ struct ViewerRuntimeComponents: @unchecked Sendable {
     self.handoffOwner = handoffOwner
     self.sessionControl = sessionControl
     self.liveObservations = liveObservations
+    self.workspaceControl = workspaceControl ?? compositeJournal
     self.compositeJournal = compositeJournal
     self.explorerInputs = explorerInputs
     self.cleanupReceipt = cleanupReceipt
@@ -545,11 +752,18 @@ struct ViewerRuntimeComponents: @unchecked Sendable {
     let explorerInputs = ViewerRuntimeExplorerInputs(
       runtimeLogicalID: runtimeLogicalID,
       storeGateway: storeGateway,
-      liveObservations: liveWindow
+      liveObservations: liveWindow,
+      workspaceControl: compositeJournal
     )
     let cleanupReceipt = ViewerRuntimeCleanupReceipt {
       manager.sealControlAdmission()
-      return liveWindow.sealPresentation()
+      let presentation = liveWindow.sealPresentation()
+      let mutation = compositeJournal.cancelWorkspaceMutationAndWait()
+      return Task {
+        async let presentationDone: Void = presentation.value
+        async let mutationDone: Void = mutation.value
+        _ = await (presentationDone, mutationDone)
+      }
     }
     return ViewerRuntimeComponents(
       runtimeLogicalID: runtimeLogicalID,
@@ -557,6 +771,7 @@ struct ViewerRuntimeComponents: @unchecked Sendable {
       handoffOwner: manager,
       sessionControl: manager,
       liveObservations: liveWindow,
+      workspaceControl: compositeJournal,
       compositeJournal: compositeJournal,
       explorerInputs: explorerInputs,
       cleanupReceipt: cleanupReceipt

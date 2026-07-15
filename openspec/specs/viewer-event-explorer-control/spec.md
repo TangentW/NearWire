@@ -3,28 +3,6 @@
 ## Purpose
 TBD - created by archiving change viewer-event-explorer-control. Update Purpose after archive.
 ## Requirements
-### Requirement: Viewer presents one three-column Event Explorer with an explicit recording scope
-
-The Viewer SHALL present one native single-window workspace containing a source/device column, an Event timeline column, an Event inspector column, and a Viewer-to-App composer below the timeline/inspector region. Pairing, pending approval, Pause New Devices, device nickname/rate/telemetry, storage, and identity controls SHALL remain reachable without duplicating protocol ownership.
-
-Exactly one current or historical recording context SHALL be selected. A Viewer-internal source-neutral scope SHALL identify either the exact current runtime logical ID or one positive historical recording row ID and SHALL identify either All Devices or 1 through 16 exact device logical IDs. Current device logical IDs SHALL be connection IDs and durable catalogs SHALL expose the same `DeviceSessions.logicalID`. Within that context the operator MAY select one device, 2 through 16 explicit devices, or All Devices. All Devices SHALL compile without materializing every historical device as a query predicate. V1 SHALL NOT merge different recordings. A current runtime whose store row is unavailable SHALL remain selectable as `Live — not recording` and SHALL transition to its durable row only by matching logical runtime identity.
-
-Source, query, detail, renderer, export, and composer errors SHALL be presentation-local and SHALL NOT disconnect, pause, or mutate an App session.
-
-Each application runtime SHALL create exactly one injectable component bundle for one explicit runtime logical ID. The bundle SHALL expose the same admission handoff owner, typed session-control facade, manager generation, composite store/live journal, live observation facade, and explorer cleanup receipt. The process-lifetime store runtime SHALL remain outside the bundle. Application code SHALL NOT recover typed control by downcasting a handoff owner or combine components from different runtime bundles.
-
-#### Scenario: Current runtime has no durable recording
-
-- **WHEN** networking is active while the local store is unavailable
-- **THEN** the current live context remains selectable and shows only bounded transient Events with a `Not recorded` label
-- **AND** no synthetic recording ID or durable-history claim is presented
-
-#### Scenario: Operator selects several devices
-
-- **WHEN** 2 through 16 devices from one recording are selected
-- **THEN** one merged timeline shows only those devices with an alias on every row
-- **AND** no Event from another recording or unselected device appears
-
 ### Requirement: Timeline pages use bounded Viewer receive order and explicit diagnostics
 
 Persisted Events SHALL use the store's stable `(viewerMonotonicNanoseconds, eventRowID)` order for single-device and merged timelines. Phone-created wall and monotonic times SHALL remain metadata only; the Viewer SHALL display them without using them to reorder different phones. Timeline pages SHALL contain 1 through 200 rows, default 100, use keyset traversal and virtualized presentation, and SHALL NOT construct the complete result set. The presentation model SHALL retain at most 600 Event rows, 200 recording rows, 200 device rows, 128 gap markers, two boundary cursors plus one reload anchor per list, 16 selected-device identities, and one selected Event identity/detail. Bidirectional eviction SHALL preserve the opposite reload cursor and SHALL clear or exactly reload an evicted selection rather than selecting an unrelated row.
@@ -459,3 +437,80 @@ The Event Explorer filter editor SHALL present every existing filter dimension i
 - **WHEN** the filter editor appears at its declared minimum width and height
 - **THEN** fields, labels, validation guidance, and actions remain aligned and reachable by scrolling
 - **AND** controls do not overlap, collapse, or escape their section
+
+### Requirement: Viewer presents one current-Session Event workspace
+
+The Viewer SHALL present one native current-Session workspace with a top Devices strip, a central Analysis region, and an optional bottom Viewer-to-App composer. It SHALL NOT expose a Sources or historical recording sidebar. Events SHALL default to All Devices and MAY select up to 16 Device logical IDs; Performance SHALL retain its existing exactly-one-Device requirement. Device selection SHALL remain logical when durable storage is temporarily unavailable and SHALL rematerialize only exact current-Session identities.
+
+The Devices strip SHALL expose bounded horizontally scrollable Device rows, All Devices, selected state, connection state, Device settings, and pending approvals without Event content. A Device row action SHALL update Event scope and the Device-details target without treating that row as a Source.
+
+#### Scenario: Current runtime has no durable recording
+
+- **WHEN** the working Store is unavailable but live committed Events exist
+- **THEN** the current Session remains selected and bounded live rows remain filterable
+- **AND** no historical Source or invented durable identity appears
+
+#### Scenario: Operator selects several Devices
+
+- **WHEN** the operator selects two current-Session Device logical IDs
+- **THEN** Events show the merged bounded lanes for exactly those Devices
+- **AND** Performance continues to request one exact Device before scanning
+
+### Requirement: Current Session actions preserve one authoritative workspace
+
+The Event Timeline toolbar SHALL expose Clear Events with a destructive confirmation. The top Session controls SHALL expose complete JSON Import and Export. Clear SHALL invoke the Store generation-safe operation and clear selected Event, inspector, gaps, and Performance presentation only after success. Import SHALL be disabled while any Device is active or pending and, after an atomic Store replacement, SHALL rematerialize Events, Devices, and Performance under one successor generation. Export SHALL freeze the complete current Session and retain the unencrypted disclosure.
+
+No action SHALL create a second Source, recording-history row, or hidden Session. Stale pre-action page, detail, renderer, chart, or selection completion SHALL not update the successor presentation. Clear and import errors SHALL use fixed safe guidance without imported or Event content.
+
+#### Scenario: Operator confirms Clear
+
+- **WHEN** the current Session contains Events and the operator confirms Clear
+- **THEN** Timeline, Inspector, diagnostics, and Performance reset after the Store commits
+- **AND** connected Devices and later Events remain active in the same working Session
+
+#### Scenario: Operator cancels Clear
+
+- **WHEN** the destructive confirmation is dismissed
+- **THEN** the Store, selection, Timeline, Inspector, and Performance remain unchanged
+
+#### Scenario: Import replaces an inactive Session
+
+- **WHEN** no Device is active or pending and a complete supported export commits
+- **THEN** exactly one successor current Session presentation is materialized
+- **AND** no predecessor row or transport capability survives as imported state
+
+### Requirement: Workspace panels are independently visible and stable
+
+The top Viewer header SHALL provide independent Timeline, Inspector, and Composer visibility buttons. Each SHALL expose icon, selected state, tooltip, accessibility label/value, keyboard focus, and enabled state without relying only on color. Timeline and Inspector buttons SHALL be disabled while Performance mode is active without losing their in-process choices; Composer SHALL remain available in both modes.
+
+In Events mode the Viewer SHALL render Timeline-only, Inspector-only, both through one stable native horizontal split, or a bounded empty explanation when neither is visible. Composer visibility SHALL add or remove the bottom region through one stable native vertical split. Hiding a panel SHALL NOT clear capture, filters, selection, inspector state, composer draft, traversal, or Performance state. Panel preferences SHALL NOT persist beyond the process.
+
+#### Scenario: Operator hides Inspector during Event arrival
+
+- **WHEN** Inspector is hidden while new Events continue
+- **THEN** Timeline updates within its normal cadence and Inspector state remains bounded but unrendered
+- **AND** showing Inspector restores the exact still-resident selection without restarting capture
+
+#### Scenario: Both Event panels are hidden
+
+- **WHEN** Timeline and Inspector are both hidden in Events mode
+- **THEN** Analysis presents compact guidance and the top visibility controls remain reachable
+- **AND** no Event capture or query ownership is transferred to the placeholder
+
+### Requirement: SwiftUI publication is region scoped and animation safe
+
+Header, Devices, Timeline, Inspector, Performance, and composer/layout presentation SHALL use stable region identity and region-specific Equatable publication signatures. A source publication SHALL invalidate only regions whose visible signature changed. Timeline Event arrival SHALL NOT publish Inspector or composer/layout changes when their visible values are unchanged. Equivalent session snapshots SHALL be coalesced.
+
+Data-only Timeline refresh SHALL preserve stable Event row identities, scroll ownership, split positions, and selection and SHALL disable implicit insertion/removal/layout animation. UI refresh SHALL remain capped by the existing ten-per-second cadence, keep bounded Timeline rows, and perform no Event-proportional work in the root header or Devices strip. Semantic state transitions such as explicit panel visibility or mode changes MAY animate only through short reduced-motion-aware transitions.
+
+#### Scenario: High-frequency Events arrive with one selected Event
+
+- **WHEN** Events arrive faster than the UI cadence and selection/detail do not change
+- **THEN** Timeline publishes at most the bounded cadence while Inspector and workspace-layout publication counts do not increase
+- **AND** rows, divider positions, and selected detail do not flash through empty or animated intermediate states
+
+#### Scenario: Equivalent Device snapshot arrives
+
+- **WHEN** only non-visible counters change for a Device chip
+- **THEN** the Devices strip does not republish or reconstruct its scroll position
+- **AND** Device details may still observe their separately scoped telemetry state

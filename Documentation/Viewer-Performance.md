@@ -4,7 +4,7 @@
 
 The Performance dashboard is a native macOS analysis view for the built-in
 `nearwire.performance.snapshot` Events received from one exact App session. Select one source and
-one device in **Sources & Devices**, then choose **Performance**. A merged multi-device selection is
+one device in the top **Devices** strip, then choose **Performance**. A merged multi-device selection is
 not accepted because device clocks, lifecycle boundaries, and metric capabilities are not
 interchangeable.
 
@@ -107,9 +107,9 @@ from their intervals. An invalid snapshot breaks every metric. A missing or unav
 breaks only that metric. At most 128 gap details and 128 invalid-snapshot details are retained;
 additional evidence increments bounded loss accounting and cannot reconnect a line.
 
-## Open the source Event
+## Open the raw Event
 
-**Open Source Event** uses the selected metric's representative journal key at action time. It
+**Open Raw Event** uses the selected metric's representative journal key at action time. It
 switches through the shared Events/Performance traversal coordinator, then asks Event Explorer for
 that exact row. A durable locator is preferred; the exact still-live row is the fallback. Deleted,
 evicted, stale, or unavailable content produces fixed guidance. NearWire never opens a neighboring
@@ -145,7 +145,7 @@ bounded:
 | Resource | Maximum |
 | --- | ---: |
 | Buckets | 512 |
-| Completed cached ranges for the selected source/device | 4 |
+| Completed cached ranges for the selected Session/Device | 4 |
 | Detailed gaps | 128 |
 | Invalid-snapshot details | 128 |
 | Charts | 6 |

@@ -3,7 +3,7 @@ import Foundation
 import SQLite3
 
 enum ViewerStoreSchema {
-  static let currentVersion: Int64 = 2
+  static let currentVersion: Int64 = 3
 
   static func migrate(
     _ connection: ViewerSQLiteConnection,
@@ -32,7 +32,10 @@ enum ViewerStoreSchema {
             for statement in schemaVersion2IndexStatements {
               try ViewerSQLiteConnection.execute(statement, on: database)
             }
-            try ViewerSQLiteConnection.execute("PRAGMA user_version=2", on: database)
+            for statement in schemaVersion3RetainedCounterStatements {
+              try ViewerSQLiteConnection.execute(statement, on: database)
+            }
+            try ViewerSQLiteConnection.execute("PRAGMA user_version=3", on: database)
             try probe(
               database,
               requiredTemporaryStore: 1,
@@ -46,7 +49,7 @@ enum ViewerStoreSchema {
           }
         }
       case 1:
-        try control?.prepareForVersionOne()
+        try control?.prepareForLegacyMigration()
         let progressCheck: () -> ViewerStoreError? = { control?.progressFailure() }
         try connection.run(
           progressInstructionInterval: ViewerStoreMigrationControl.progressInstructionInterval,
@@ -55,6 +58,7 @@ enum ViewerStoreSchema {
           try probe(
             database,
             requiresExplorerIndexes: false,
+            requiresRetainedCounters: false,
             requiredTemporaryStore: 1,
             requiredCacheSize: -32 * 1_024
           )
@@ -64,8 +68,11 @@ enum ViewerStoreSchema {
               try control?.beforeIndex(offset + 1)
               try ViewerSQLiteConnection.execute(statement, on: database)
             }
+            for statement in schemaVersion3RetainedCounterStatements {
+              try ViewerSQLiteConnection.execute(statement, on: database)
+            }
             try control?.beforeValidation()
-            try ViewerSQLiteConnection.execute("PRAGMA user_version=2", on: database)
+            try ViewerSQLiteConnection.execute("PRAGMA user_version=3", on: database)
             try probe(
               database,
               requiredTemporaryStore: 1,
@@ -79,6 +86,38 @@ enum ViewerStoreSchema {
           }
         }
       case 2:
+        try control?.prepareForLegacyMigration()
+        let progressCheck: () -> ViewerStoreError? = { control?.progressFailure() }
+        try connection.run(
+          progressInstructionInterval: ViewerStoreMigrationControl.progressInstructionInterval,
+          progressCheck: progressCheck
+        ) { database in
+          try probe(
+            database,
+            requiresRetainedCounters: false,
+            requiredTemporaryStore: 1,
+            requiredCacheSize: -32 * 1_024
+          )
+          try ViewerSQLiteConnection.execute("BEGIN IMMEDIATE", on: database)
+          do {
+            for statement in schemaVersion3RetainedCounterStatements {
+              try ViewerSQLiteConnection.execute(statement, on: database)
+            }
+            try control?.beforeValidation()
+            try ViewerSQLiteConnection.execute("PRAGMA user_version=3", on: database)
+            try probe(
+              database,
+              requiredTemporaryStore: 1,
+              requiredCacheSize: -32 * 1_024
+            )
+            try probeExplorerPlans(database)
+            try ViewerSQLiteConnection.execute("COMMIT", on: database)
+          } catch {
+            try? ViewerSQLiteConnection.execute("ROLLBACK", on: database)
+            throw error
+          }
+        }
+      case 3:
         try connection.run { database in
           try probe(
             database,
@@ -99,6 +138,7 @@ enum ViewerStoreSchema {
   static func probe(
     _ database: OpaquePointer,
     requiresExplorerIndexes: Bool = true,
+    requiresRetainedCounters: Bool = true,
     requiredTemporaryStore: Int64 = 2,
     requiredCacheSize: Int64 = -8 * 1_024
   ) throws {
@@ -117,6 +157,13 @@ enum ViewerStoreSchema {
     if requiresExplorerIndexes {
       required.append(contentsOf: [
         "EventCausalityLookup", "GapTimelineAllDevices", "GapTimelineByDevice",
+      ])
+    }
+    if requiresRetainedCounters {
+      required.append(contentsOf: [
+        "RetainedEventCountInsert", "RetainedEventCountDelete", "RetainedGapCountInsert",
+        "RetainedGapCountDelete", "RetainedAnnotationCountInsert",
+        "RetainedAnnotationCountDelete",
       ])
     }
     let statement = try ViewerSQLiteStatement(
@@ -163,6 +210,24 @@ enum ViewerStoreSchema {
     for (table, expected) in requiredColumns {
       let columns = try tableColumns(table, database: database)
       guard expected.isSubset(of: columns) else { throw ViewerStoreError.corruptStore }
+    }
+    if requiresRetainedCounters {
+      let retainedCounters = [
+        ("retainedEventCount", "Events"),
+        ("retainedGapCount", "GapVersions"),
+        ("retainedAnnotationCount", "AnnotationVersions"),
+      ]
+      for (key, table) in retainedCounters {
+        let metadata = try ViewerSQLiteStatement(
+          database: database,
+          sql: "SELECT integerValue FROM StoreMetadata WHERE key=?1"
+        )
+        try metadata.bind(key, at: 1)
+        guard try metadata.step(),
+          metadata.int64(at: 0)
+            == (try scalarInt64("SELECT COUNT(*) FROM \(table)", database: database))
+        else { throw ViewerStoreError.corruptStore }
+      }
     }
     let jsonProbe = try ViewerSQLiteStatement(
       database: database,
@@ -435,6 +500,18 @@ enum ViewerStoreSchema {
     "CREATE INDEX EventCausalityLookup ON Events(recordingID, deviceSessionID, eventUUID, rowID)",
     "CREATE INDEX GapTimelineAllDevices ON GapVersions(recordingID, lastViewerWallMs, rowID)",
     "CREATE INDEX GapTimelineByDevice ON GapVersions(recordingID, deviceSessionID, lastViewerWallMs, rowID)",
+  ]
+
+  static let schemaVersion3RetainedCounterStatements = [
+    "INSERT INTO StoreMetadata(key, integerValue) SELECT 'retainedEventCount', COUNT(*) FROM Events",
+    "INSERT INTO StoreMetadata(key, integerValue) SELECT 'retainedGapCount', COUNT(*) FROM GapVersions",
+    "INSERT INTO StoreMetadata(key, integerValue) SELECT 'retainedAnnotationCount', COUNT(*) FROM AnnotationVersions",
+    "CREATE TRIGGER RetainedEventCountInsert AFTER INSERT ON Events BEGIN UPDATE StoreMetadata SET integerValue=integerValue+1 WHERE key='retainedEventCount'; END",
+    "CREATE TRIGGER RetainedEventCountDelete AFTER DELETE ON Events BEGIN UPDATE StoreMetadata SET integerValue=integerValue-1 WHERE key='retainedEventCount' AND integerValue>0; END",
+    "CREATE TRIGGER RetainedGapCountInsert AFTER INSERT ON GapVersions BEGIN UPDATE StoreMetadata SET integerValue=integerValue+1 WHERE key='retainedGapCount'; END",
+    "CREATE TRIGGER RetainedGapCountDelete AFTER DELETE ON GapVersions BEGIN UPDATE StoreMetadata SET integerValue=integerValue-1 WHERE key='retainedGapCount' AND integerValue>0; END",
+    "CREATE TRIGGER RetainedAnnotationCountInsert AFTER INSERT ON AnnotationVersions BEGIN UPDATE StoreMetadata SET integerValue=integerValue+1 WHERE key='retainedAnnotationCount'; END",
+    "CREATE TRIGGER RetainedAnnotationCountDelete AFTER DELETE ON AnnotationVersions BEGIN UPDATE StoreMetadata SET integerValue=integerValue-1 WHERE key='retainedAnnotationCount' AND integerValue>0; END",
   ]
 }
 

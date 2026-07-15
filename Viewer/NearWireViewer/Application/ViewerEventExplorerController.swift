@@ -114,6 +114,16 @@ enum ViewerExportPresentationState: Equatable, Sendable {
   case failed(ViewerStoreExplorerFailure)
 }
 
+enum ViewerWorkspaceOperationState: Equatable, Sendable {
+  case idle
+  case selectingImport
+  case clearing
+  case clearCompleted
+  case importing
+  case importCompleted
+  case failed(ViewerWorkspaceMutationFailure)
+}
+
 enum ViewerExportPresentationText {
   static let transientRowsExcluded = "Transient rows labeled Not recorded are excluded."
 }
@@ -556,6 +566,7 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
   private(set) var inspectorTreeState: ViewerJSONTreeState?
   private(set) var recordingOperationState: ViewerRecordingOperationState = .idle
   private(set) var exportState: ViewerExportPresentationState = .idle
+  private(set) var workspaceOperationState: ViewerWorkspaceOperationState = .idle
 
   let model: ViewerEventExplorerModel
   let coordinator: ViewerEventExplorerCoordinator
@@ -563,6 +574,9 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
 
   private let content: ViewerExplorerContentDriver
   private let live: any ViewerLiveObservationProviding
+  private let workspaceControl: any ViewerWorkspaceSessionControlling
+  private let claimWorkspaceMutation:
+    @MainActor (ViewerWorkspaceMutationKind) -> ViewerAdmissionWorkspaceMutationLease?
   private let rendererService: ViewerRendererPreparationService
   private let operationDeliveryClaimed: @Sendable () -> Void
   private let rendererDeliveryClaimed: @Sendable () -> Void
@@ -590,6 +604,7 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
   private var started = false
   private var sealed = false
   private var cleanupTask: Task<Void, Never>?
+  private var workspaceMutationLease: ViewerAdmissionWorkspaceMutationLease?
   private var analysisSelectionHandler: AnalysisSelectionHandler = {}
   private var analysisRefreshHandler: AnalysisRefreshHandler = {}
   private var analysisRematerializationHandler: AnalysisRematerializationHandler = { _ in }
@@ -604,6 +619,10 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
     inputs: ViewerRuntimeExplorerInputs,
     contentDriver: ViewerExplorerContentDriver? = nil,
     rendererService: ViewerRendererPreparationService = ViewerRendererPreparationService(),
+    claimWorkspaceMutation: @escaping @MainActor (ViewerWorkspaceMutationKind) ->
+      ViewerAdmissionWorkspaceMutationLease? = { _ in
+      .unmanagedForTesting()
+    },
     operationDeliveryClaimed: @escaping @Sendable () -> Void = {},
     rendererDeliveryClaimed: @escaping @Sendable () -> Void = {}
   ) {
@@ -612,6 +631,8 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
     inspector = ViewerEventInspectorModel(runtimeLogicalID: inputs.runtimeLogicalID)
     content = contentDriver ?? ViewerExplorerContentDriver(gateway: inputs.storeGateway)
     live = inputs.liveObservations
+    workspaceControl = inputs.workspaceControl
+    self.claimWorkspaceMutation = claimWorkspaceMutation
     self.rendererService = rendererService
     self.operationDeliveryClaimed = operationDeliveryClaimed
     self.rendererDeliveryClaimed = rendererDeliveryClaimed
@@ -635,7 +656,7 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
       contentsOf: model.recordingRows.filter { $0.logicalID != model.runtimeLogicalID }.map { row in
         ViewerExplorerSourcePresentationRow(
           id: .historical(recordingID: row.rowID, recordingLogicalID: row.logicalID),
-          title: row.name ?? "Recorded Session",
+          title: row.name ?? "Session",
           startedWallMilliseconds: row.startedWallMilliseconds,
           state: row.state,
           isPinned: row.pinned,
@@ -762,6 +783,13 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
   }
   var canExportFilteredResult: Bool {
     canManageSelectedRecording && !model.isPaused && model.compiledInputs?.durableQuery != nil
+  }
+  var canImportCurrentSession: Bool {
+    !sessionSnapshots.contains { $0.state != .recent }
+      && workspaceMutationLease == nil
+      && workspaceOperationState != .clearing
+      && workspaceOperationState != .selectingImport
+      && workspaceOperationState != .importing
   }
 
   func start() {
@@ -943,6 +971,108 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
     }
     publish()
     analysisSelectionHandler()
+  }
+
+  func clearCurrentSession() {
+    guard !sealed else { return }
+    switch workspaceOperationState {
+    case .clearing:
+      return
+    case .idle, .clearCompleted, .importCompleted, .failed:
+      break
+    case .selectingImport, .importing:
+      return
+    }
+    guard workspaceMutationLease == nil, let lease = claimWorkspaceMutation(.clearEvents) else {
+      workspaceOperationState = .failed(.busy)
+      publish()
+      return
+    }
+    workspaceMutationLease = lease
+    workspaceOperationState = .clearing
+    publish()
+    workspaceControl.clearCurrentSession { [weak self] result in
+      Task { @MainActor in
+        guard let self, !self.sealed else { return }
+        self.workspaceMutationLease?.release()
+        self.workspaceMutationLease = nil
+        switch result {
+        case .success:
+          self.workspaceOperationState = .clearCompleted
+        case .failure(let failure):
+          self.workspaceOperationState = .failed(failure)
+        }
+        self.publish()
+      }
+    }
+  }
+
+  @discardableResult
+  func beginCurrentSessionImportSelection() -> Bool {
+    guard !sealed, canImportCurrentSession else {
+      workspaceOperationState = .failed(.busy)
+      publish()
+      return false
+    }
+    guard workspaceMutationLease == nil, let lease = claimWorkspaceMutation(.importSession) else {
+      workspaceOperationState = .failed(.busy)
+      publish()
+      return false
+    }
+    workspaceMutationLease = lease
+    workspaceOperationState = .selectingImport
+    publish()
+    return true
+  }
+
+  func cancelCurrentSessionImportSelection() {
+    guard !sealed, workspaceOperationState == .selectingImport else { return }
+    workspaceMutationLease?.release()
+    workspaceMutationLease = nil
+    workspaceOperationState = .idle
+    publish()
+  }
+
+  func importCurrentSession(from url: URL) {
+    guard !sealed, workspaceOperationState == .selectingImport,
+      workspaceMutationLease != nil
+    else {
+      workspaceOperationState = .failed(.busy)
+      publish()
+      return
+    }
+    workspaceOperationState = .importing
+    publish()
+    let accessed = url.startAccessingSecurityScopedResource()
+    workspaceControl.importCurrentSession(from: url) { [weak self] result in
+      Task { @MainActor in
+        if accessed { url.stopAccessingSecurityScopedResource() }
+        guard let self, !self.sealed else { return }
+        self.workspaceMutationLease?.release()
+        self.workspaceMutationLease = nil
+        switch result {
+        case .success:
+          self.workspaceOperationState = .importCompleted
+        case .failure(let failure):
+          self.workspaceOperationState = .failed(failure)
+        }
+        self.publish()
+      }
+    }
+  }
+
+  func cancelCurrentSessionImport() {
+    guard !sealed, workspaceOperationState == .importing else { return }
+    workspaceControl.cancelCurrentSessionImport()
+  }
+
+  func clearWorkspaceOperationPresentation() {
+    guard !sealed, workspaceOperationState != .clearing,
+      workspaceOperationState != .selectingImport,
+      workspaceOperationState != .importing
+    else { return }
+    workspaceOperationState = .idle
+    publish()
   }
 
   func selectAllDevices() {
@@ -1563,6 +1693,9 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
   func sealAndClear() -> Task<Void, Never> {
     if let cleanupTask { return cleanupTask }
     sealed = true
+    workspaceControl.cancelCurrentSessionImport()
+    workspaceMutationLease?.release()
+    workspaceMutationLease = nil
     changeSnapshotDirty = false
     if let activeStoreRematerializationID {
       self.activeStoreRematerializationID = nil
@@ -1603,6 +1736,7 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
     inspectorState = .empty
     recordingOperationState = .idle
     exportState = .idle
+    workspaceOperationState = .idle
     publish()
     let cleanup = Task { [self] in
       async let renderer: Void = rendererCleanup.value
@@ -1787,7 +1921,7 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
       timelinePageFailure = nil
       gapPageFailure = nil
     } catch {
-      filterValidationMessage = "The selected source, devices, or filters are no longer valid."
+      filterValidationMessage = "The selected Session, Devices, or filters are no longer valid."
     }
     publish()
   }
@@ -1835,7 +1969,7 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
       else { return }
       _ = try coordinator.replaceMaterialization(candidate)
     } catch {
-      filterValidationMessage = "Recording materialization changed; refresh the source."
+      filterValidationMessage = "The current Session changed; try again."
     }
     publish()
   }

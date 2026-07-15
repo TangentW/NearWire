@@ -57,10 +57,17 @@ final class ViewerAppDelegate: NSObject, NSApplicationDelegate {
     guard let model else { return .terminateNow }
     guard !terminationPending else { return .terminateLater }
     terminationPending = true
+    beginTermination(using: model) { sender.reply(toApplicationShouldTerminate: $0) }
+    return .terminateLater
+  }
+
+  func beginTermination(
+    using model: ViewerApplicationModel,
+    reply: @escaping @MainActor (Bool) -> Void
+  ) {
     Task {
       _ = await model.prepareForTermination()
-      sender.reply(toApplicationShouldTerminate: true)
+      reply(true)
     }
-    return .terminateLater
   }
 }

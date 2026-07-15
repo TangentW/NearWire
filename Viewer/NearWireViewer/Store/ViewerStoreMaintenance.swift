@@ -440,6 +440,14 @@ final class ViewerStoreMaintenance: @unchecked Sendable {
       )
       try tombstone.bind(recordingID, at: 1)
       guard try tombstone.step() == false else { throw ViewerStoreError.busy }
+      let count = try ViewerSQLiteStatement(
+        database: database,
+        sql: "SELECT integerValue FROM StoreMetadata WHERE key='retainedAnnotationCount'"
+      )
+      guard try count.step(),
+        count.int64(at: 0) >= 0,
+        count.int64(at: 0) < ViewerSessionTransferLimits.maximumAnnotationCount
+      else { throw ViewerStoreError.workLimitExceeded }
       let revision = try nextRevision(
         table: "AnnotationVersions",
         ownerColumn: "recordingID",

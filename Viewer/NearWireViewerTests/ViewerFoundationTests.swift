@@ -10,6 +10,197 @@ import XCTest
 
 @testable import NearWireViewer
 
+private final class ViewerWorkspaceControlProbe: ViewerWorkspaceSessionControlling,
+  @unchecked Sendable
+{
+  private let lock = NSLock()
+  private var clearCompletion:
+    (@Sendable (Result<Void, ViewerWorkspaceMutationFailure>) -> Void)?
+  private var clearAfterCommit: (@Sendable () -> Void)?
+  private var importCompletion:
+    (@Sendable (Result<Void, ViewerWorkspaceMutationFailure>) -> Void)?
+  private var importAfterCommit: (@Sendable () -> Void)?
+  private(set) var clearCount = 0
+  private(set) var importCount = 0
+  private(set) var cancelCount = 0
+
+  func clearCurrentSession(
+    afterCommit: @escaping @Sendable () -> Void,
+    completion: @escaping @Sendable (Result<Void, ViewerWorkspaceMutationFailure>) -> Void
+  ) {
+    lock.lock()
+    clearCount += 1
+    clearAfterCommit = afterCommit
+    clearCompletion = completion
+    lock.unlock()
+  }
+
+  func importCurrentSession(
+    from url: URL,
+    afterCommit: @escaping @Sendable () -> Void,
+    completion: @escaping @Sendable (Result<Void, ViewerWorkspaceMutationFailure>) -> Void
+  ) {
+    lock.lock()
+    importCount += 1
+    importAfterCommit = afterCommit
+    importCompletion = completion
+    lock.unlock()
+  }
+
+  func cancelCurrentSessionImport() {
+    lock.lock()
+    cancelCount += 1
+    lock.unlock()
+  }
+
+  func completeClear(_ result: Result<Void, ViewerWorkspaceMutationFailure>) {
+    lock.lock()
+    let completion = clearCompletion
+    let afterCommit = clearAfterCommit
+    clearCompletion = nil
+    clearAfterCommit = nil
+    lock.unlock()
+    if case .success = result { afterCommit?() }
+    completion?(result)
+  }
+
+  func completeImport(_ result: Result<Void, ViewerWorkspaceMutationFailure>) {
+    lock.lock()
+    let completion = importCompletion
+    let afterCommit = importAfterCommit
+    importCompletion = nil
+    importAfterCommit = nil
+    lock.unlock()
+    if case .success = result { afterCommit?() }
+    completion?(result)
+  }
+}
+
+final class ViewerWorkspacePresentationTests: XCTestCase {
+  @MainActor
+  func testTimelineOnlyMutationDoesNotPublishInspectorPresentation() async {
+    let runtimeLogicalID = UUID()
+    let controller = ViewerEventExplorerController(
+      inputs: ViewerRuntimeExplorerInputs(
+        runtimeLogicalID: runtimeLogicalID,
+        storeGateway: ViewerStoreExplorerGateway(),
+        liveObservations: ViewerLiveEventWindow(runtimeLogicalID: runtimeLogicalID)
+      )
+    )
+    let timeline = ViewerTimelinePresentationObserver(explorer: controller)
+    let inspector = ViewerInspectorPresentationObserver(explorer: controller)
+
+    controller.updateFilterDraft { $0.searchMode = .fullText }
+    for _ in 0..<4 { await Task.yield() }
+
+    XCTAssertEqual(timeline.revision, 1)
+    XCTAssertEqual(inspector.revision, 0)
+  }
+
+  @MainActor
+  func testFilterPresentationIgnoresTimelineOnlyPublications() async {
+    let runtimeLogicalID = UUID()
+    let controller = ViewerEventExplorerController(
+      inputs: ViewerRuntimeExplorerInputs(
+        runtimeLogicalID: runtimeLogicalID,
+        storeGateway: ViewerStoreExplorerGateway(),
+        liveObservations: ViewerLiveEventWindow(runtimeLogicalID: runtimeLogicalID)
+      )
+    )
+    let filter = ViewerFilterPresentationObserver(explorer: controller)
+
+    controller.pauseOrResume()
+    for _ in 0..<4 { await Task.yield() }
+    XCTAssertEqual(filter.revision, 0)
+
+    controller.updateFilterDraft { $0.eventTypeMode = .prefix }
+    for _ in 0..<4 { await Task.yield() }
+    XCTAssertEqual(filter.revision, 1)
+    XCTAssertEqual(filter.value.eventTypeMode, .prefix)
+
+    controller.jumpToLatest()
+    for _ in 0..<4 { await Task.yield() }
+    XCTAssertEqual(filter.revision, 1)
+    _ = controller.sealAndClear()
+  }
+
+  func testWorkspaceRegionsExposeDevicesAndIndependentPanelsWithoutSources() {
+    XCTAssertEqual(
+      ViewerWorkspaceLayout.regions,
+      [.devices, .eventTimeline, .eventInspector, .performanceDashboard, .controlComposer]
+    )
+    XCTAssertEqual(ViewerWorkspaceLayout.regions.count, ViewerWorkspaceRegion.allCases.count)
+  }
+
+  @MainActor
+  func testWorkspaceMutationPolicyAllowsConnectedClearButRejectsConnectedImport() {
+    XCTAssertTrue(
+      ViewerApplicationModel.permitsWorkspaceMutation(.clearEvents, hasBlockingSessions: true)
+    )
+    XCTAssertFalse(
+      ViewerApplicationModel.permitsWorkspaceMutation(.importSession, hasBlockingSessions: true)
+    )
+    XCTAssertTrue(
+      ViewerApplicationModel.permitsWorkspaceMutation(.importSession, hasBlockingSessions: false)
+    )
+  }
+
+  func testImportCapacityFailureUsesDedicatedSafeGuidance() {
+    XCTAssertEqual(
+      ViewerStoreRuntime.workspaceImportFailure(for: .capacityExceeded),
+      .capacityExceeded
+    )
+    XCTAssertEqual(
+      ViewerWorkspaceMutationFailure.capacityExceeded.operatorMessage,
+      "The imported Session is too large for the current Viewer storage limit. Import a smaller Session."
+    )
+    XCTAssertFalse(ViewerWorkspaceMutationFailure.capacityExceeded.operatorMessage.contains("/"))
+  }
+
+  @MainActor
+  func testWorkspaceOperationsPublishImmediateExclusiveAndCancellableStates() async {
+    let runtimeLogicalID = UUID()
+    let workspace = ViewerWorkspaceControlProbe()
+    let controller = ViewerEventExplorerController(
+      inputs: ViewerRuntimeExplorerInputs(
+        runtimeLogicalID: runtimeLogicalID,
+        storeGateway: ViewerStoreExplorerGateway(),
+        liveObservations: ViewerLiveEventWindow(runtimeLogicalID: runtimeLogicalID),
+        workspaceControl: workspace
+      )
+    )
+
+    controller.clearCurrentSession()
+    XCTAssertEqual(controller.workspaceOperationState, .clearing)
+    XCTAssertEqual(workspace.clearCount, 1)
+    controller.clearCurrentSession()
+    XCTAssertEqual(workspace.clearCount, 1)
+    workspace.completeClear(.success(()))
+    for _ in 0..<4 { await Task.yield() }
+    XCTAssertEqual(controller.workspaceOperationState, .clearCompleted)
+
+    controller.clearWorkspaceOperationPresentation()
+    XCTAssertEqual(controller.workspaceOperationState, .idle)
+    XCTAssertTrue(controller.beginCurrentSessionImportSelection())
+    XCTAssertEqual(controller.workspaceOperationState, .selectingImport)
+    controller.importCurrentSession(from: URL(fileURLWithPath: "/tmp/nearwire-import.json"))
+    XCTAssertEqual(controller.workspaceOperationState, .importing)
+    XCTAssertEqual(workspace.importCount, 1)
+    controller.cancelCurrentSessionImport()
+    XCTAssertEqual(workspace.cancelCount, 1)
+    workspace.completeImport(.failure(.cancelled))
+    for _ in 0..<4 { await Task.yield() }
+    XCTAssertEqual(controller.workspaceOperationState, .failed(.cancelled))
+
+    controller.clearWorkspaceOperationPresentation()
+    XCTAssertTrue(controller.beginCurrentSessionImportSelection())
+    controller.cancelCurrentSessionImportSelection()
+    XCTAssertEqual(controller.workspaceOperationState, .idle)
+
+    _ = controller.sealAndClear()
+  }
+}
+
 final class ViewerPerformanceInventoryTests: XCTestCase {
   func testViewerConsumesCoreMetricInventoryWithoutReordering() {
     XCTAssertEqual(
@@ -5480,7 +5671,7 @@ final class ViewerPerformanceRawEventResolverTests: XCTestCase {
     )
     XCTAssertEqual(
       ViewerPerformanceRawEventGuidance.eventNoLongerAvailable.message,
-      "The source Event was deleted or evicted and is no longer available."
+      "The raw Event was deleted or evicted and is no longer available."
     )
     await resolver.sealAndWait().value
   }
@@ -7275,14 +7466,13 @@ final class ViewerFoundationTests: XCTestCase {
     XCTAssertEqual(
       ViewerWorkspaceLayout.regions,
       [
-        .sourceAndDevices, .eventTimeline, .eventInspector, .performanceDashboard,
+        .devices, .eventTimeline, .eventInspector, .performanceDashboard,
         .controlComposer,
       ]
     )
     XCTAssertGreaterThanOrEqual(
       ViewerWorkspaceLayout.minimumWindowWidth,
-      ViewerWorkspaceLayout.sourceMinimumWidth + ViewerWorkspaceLayout.timelineMinimumWidth
-        + ViewerWorkspaceLayout.inspectorMinimumWidth
+      ViewerWorkspaceLayout.timelineMinimumWidth + ViewerWorkspaceLayout.inspectorMinimumWidth
     )
     XCTAssertLessThan(
       ViewerWorkspaceLayout.composerMinimumHeight,
@@ -7291,6 +7481,97 @@ final class ViewerFoundationTests: XCTestCase {
     XCTAssertGreaterThan(hostingView.fittingSize.width, 0)
     XCTAssertGreaterThan(hostingView.fittingSize.height, 0)
     XCTAssertEqual(model.status, .stopped)
+  }
+
+  @MainActor
+  func testRunningWorkspaceRendersAtSupportedSizesAndAppearances() async throws {
+    let listener = FakeViewerSecureListener(
+      eventsOnStart: [.ready(port: 49_152), .serviceRegistered(exact: true)]
+    )
+    let model = makeApplicationModel(
+      listenerFactory: LockedListenerFactory([listener]),
+      pairingCodes: LockedPairingCodeSequence(["ABCDEF"])
+    )
+    model.openWindow()
+    await waitForStatus(.listening(code: "ABCDEF", paused: false), in: model)
+
+    let sizes: [(String, CGSize)] = [
+      (
+        "minimum",
+        CGSize(
+          width: ViewerWorkspaceLayout.minimumWindowWidth,
+          height: ViewerWorkspaceLayout.minimumWindowHeight
+        )
+      ),
+      ("standard", CGSize(width: 1_280, height: 800)),
+      ("wide", CGSize(width: 1_440, height: 900)),
+    ]
+    let appearances: [(String, NSAppearance.Name)] = [
+      ("light", .aqua),
+      ("dark", .darkAqua),
+    ]
+
+    for (appearanceName, appearance) in appearances {
+      for (sizeName, size) in sizes {
+        let hostingView = NSHostingView(rootView: ViewerRootView(model: model))
+        hostingView.appearance = NSAppearance(named: appearance)
+        hostingView.frame = NSRect(origin: .zero, size: size)
+        hostingView.layoutSubtreeIfNeeded()
+        hostingView.displayIfNeeded()
+        let probes = descendantViews(of: ViewerWorkspaceLayoutProbeView.self, in: hostingView)
+        let analysisProbe = try XCTUnwrap(probes.first { $0.kind == .analysis })
+        let timelineToolbarProbe = try XCTUnwrap(
+          probes.first { $0.kind == .timelineToolbar }
+        )
+        let composerProbe = try XCTUnwrap(probes.first { $0.kind == .composer })
+        let analysisFrame = analysisProbe.convert(analysisProbe.bounds, to: hostingView)
+        let timelineToolbarFrame = timelineToolbarProbe.convert(
+          timelineToolbarProbe.bounds,
+          to: hostingView
+        )
+        let composerFrame = composerProbe.convert(composerProbe.bounds, to: hostingView)
+        XCTAssertGreaterThanOrEqual(
+          analysisFrame.height,
+          ViewerWorkspaceLayout.analysisMinimumHeight - 1,
+          "Analysis is vertically compressed at \(appearanceName) \(sizeName): \(analysisFrame)"
+        )
+        XCTAssertGreaterThanOrEqual(
+          composerFrame.height,
+          ViewerWorkspaceLayout.composerMinimumHeight - 1,
+          "Composer is below its bounded viewport at \(appearanceName) \(sizeName): \(composerFrame)"
+        )
+        XCTAssertLessThanOrEqual(
+          composerFrame.height,
+          ViewerWorkspaceLayout.composerMaximumHeight + 1,
+          "Composer exceeds its bounded viewport at \(appearanceName) \(sizeName): \(composerFrame)"
+        )
+        XCTAssertTrue(
+          hostingView.bounds.insetBy(dx: -1, dy: -1).contains(composerFrame),
+          "Composer escapes the window at \(appearanceName) \(sizeName): \(composerFrame)"
+        )
+        XCTAssertTrue(
+          analysisFrame.insetBy(dx: -1, dy: -1).contains(timelineToolbarFrame),
+          "Timeline toolbar escapes Analysis at \(appearanceName) \(sizeName): analysis \(analysisFrame), toolbar \(timelineToolbarFrame)"
+        )
+        XCTAssertFalse(
+          analysisFrame.intersects(composerFrame),
+          "Analysis overlaps Composer at \(appearanceName) \(sizeName): analysis \(analysisFrame), composer \(composerFrame)"
+        )
+        XCTAssertFalse(
+          timelineToolbarFrame.intersects(composerFrame),
+          "Timeline toolbar overlaps Composer at \(appearanceName) \(sizeName): toolbar \(timelineToolbarFrame), composer \(composerFrame)"
+        )
+        let data = try XCTUnwrap(renderedPNGData(of: hostingView))
+        let image = try XCTUnwrap(NSImage(data: data))
+        XCTAssertEqual(image.size, size)
+        let attachment = XCTAttachment(image: image)
+        attachment.name = "NearWire workspace \(appearanceName) \(sizeName)"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+      }
+    }
+
+    _ = await model.prepareForTermination()
   }
 
   @MainActor
@@ -9129,6 +9410,27 @@ final class ViewerFoundationTests: XCTestCase {
     XCTAssertEqual(later.claimCount, 0)
   }
 
+  func testWorkspaceMutationLeaseExcludesAttemptsAndRejectsNewAdmissionUntilRelease() throws {
+    let manager = ViewerAdmissionManager(onPending: { _ in })
+    let generation = UUID()
+    let viewerID = try EndpointID(rawValue: "viewer-workspace-lease")
+    manager.activateGeneration(generation)
+
+    let lease = try XCTUnwrap(manager.claimWorkspaceMutation())
+    XCTAssertNil(manager.claimWorkspaceMutation())
+    let rejected = FakeIncomingConnection(channel: FakeAdmissionChannel())
+    manager.admit(rejected, generation: generation, viewerInstallationID: viewerID)
+    XCTAssertEqual(rejected.claimCount, 0)
+    XCTAssertEqual(rejected.rejectionCount, 1)
+
+    lease.release()
+    let admitted = FakeIncomingConnection(channel: FakeAdmissionChannel())
+    manager.admit(admitted, generation: generation, viewerInstallationID: viewerID)
+    XCTAssertEqual(admitted.claimCount, 1)
+    XCTAssertNil(manager.claimWorkspaceMutation())
+    _ = manager.stop()
+  }
+
   func testListenerGenerationCancellationDoesNotAffectOtherGeneration() async throws {
     let bothStarted = expectation(description: "Both generation channels started")
     bothStarted.expectedFulfillmentCount = 2
@@ -9994,7 +10296,8 @@ final class ViewerFoundationTests: XCTestCase {
       observationID: first.observationID
     )
     liveWindow.waitForProjectionForTesting()
-    XCTAssertEqual(liveWindow.lostHorizonCount, 2)
+    // A completion without matching live authority is stale and must not recreate diagnostics.
+    XCTAssertEqual(liveWindow.lostHorizonCount, 1)
     XCTAssertEqual(liveWindow.conflictCount, 0)
     XCTAssertEqual(liveWindow.offer(conflict), .accepted)
     liveWindow.waitForProjectionForTesting()
@@ -10108,6 +10411,89 @@ final class ViewerFoundationTests: XCTestCase {
     journal.eventCommitted(authority) { sealed.append($0) }
     XCTAssertEqual(sealed.values, [.sealed])
     XCTAssertEqual(durableJournal.commitCount, commitsBeforeSealedOffer)
+  }
+
+  func testWorkspaceMutationQuiescesDeferredPredecessorDecisionsBeforeDurableWrite() throws {
+    for kind in [ViewerWorkspaceMutationKind.clearEvents, .importSession] {
+      let runtimeLogicalID = UUID()
+      let context = try makeObservationContext(
+        connectionID: UUID(),
+        displayName: "Deferred mutation boundary"
+      )
+      let envelope = try makeObservationEnvelope(
+        content: .object(["kind": .string("boundary")]),
+        createdAt: Date(timeIntervalSince1970: 9_000),
+        sessionEpoch: SessionEpoch(),
+        sequence: 1
+      )
+      let first = try ViewerCommittedEventObservation(
+        runtimeLogicalID: runtimeLogicalID,
+        context: context,
+        nickname: nil,
+        envelope: envelope,
+        viewerWallMilliseconds: 9_000_000,
+        viewerMonotonicNanoseconds: 1,
+        deterministicEventBytes: 32,
+        initialDisposition: .buffered
+      )
+      let duplicate = try ViewerCommittedEventObservation(
+        runtimeLogicalID: runtimeLogicalID,
+        context: context,
+        nickname: "Later metadata",
+        envelope: envelope,
+        viewerWallMilliseconds: 9_000_001,
+        viewerMonotonicNanoseconds: 2,
+        deterministicEventBytes: 33,
+        initialDisposition: .buffered
+      )
+      let projectionQueue = DispatchQueue(
+        label: "ViewerFoundationTests.deferred-mutation-boundary"
+      )
+      let projectionGate = DispatchSemaphore(value: 0)
+      projectionQueue.async { projectionGate.wait() }
+      let liveWindow = ViewerLiveEventWindow(
+        runtimeLogicalID: runtimeLogicalID,
+        projectionQueue: projectionQueue
+      )
+      let durableJournal = CommittedObservationJournalSpy()
+      let journal = ViewerCompositeSessionJournal(
+        runtimeLogicalID: runtimeLogicalID,
+        durableJournal: durableJournal,
+        liveWindow: liveWindow
+      )
+      let outcomes = LockedJournalOutcomeCollection()
+      journal.eventCommitted(first) { outcomes.append($0) }
+      journal.eventCommitted(duplicate) { outcomes.append($0) }
+      XCTAssertEqual(outcomes.values, [.accepted])
+
+      let requested = expectation(description: "Workspace mutation requested")
+      let finished = expectation(description: "Workspace mutation completed")
+      DispatchQueue.global(qos: .utility).async {
+        requested.fulfill()
+        let completion: @Sendable (Result<Void, ViewerWorkspaceMutationFailure>) -> Void = {
+          result in
+          if case .failure(let error) = result { XCTFail("Mutation failed: \(error)") }
+          finished.fulfill()
+        }
+        switch kind {
+        case .clearEvents:
+          journal.clearCurrentSession(completion: completion)
+        case .importSession:
+          journal.importCurrentSession(
+            from: URL(fileURLWithPath: "/tmp/nearwire-deferred-boundary.json"),
+            completion: completion
+          )
+        }
+      }
+      wait(for: [requested], timeout: 1)
+      projectionGate.signal()
+      wait(for: [finished], timeout: 2)
+      liveWindow.waitForProjectionForTesting()
+
+      XCTAssertEqual(outcomes.values, [.accepted, .identical])
+      XCTAssertEqual(durableJournal.commitCount, 0)
+      XCTAssertEqual(durableJournal.workspaceMutationCount, 1)
+    }
   }
 
   func testLiveProjectionEnforcesIngressAndWindowBoundsAndTracksRuntimeState() async throws {
@@ -16588,10 +16974,13 @@ private final class RuntimeComponentJournalSpy: ViewerSessionJournaling, @unchec
   }
 }
 
-private final class CommittedObservationJournalSpy: ViewerSessionJournaling, @unchecked Sendable {
+private final class CommittedObservationJournalSpy: ViewerSessionJournaling,
+  ViewerWorkspaceSessionControlling, @unchecked Sendable
+{
   private let lock = NSLock()
   private var storedObservations: [ViewerCommittedEventObservation] = []
   private var projections: [ViewerEventJournalKey: ViewerDurableEventProjection] = [:]
+  private var mutationCount = 0
 
   var observations: [ViewerCommittedEventObservation] {
     lock.lock()
@@ -16603,6 +16992,42 @@ private final class CommittedObservationJournalSpy: ViewerSessionJournaling, @un
     lock.lock()
     defer { lock.unlock() }
     return storedObservations.count
+  }
+
+  var workspaceMutationCount: Int {
+    lock.lock()
+    defer { lock.unlock() }
+    return mutationCount
+  }
+
+  func clearCurrentSession(
+    afterCommit: @escaping @Sendable () -> Void,
+    completion: @escaping @Sendable (Result<Void, ViewerWorkspaceMutationFailure>) -> Void
+  ) {
+    replaceWorkspace(afterCommit: afterCommit, completion: completion)
+  }
+
+  func importCurrentSession(
+    from url: URL,
+    afterCommit: @escaping @Sendable () -> Void,
+    completion: @escaping @Sendable (Result<Void, ViewerWorkspaceMutationFailure>) -> Void
+  ) {
+    replaceWorkspace(afterCommit: afterCommit, completion: completion)
+  }
+
+  func cancelCurrentSessionImport() {}
+
+  private func replaceWorkspace(
+    afterCommit: @escaping @Sendable () -> Void,
+    completion: @escaping @Sendable (Result<Void, ViewerWorkspaceMutationFailure>) -> Void
+  ) {
+    lock.lock()
+    storedObservations.removeAll(keepingCapacity: true)
+    projections.removeAll(keepingCapacity: true)
+    mutationCount += 1
+    lock.unlock()
+    afterCommit()
+    completion(.success(()))
   }
 
   func runtimeStarted(logicalID: UUID, wallMilliseconds: Int64, monotonicNanoseconds: UInt64) {}

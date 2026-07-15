@@ -2,7 +2,7 @@
 
 ## Scope
 
-The Viewer foundation is the first native macOS application layer. It owns the main window, persistent Viewer identities, ephemeral pairing codes, Bonjour publication, mandatory-TLS listener startup, and bounded admission through one App Hello. It intentionally does not own active Event transfer, multi-device workspaces, local event history, search, export, or performance charts. Those capabilities are added by later Viewer changes without replacing the connection core established here.
+The Viewer foundation is the first native macOS application layer. It owns the main window, persistent Viewer identities, ephemeral pairing codes, Bonjour publication, mandatory-TLS listener startup, and bounded admission through one App Hello. Later Viewer layers add active Event transfer, the process-scoped current Session, search, complete-Session import/export, and performance charts without replacing the connection core established here. NearWire does not expose a persisted Sources catalog or reopen data from a prior Viewer launch.
 
 The user-visible application and bundle name is `NearWire`. The manually maintained project, target, and Swift module are named `NearWireViewer` so they do not collide with the iOS SDK module.
 

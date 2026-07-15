@@ -44,11 +44,11 @@ enum ViewerPerformanceRawEventGuidance: UInt8, Equatable, Sendable {
   var message: String {
     switch self {
     case .sourceChanged:
-      return "The performance source changed. Select a current data point and try again."
+      return "The performance data changed. Select a current data point and try again."
     case .eventNoLongerAvailable:
-      return "The source Event was deleted or evicted and is no longer available."
+      return "The raw Event was deleted or evicted and is no longer available."
     case .storageUnavailable:
-      return "Storage is unavailable and the source Event is no longer in the live window."
+      return "Storage is unavailable and the raw Event is no longer in the live window."
     }
   }
 }

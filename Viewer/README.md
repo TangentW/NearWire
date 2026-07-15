@@ -12,9 +12,9 @@ Opening the single main window automatically prepares the persistent Viewer iden
 
 After admission, the Viewer owns up to 16 independent App sessions. It completes flow-policy negotiation, exchanges bounded bidirectional Events, retains requested policy and nicknames in bounded `UserDefaults` records, and presents per-device rate, queue, throughput, and drop telemetry. Peer-declared installation and Bundle identifiers remain unauthenticated hints.
 
-The Viewer also records bounded local history through three serialized system-SQLite connections. Storage configuration and safe status are available in the main window. Local schema ownership, permissions, quota and retention semantics, gaps, recovery, query snapshots, and unencrypted JSON export disclosure are documented in [Viewer-Local-Store.md](../Documentation/Viewer-Local-Store.md).
+The Viewer keeps the current process Session in a private, process-scoped SQLite workspace. It does not expose saved Sources or reopen prior launches. The workspace exists to provide bounded queries, filters, details, Performance projections, Clear, and complete-Session JSON import/export while the Viewer is open; terminal shutdown closes SQLite and makes bounded attempts to remove the exact marked workspace. The storage boundary and unencrypted export disclosure are documented in [Viewer-Local-Store.md](../Documentation/Viewer-Local-Store.md).
 
-The three-column Event Explorer, transient-versus-recorded semantics, source/device materialization, filtering, pause behavior, bounded renderers, causality inspection, recording operations, JSON export, and memory-only Viewer-to-App composer are documented in [Viewer-Event-Explorer.md](../Documentation/Viewer-Event-Explorer.md).
+The top Devices strip, Event Timeline, optional Event Inspector, optional Viewer-to-App composer, filtering, pause behavior, bounded renderers, complete-Session import/export, and current-Session Clear are documented in [Viewer-Event-Explorer.md](../Documentation/Viewer-Event-Explorer.md).
 
 The single-device Performance dashboard, Viewer receive-time semantics, cards, ranges, charts,
 availability states, diagnostic gaps, raw-Event reveal, deterministic bounds, privacy, cleanup, and

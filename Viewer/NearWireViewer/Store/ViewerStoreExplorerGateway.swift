@@ -9,6 +9,7 @@ enum ViewerStoreExplorerFailure: Error, Equatable, Sendable {
   case invalidRequest
   case busy
   case refineQuery
+  case exportTooLarge
   case catalogChanged
 }
 
@@ -143,6 +144,13 @@ final class ViewerStoreExplorerGateway: @unchecked Sendable {
   }
 
   func install(_ coordinator: ViewerStoreCoordinator) {
+    install(coordinator, preservingGeneration: nil)
+  }
+
+  func install(
+    _ coordinator: ViewerStoreCoordinator,
+    preservingGeneration preservedGeneration: UInt64?
+  ) {
     replacementLock.lock()
     let previous: ViewerStoreExplorerCoordinatorGeneration?
     let generation: UInt64
@@ -150,8 +158,12 @@ final class ViewerStoreExplorerGateway: @unchecked Sendable {
     previous = activeGeneration
     previous?.invalidateDelivery()
     activeGeneration = nil
-    generation = nextGeneration
-    nextGeneration = nextGeneration == UInt64.max ? 1 : nextGeneration + 1
+    if let preservedGeneration {
+      generation = preservedGeneration
+    } else {
+      generation = nextGeneration
+      nextGeneration = nextGeneration == UInt64.max ? 1 : nextGeneration + 1
+    }
     lock.unlock()
 
     let deferredDeliveries = previous?.sealAndWait() ?? []
@@ -591,7 +603,8 @@ final class ViewerStoreExplorerGateway: @unchecked Sendable {
     generation?.cancel(token)
   }
 
-  func sealAndWait(originatingFrom coordinator: ViewerStoreCoordinator) {
+  @discardableResult
+  func sealAndWait(originatingFrom coordinator: ViewerStoreCoordinator) -> UInt64? {
     replacementLock.lock()
     let generation: ViewerStoreExplorerCoordinatorGeneration?
     lock.lock()
@@ -606,6 +619,7 @@ final class ViewerStoreExplorerGateway: @unchecked Sendable {
     let deferredDeliveries = generation?.sealAndWait() ?? []
     replacementLock.unlock()
     for delivery in deferredDeliveries { delivery() }
+    return generation?.generation
   }
 
   var operationCountForTesting: Int {
@@ -1132,7 +1146,11 @@ private final class ViewerStoreExplorerCoordinatorGeneration: @unchecked Sendabl
       }
       switch ticket.selection {
       case .complete(let scope):
-        try arbiter.export(scope: scope, to: destination, operationID: operationID)
+        do {
+          try arbiter.export(scope: scope, to: destination, operationID: operationID)
+        } catch ViewerStoreError.workLimitExceeded {
+          throw ViewerStoreExplorerFailure.exportTooLarge
+        }
       case .filtered(let scope):
         try arbiter.export(scope: scope, to: destination, operationID: operationID)
       }

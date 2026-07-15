@@ -1,287 +1,177 @@
 import AppKit
+import Combine
 import SwiftUI
 import UniformTypeIdentifiers
 
-struct ViewerExplorerSidebarView: View {
-  @ObservedObject var application: ViewerApplicationModel
-  @ObservedObject var explorer: ViewerEventExplorerController
-  @Binding var showsDeviceDetails: Bool
-  @State private var showsRecordingEditor = false
-  @State private var showsExport = false
+struct ViewerTimelinePresentationSignature: Equatable {
+  let rows: [ViewerExplorerTimelinePresentationRow]
+  let selectedEventID: ViewerExplorerEventIdentity?
+  let traversalState: ViewerExplorerTraversalState
+  let isPaused: Bool
+  let autoFollow: Bool
+  let searchText: String
+  let searchMode: ViewerExplorerSearchMode
+  let activeFilterCount: Int
+  let filterValidationMessage: String?
+  let liveEvaluationGuidance: String?
+  let pageFailure: ViewerStoreExplorerFailure?
+  let workspaceOperationState: ViewerWorkspaceOperationState
+  let gapRows: [ViewerGapRow]
+  let liveGapLane: ViewerExplorerLiveGapLane?
+  let gapPageFailure: ViewerStoreExplorerFailure?
+  let hasOlderEvents: Bool
+  let hasNewerEvents: Bool
+  let hasOlderGaps: Bool
+  let hasNewerGaps: Bool
 
-  var body: some View {
-    VStack(alignment: .leading, spacing: 0) {
-      HStack {
-        Text("Sources & Devices").font(.headline)
-        Spacer()
-        Text("\(explorer.deviceRows.count)")
-          .font(.caption.monospacedDigit())
-          .foregroundStyle(.secondary)
-          .accessibilityLabel("\(explorer.deviceRows.count) device rows")
-      }
-      .padding(.horizontal, 14)
-      .padding(.vertical, 12)
-      Divider()
-      List {
-        Section("Sources") {
-          ForEach(explorer.sourceRows) { row in
-            sourceRow(row)
-              .onAppear {
-                guard row.id == explorer.sourceRows.last?.id, explorer.hasOlderRecordings else {
-                  return
-                }
-                explorer.loadOlderRecordings()
-              }
-          }
-          if explorer.recordingsState == .loading {
-            ProgressView("Loading recordings")
-              .controlSize(.small)
-          }
-          if case .failed(let failure) = explorer.recordingsState {
-            Label(failure.operatorMessage, systemImage: "exclamationmark.triangle")
-              .font(.caption)
-              .foregroundStyle(.orange)
-          }
-        }
-        Section("Devices") {
-          Button {
-            explorer.selectAllDevices()
-          } label: {
-            selectionRow(
-              title: "All Devices",
-              subtitle: "Merge every materialized App lane",
-              selected: explorer.usesAllDevices,
-              systemImage: "rectangle.3.group"
-            )
-          }
-          .buttonStyle(.plain)
-          ForEach(explorer.deviceRows) { row in
-            Button {
-              explorer.toggleDevice(row.id)
-              if let session = application.sessions.first(where: { $0.connectionID == row.id }) {
-                application.selectedRoute = session.route
-              }
-            } label: {
-              deviceRow(row)
-            }
-            .buttonStyle(.plain)
-            .onAppear {
-              guard row.id == explorer.deviceRows.last?.id, explorer.hasOlderDevices else { return }
-              explorer.loadOlderDevices()
-            }
-          }
-          if explorer.devicesState == .loading {
-            ProgressView("Loading devices")
-              .controlSize(.small)
-          } else if explorer.deviceRows.isEmpty {
-            Label("No Apps in this source", systemImage: "iphone.slash")
-              .font(.caption)
-              .foregroundStyle(.secondary)
-          }
-          if case .failed(let failure) = explorer.devicesState {
-            Label(failure.operatorMessage, systemImage: "exclamationmark.triangle")
-              .font(.caption)
-              .foregroundStyle(.orange)
-          }
-        }
-        if !application.pendingApps.isEmpty {
-          Section("Awaiting Approval") {
-            ForEach(application.pendingApps) { app in
-              VStack(alignment: .leading, spacing: 6) {
-                Text(app.displayName).font(.headline)
-                Text(app.installationAlias).font(.caption).foregroundStyle(.secondary)
-                Text(app.compatibilityStatus).font(.caption2).foregroundStyle(.secondary)
-                HStack {
-                  Button("Reject") { application.reject(app.id) }
-                  Button("Accept") { application.accept(app.id) }
-                    .buttonStyle(.borderedProminent)
-                }
-              }
-              .padding(.vertical, 3)
-            }
-          }
-        }
-      }
-      Divider()
-      if let recording = explorer.selectedRecordingRow {
-        recordingActions(recording)
-        Divider()
-      }
-      Button {
-        showsDeviceDetails = true
-      } label: {
-        Label("Device Settings & Telemetry", systemImage: "slider.horizontal.3")
-          .frame(maxWidth: .infinity)
-      }
-      .buttonStyle(.bordered)
-      .disabled(application.selectedSession == nil)
-      .accessibilityHint(
-        "Opens nickname, rate, queue, throughput, Event counter, and disconnect controls."
-      )
-      .padding(12)
-    }
-    .sheet(isPresented: $showsRecordingEditor) {
-      if let recording = explorer.selectedRecordingRow {
-        ViewerRecordingEditorSheet(
-          explorer: explorer,
-          recording: recording,
-          isPresented: $showsRecordingEditor
-        )
-        .id("\(recording.rowID)-\(recording.revision)")
-        .frame(minWidth: 560, minHeight: 620)
-      }
-    }
-    .sheet(isPresented: $showsExport) {
-      ViewerExportSheet(explorer: explorer, isPresented: $showsExport)
-        .frame(minWidth: 540, minHeight: 480)
-    }
-  }
-
-  private func sourceRow(_ row: ViewerExplorerSourcePresentationRow) -> some View {
-    Button {
-      explorer.selectSource(row.id)
-    } label: {
-      HStack(alignment: .top, spacing: 9) {
-        Image(
-          systemName: row.isCurrent ? "dot.radiowaves.left.and.right" : "clock.arrow.circlepath"
-        )
-        .foregroundStyle(
-          row.id == explorer.selectedSourceID ? Color.accentColor : Color.secondary
-        )
-        .accessibilityHidden(true)
-        VStack(alignment: .leading, spacing: 3) {
-          HStack {
-            Text(row.title).lineLimit(1)
-            if row.isPinned {
-              Image(systemName: "pin.fill").accessibilityLabel("Pinned")
-            }
-            Spacer()
-            if row.id == explorer.selectedSourceID {
-              Image(systemName: "checkmark").accessibilityLabel("Selected")
-            }
-          }
-          Text(row.state).font(.caption).foregroundStyle(.secondary)
-          if let wall = row.startedWallMilliseconds {
-            Text(ViewerExplorerFormatting.date(wall))
-              .font(.caption2)
-              .foregroundStyle(.secondary)
-          }
-          if row.hasGap || row.hasDrop {
-            Label("Incomplete diagnostics", systemImage: "exclamationmark.triangle")
-              .font(.caption2)
-              .foregroundStyle(.orange)
-          }
-        }
-      }
-      .padding(.vertical, 3)
-      .contentShape(Rectangle())
-    }
-    .buttonStyle(.plain)
-    .accessibilityLabel(
-      "\(row.title), \(row.state), \(row.id == explorer.selectedSourceID ? "selected" : "not selected")\(row.isPinned ? ", pinned" : "")\(row.hasGap || row.hasDrop ? ", incomplete diagnostics" : "")"
+  @MainActor
+  static func make(_ explorer: ViewerEventExplorerController) -> Self {
+    Self(
+      rows: explorer.timelineRows,
+      selectedEventID: explorer.selectedEventID,
+      traversalState: explorer.traversalState,
+      isPaused: explorer.isPaused,
+      autoFollow: explorer.autoFollow,
+      searchText: explorer.filterDraft.searchText,
+      searchMode: explorer.filterDraft.searchMode,
+      activeFilterCount: explorer.activeFilterCount,
+      filterValidationMessage: explorer.filterValidationMessage,
+      liveEvaluationGuidance: explorer.liveEvaluationGuidance,
+      pageFailure: explorer.timelinePageFailure,
+      workspaceOperationState: explorer.workspaceOperationState,
+      gapRows: explorer.gapRows,
+      liveGapLane: explorer.liveGapLane,
+      gapPageFailure: explorer.gapPageFailure,
+      hasOlderEvents: explorer.hasOlderEvents,
+      hasNewerEvents: explorer.hasNewerEvents,
+      hasOlderGaps: explorer.hasOlderGaps,
+      hasNewerGaps: explorer.hasNewerGaps
     )
-    .accessibilityHint("Selects this Event source.")
   }
+}
 
-  private func deviceRow(_ row: ViewerExplorerDevicePresentationRow) -> some View {
-    selectionRow(
-      title: row.title,
-      subtitle: "\(row.subtitle) · \(row.state)",
-      selected: explorer.selectedDeviceIDs.contains(row.id),
-      systemImage: row.isMaterialized ? "iphone" : "iphone.radiowaves.left.and.right"
+struct ViewerFilterPresentationSignature: Equatable {
+  let eventTypeText: String
+  let applicationIdentifierText: String
+  let applicationVersionText: String
+  let eventTypeMode: ViewerExplorerEventTypeMode
+  let directions: Set<String>
+  let priorities: Set<String>
+  let fromDate: Date?
+  let throughDate: Date?
+  let jsonMode: ViewerExplorerJSONFilterMode
+  let jsonScalarKind: ViewerExplorerJSONScalarKind
+  let jsonPathText: String
+  let jsonComparisonText: String
+  let requiresGap: Bool
+  let requiresDrop: Bool
+  let requiresTerminalDisposition: Bool
+  let validationMessage: String?
+
+  @MainActor
+  static func make(_ explorer: ViewerEventExplorerController) -> Self {
+    let draft = explorer.filterDraft
+    return Self(
+      eventTypeText: draft.eventTypeText,
+      applicationIdentifierText: draft.applicationIdentifierText,
+      applicationVersionText: draft.applicationVersionText,
+      eventTypeMode: draft.eventTypeMode,
+      directions: draft.directions,
+      priorities: draft.priorities,
+      fromDate: draft.fromDate,
+      throughDate: draft.throughDate,
+      jsonMode: draft.jsonMode,
+      jsonScalarKind: draft.jsonScalarKind,
+      jsonPathText: draft.jsonPathText,
+      jsonComparisonText: draft.jsonComparisonText,
+      requiresGap: draft.requiresGap,
+      requiresDrop: draft.requiresDrop,
+      requiresTerminalDisposition: draft.requiresTerminalDisposition,
+      validationMessage: explorer.filterValidationMessage
     )
-    .overlay(alignment: .bottomLeading) {
-      if row.hasGap || row.hasDrop {
-        Text("Gap or drop observed")
-          .font(.caption2)
-          .foregroundStyle(.orange)
-          .padding(.leading, 25)
-          .offset(y: 8)
-      }
+  }
+}
+
+@MainActor
+final class ViewerFilterPresentationObserver: ObservableObject {
+  @Published private(set) var value: ViewerFilterPresentationSignature
+  @Published private(set) var revision: UInt64 = 0
+  private weak var explorer: ViewerEventExplorerController?
+  private var cancellable: AnyCancellable?
+  private var refreshScheduled = false
+
+  init(explorer: ViewerEventExplorerController) {
+    self.explorer = explorer
+    value = .make(explorer)
+    cancellable = explorer.$revision.dropFirst().sink { [weak self] _ in
+      self?.scheduleRefresh()
     }
-    .padding(.bottom, row.hasGap || row.hasDrop ? 8 : 0)
-    .accessibilityHint("Adds or removes this App from the merged timeline.")
   }
 
-  private func selectionRow(
-    title: String,
-    subtitle: String,
-    selected: Bool,
-    systemImage: String
-  ) -> some View {
-    HStack(alignment: .top, spacing: 9) {
-      Image(systemName: systemImage).foregroundStyle(.secondary).accessibilityHidden(true)
-      VStack(alignment: .leading, spacing: 2) {
-        Text(title).lineLimit(1)
-        Text(subtitle).font(.caption2).foregroundStyle(.secondary).lineLimit(2)
-      }
-      Spacer()
-      Image(systemName: selected ? "checkmark.circle.fill" : "circle")
-        .foregroundStyle(selected ? Color.accentColor : Color.secondary)
-        .accessibilityLabel(selected ? "Selected" : "Not selected")
+  private func scheduleRefresh() {
+    guard !refreshScheduled else { return }
+    refreshScheduled = true
+    Task { @MainActor [weak self] in
+      await Task.yield()
+      guard let self else { return }
+      self.refreshScheduled = false
+      guard let explorer = self.explorer else { return }
+      let next = ViewerFilterPresentationSignature.make(explorer)
+      guard next != self.value else { return }
+      self.value = next
+      self.revision &+= 1
     }
-    .padding(.vertical, 3)
-    .contentShape(Rectangle())
-    .accessibilityElement(children: .ignore)
-    .accessibilityLabel("\(title), \(subtitle), \(selected ? "selected" : "not selected")")
+  }
+}
+
+@MainActor
+final class ViewerTimelinePresentationObserver: ObservableObject {
+  @Published private(set) var revision: UInt64 = 0
+  @Published private(set) var value: ViewerTimelinePresentationSignature
+  private weak var explorer: ViewerEventExplorerController?
+  private var cancellable: AnyCancellable?
+  private var refreshScheduled = false
+
+  init(explorer: ViewerEventExplorerController) {
+    self.explorer = explorer
+    value = .make(explorer)
+    cancellable = explorer.$revision.dropFirst().sink { [weak self] _ in
+      self?.scheduleRefresh()
+    }
   }
 
-  private func recordingActions(_ recording: ViewerRecordingCatalogRow) -> some View {
-    VStack(spacing: 8) {
-      HStack(spacing: 8) {
-        Button {
-          explorer.clearOperationPresentation()
-          showsRecordingEditor = true
-        } label: {
-          Label("Recording", systemImage: "square.and.pencil")
-        }
-        .disabled(!explorer.canManageSelectedRecording)
-        Button {
-          explorer.setSelectedRecordingPinned(!recording.pinned)
-        } label: {
-          Label(
-            recording.pinned ? "Unpin" : "Pin", systemImage: recording.pinned ? "pin.slash" : "pin")
-        }
-        .disabled(!explorer.canManageSelectedRecording || recordingOperationIsRunning)
-        Menu {
-          Button("Complete Recording") {
-            explorer.prepareExport(.completeRecording)
-            showsExport = true
-          }
-          Button("Current Filtered Result") {
-            explorer.prepareExport(.currentFilteredResult)
-            showsExport = true
-          }
-          .disabled(!explorer.canExportFilteredResult)
-        } label: {
-          Label("Export", systemImage: "square.and.arrow.up")
-        }
-        .disabled(!explorer.canManageSelectedRecording)
-      }
-      .buttonStyle(.bordered)
-      if case .failed(let failure) = explorer.recordingOperationState {
-        Text(failure.operatorMessage)
-          .font(.caption2)
-          .foregroundStyle(.orange)
-          .frame(maxWidth: .infinity, alignment: .leading)
-      }
+  private func scheduleRefresh() {
+    guard !refreshScheduled else { return }
+    refreshScheduled = true
+    Task { @MainActor [weak self] in
+      await Task.yield()
+      guard let self else { return }
+      self.refreshScheduled = false
+      guard let explorer = self.explorer else { return }
+      let next = ViewerTimelinePresentationSignature.make(explorer)
+      guard next != self.value else { return }
+      self.value = next
+      self.revision &+= 1
     }
-    .padding(.horizontal, 12)
-    .padding(.vertical, 10)
-  }
-
-  private var recordingOperationIsRunning: Bool {
-    if case .running = explorer.recordingOperationState { return true }
-    return false
   }
 }
 
 struct ViewerExplorerTimelineView: View {
-  @ObservedObject var explorer: ViewerEventExplorerController
+  let explorer: ViewerEventExplorerController
+  @StateObject private var presentationObserver: ViewerTimelinePresentationObserver
   @State private var showsFilters = false
   @State private var showsGaps = false
+  @State private var showsClearConfirmation = false
+
+  init(explorer: ViewerEventExplorerController) {
+    self.explorer = explorer
+    _presentationObserver = StateObject(
+      wrappedValue: ViewerTimelinePresentationObserver(explorer: explorer)
+    )
+  }
 
   var body: some View {
+    let _ = presentationObserver.revision
     VStack(spacing: 0) {
       toolbar
       Divider()
@@ -296,75 +186,151 @@ struct ViewerExplorerTimelineView: View {
       ViewerExplorerFilterSheet(explorer: explorer, isPresented: $showsFilters)
         .frame(minWidth: 620, minHeight: 660)
     }
+    .alert("Clear Current Session Events?", isPresented: $showsClearConfirmation) {
+      Button("Cancel", role: .cancel) {}
+      Button("Clear Events", role: .destructive) { explorer.clearCurrentSession() }
+    } message: {
+      Text(
+        "This removes recorded Events, Event details, diagnostics, and Performance data from the current Session. Connected Devices stay connected and new Events continue to arrive."
+      )
+    }
   }
 
   private var toolbar: some View {
     VStack(spacing: 8) {
-      HStack {
-        Label("Event Timeline", systemImage: "list.bullet.rectangle").font(.headline)
-        Spacer()
-        Button(explorer.isPaused ? "Resume" : "Pause") { explorer.pauseOrResume() }
-          .accessibilityHint("Freezes or resumes timeline presentation only.")
-        Button("Jump to Latest") { explorer.jumpToLatest() }
-          .disabled(explorer.autoFollow && !explorer.isPaused)
-      }
-      HStack(spacing: 8) {
-        ViewerBoundedTextInput(
-          text: explorer.filterDraft.searchText,
-          style: .singleLine,
-          accessibilityLabel: "Search Event content",
-          accessibilityHelp: "Standard editing is bounded before this filter value is stored.",
-          onEdit: { range, replacement in
-            explorer.replaceFilterCharacters(.search, range: range, replacement: replacement)
-          },
-          onSubmit: { explorer.applyFilter() }
-        )
-        .frame(height: 28)
-        Picker(
-          "Search mode",
-          selection: Binding(
-            get: { explorer.filterDraft.searchMode },
-            set: { value in explorer.updateFilterDraft { $0.searchMode = value } }
-          )
-        ) {
-          Text("Literal").tag(ViewerExplorerSearchMode.literal)
-          Text("Full Text").tag(ViewerExplorerSearchMode.fullText)
+      ViewThatFits(in: .horizontal) {
+        HStack {
+          Label("Event Timeline", systemImage: "list.bullet.rectangle").font(.headline)
+          Spacer()
+          timelineActionButtons
         }
-        .labelsHidden()
-        .frame(width: 110)
-        Button("Apply") { explorer.applyFilter() }
-        Button {
-          showsFilters = true
-        } label: {
-          Label(
-            explorer.activeFilterCount == 0 ? "Filters" : "Filters \(explorer.activeFilterCount)",
-            systemImage: "line.3.horizontal.decrease.circle"
-          )
+        HStack {
+          Label("Event Timeline", systemImage: "list.bullet.rectangle").font(.headline)
+          Spacer()
+          Menu {
+            timelineMenuActions
+          } label: {
+            Label("Timeline Actions", systemImage: "ellipsis.circle")
+          }
+        }
+      }
+      ViewThatFits(in: .horizontal) {
+        HStack(spacing: 8) {
+          searchEditor
+          searchModePicker
+          Button("Apply") { explorer.applyFilter() }
+          filtersButton
+        }
+        VStack(spacing: 8) {
+          searchEditor
+          HStack(spacing: 8) {
+            searchModePicker
+            Spacer(minLength: 0)
+            Button("Apply") { explorer.applyFilter() }
+            filtersButton
+          }
         }
       }
     }
     .padding(.horizontal, 14)
     .padding(.vertical, 10)
     .focusSection()
+    .background(ViewerWorkspaceLayoutProbe(kind: .timelineToolbar))
+  }
+
+  private var timelineActionButtons: some View {
+    Group {
+      Button(role: .destructive) {
+        showsClearConfirmation = true
+      } label: {
+        Label("Clear", systemImage: "trash")
+      }
+      .disabled(!explorer.canManageSelectedRecording || workspaceOperationIsRunning)
+      .accessibilityLabel("Clear current Session Events")
+      .accessibilityHint("Permanently removes recorded Events from the current Session.")
+      .help("Clear recorded Events from the current Session")
+      Button(presentation.isPaused ? "Resume" : "Pause") { explorer.pauseOrResume() }
+        .accessibilityHint("Freezes or resumes timeline presentation only.")
+      Button("Jump to Latest") { explorer.jumpToLatest() }
+        .disabled(presentation.autoFollow && !presentation.isPaused)
+    }
+  }
+
+  @ViewBuilder
+  private var timelineMenuActions: some View {
+    Button(role: .destructive) {
+      showsClearConfirmation = true
+    } label: {
+      Label("Clear Events", systemImage: "trash")
+    }
+    .disabled(!explorer.canManageSelectedRecording || workspaceOperationIsRunning)
+    Button(presentation.isPaused ? "Resume Timeline" : "Pause Timeline") {
+      explorer.pauseOrResume()
+    }
+    Button("Jump to Latest") { explorer.jumpToLatest() }
+      .disabled(presentation.autoFollow && !presentation.isPaused)
+  }
+
+  private var searchEditor: some View {
+    ViewerBoundedTextInput(
+      text: presentation.searchText,
+      style: .singleLine,
+      accessibilityLabel: "Search Event content",
+      accessibilityHelp: "Standard editing is bounded before this filter value is stored.",
+      onEdit: { range, replacement in
+        explorer.replaceFilterCharacters(.search, range: range, replacement: replacement)
+      },
+      onSubmit: { explorer.applyFilter() }
+    )
+    .frame(minWidth: 120, maxWidth: .infinity)
+    .frame(height: 28)
+  }
+
+  private var searchModePicker: some View {
+    Picker(
+      "Search mode",
+      selection: Binding(
+        get: { presentation.searchMode },
+        set: { value in explorer.updateFilterDraft { $0.searchMode = value } }
+      )
+    ) {
+      Text("Literal").tag(ViewerExplorerSearchMode.literal)
+      Text("Full Text").tag(ViewerExplorerSearchMode.fullText)
+    }
+    .labelsHidden()
+    .frame(width: 110)
+  }
+
+  private var filtersButton: some View {
+    Button {
+      showsFilters = true
+    } label: {
+      Label(
+        presentation.activeFilterCount == 0
+          ? "Filters" : "Filters \(presentation.activeFilterCount)",
+        systemImage: "line.3.horizontal.decrease.circle"
+      )
+    }
   }
 
   @ViewBuilder
   private var guidance: some View {
-    if let message = explorer.filterValidationMessage {
+    if let message = presentation.filterValidationMessage {
       banner(message, systemImage: "exclamationmark.triangle", color: .orange)
     }
-    if let message = explorer.liveEvaluationGuidance {
+    if let message = presentation.liveEvaluationGuidance {
       banner(message, systemImage: "info.circle", color: .secondary)
     }
-    if let failure = explorer.timelinePageFailure {
+    if let failure = presentation.pageFailure {
       banner(failure.operatorMessage, systemImage: "exclamationmark.triangle", color: .orange)
     }
   }
 
   @ViewBuilder
   private var content: some View {
-    if explorer.timelineRows.isEmpty {
-      switch explorer.traversalState {
+    let rows = presentation.rows
+    if rows.isEmpty {
+      switch presentation.traversalState {
       case .loading, .releasing:
         VStack(spacing: 10) {
           ProgressView()
@@ -387,26 +353,34 @@ struct ViewerExplorerTimelineView: View {
         ViewerExplorerEmptyState(
           title: "No Matching Events",
           systemImage: "line.3.horizontal.decrease.circle",
-          description: "Adjust the source, device selection, or filters."
+          description: "Adjust the Device selection or filters."
         )
       }
     } else {
       List(selection: selectedEventBinding) {
-        ForEach(explorer.timelineRows) { row in
+        ForEach(rows) { row in
           ViewerExplorerTimelineRowView(row: row)
             .tag(row.id)
             .onAppear {
-              if row.id == explorer.timelineRows.first?.id, explorer.hasOlderEvents {
+              if row.id == rows.first?.id, presentation.hasOlderEvents {
                 explorer.loadOlderEvents()
               }
-              if row.id == explorer.timelineRows.last?.id, explorer.hasNewerEvents {
+              if row.id == rows.last?.id, presentation.hasNewerEvents {
                 explorer.loadNewerEvents()
               }
             }
         }
       }
       .accessibilityLabel("Event timeline")
+      .transaction { transaction in transaction.animation = nil }
     }
+  }
+
+  private var workspaceOperationIsRunning: Bool {
+    if case .clearing = presentation.workspaceOperationState { return true }
+    if case .selectingImport = presentation.workspaceOperationState { return true }
+    if case .importing = presentation.workspaceOperationState { return true }
+    return false
   }
 
   private var selectedEventBinding: Binding<ViewerExplorerEventIdentity?> {
@@ -419,26 +393,26 @@ struct ViewerExplorerTimelineView: View {
   }
 
   private var hasDiagnostics: Bool {
-    !explorer.gapRows.isEmpty || explorer.liveGapLane?.hasDiagnostic == true
-      || explorer.gapPageFailure != nil
+    !presentation.gapRows.isEmpty || presentation.liveGapLane?.hasDiagnostic == true
+      || presentation.gapPageFailure != nil
   }
 
   private var diagnosticLane: some View {
     DisclosureGroup(isExpanded: $showsGaps) {
       VStack(alignment: .leading, spacing: 8) {
-        if let gaps = explorer.liveGapLane?.gaps {
+        if let gaps = presentation.liveGapLane?.gaps {
           Text(
             "Live: ingress \(gaps.ingressOverflowCount), window \(gaps.windowOverflowCount), conflicts \(gaps.residentConflictCount), diagnostic loss \(gaps.diagnosticLossCount), storage outages \(gaps.storeUnavailableCount), recoveries \(gaps.storeRecoveryCount)"
           )
           .font(.caption.monospacedDigit())
           .foregroundStyle(gaps.storeUnavailable ? .orange : .secondary)
         }
-        if let failure = explorer.gapPageFailure {
+        if let failure = presentation.gapPageFailure {
           Text(failure.operatorMessage).font(.caption).foregroundStyle(.orange)
         }
         ScrollView {
           LazyVStack(alignment: .leading, spacing: 7) {
-            ForEach(explorer.gapRows, id: \.rowID) { gap in
+            ForEach(presentation.gapRows, id: \.rowID) { gap in
               VStack(alignment: .leading, spacing: 2) {
                 Text("\(gap.namespace) · \(gap.reason)").font(.caption).fontWeight(.medium)
                 Text(
@@ -448,10 +422,10 @@ struct ViewerExplorerTimelineView: View {
                 .foregroundStyle(.secondary)
               }
               .onAppear {
-                if gap.rowID == explorer.gapRows.first?.rowID, explorer.hasOlderGaps {
+                if gap.rowID == presentation.gapRows.first?.rowID, presentation.hasOlderGaps {
                   explorer.loadOlderGaps()
                 }
-                if gap.rowID == explorer.gapRows.last?.rowID, explorer.hasNewerGaps {
+                if gap.rowID == presentation.gapRows.last?.rowID, presentation.hasNewerGaps {
                   explorer.loadNewerGaps()
                 }
               }
@@ -478,6 +452,11 @@ struct ViewerExplorerTimelineView: View {
       .padding(.vertical, 6)
       .background(Color.secondary.opacity(0.08))
   }
+
+  private var presentation: ViewerTimelinePresentationSignature {
+    presentationObserver.value
+  }
+
 }
 
 private struct ViewerExplorerTimelineRowView: View {
@@ -537,199 +516,7 @@ private struct ViewerExplorerTimelineRowView: View {
   }
 }
 
-private struct ViewerRecordingEditorSheet: View {
-  @ObservedObject var explorer: ViewerEventExplorerController
-  let recording: ViewerRecordingCatalogRow
-  @Binding var isPresented: Bool
-  @StateObject private var editor: ViewerRecordingEditorModel
-  @State private var showsDeleteConfirmation = false
-
-  init(
-    explorer: ViewerEventExplorerController,
-    recording: ViewerRecordingCatalogRow,
-    isPresented: Binding<Bool>
-  ) {
-    self.explorer = explorer
-    self.recording = recording
-    _isPresented = isPresented
-    _editor = StateObject(
-      wrappedValue: ViewerRecordingEditorModel(name: recording.name, note: recording.note)
-    )
-  }
-
-  var body: some View {
-    VStack(alignment: .leading, spacing: 18) {
-      HStack(alignment: .firstTextBaseline) {
-        VStack(alignment: .leading, spacing: 4) {
-          Text("Recording").font(.title2).fontWeight(.semibold)
-          Text(recording.state.capitalized)
-            .font(.caption)
-            .foregroundStyle(.secondary)
-        }
-        Spacer()
-        if recording.pinned {
-          Label("Pinned", systemImage: "pin.fill")
-            .font(.caption)
-            .foregroundStyle(.secondary)
-        }
-      }
-      Form {
-        Section("Metadata") {
-          VStack(alignment: .leading, spacing: 5) {
-            Text("Optional name").font(.caption).foregroundStyle(.secondary)
-            ViewerBoundedTextInput(
-              text: editor.name,
-              style: .singleLine,
-              accessibilityLabel: "Optional recording name",
-              accessibilityHelp: "Up to 80 characters and 120 UTF-8 bytes.",
-              onEdit: { range, replacement in
-                editor.replaceCharacters(field: .name, range: range, replacement: replacement)
-              }
-            )
-            .frame(height: 28)
-          }
-          VStack(alignment: .leading, spacing: 6) {
-            Text("Optional note").font(.caption).foregroundStyle(.secondary)
-            ViewerBoundedTextInput(
-              text: editor.note,
-              style: .multiline,
-              accessibilityLabel: "Optional recording note",
-              accessibilityHelp: "Standard editing is bounded before this note is stored.",
-              onEdit: { range, replacement in
-                editor.replaceCharacters(field: .note, range: range, replacement: replacement)
-              }
-            )
-            .frame(minHeight: 120)
-          }
-          HStack {
-            Spacer()
-            Button("Save Metadata") {
-              explorer.updateSelectedRecording(
-                name: editor.name,
-                note: editor.note,
-                pinned: recording.pinned
-              )
-            }
-            .buttonStyle(.borderedProminent)
-            .disabled(operationIsRunning)
-          }
-        }
-        Section("Append-only annotation") {
-          Text(
-            "Annotations are appended to recording history. Saving metadata does not append this text."
-          )
-          .font(.caption)
-          .foregroundStyle(.secondary)
-          ViewerBoundedTextInput(
-            text: editor.annotation,
-            style: .multiline,
-            accessibilityLabel: "Append-only recording annotation",
-            accessibilityHelp: "Standard editing is bounded before this annotation is stored.",
-            onEdit: { range, replacement in
-              editor.replaceCharacters(field: .annotation, range: range, replacement: replacement)
-            }
-          )
-          .frame(minHeight: 120)
-          HStack {
-            Spacer()
-            Button("Append Annotation") {
-              explorer.appendSelectedRecordingAnnotation(editor.annotation)
-            }
-            .disabled(editor.annotation.isEmpty || operationIsRunning)
-          }
-        }
-      }
-      if let validation = editor.validationMessage {
-        Label(validation, systemImage: "exclamationmark.triangle")
-          .font(.caption)
-          .foregroundStyle(.red)
-      }
-      operationStatus
-      Divider()
-      HStack {
-        Button("Delete Recording", role: .destructive) {
-          explorer.prepareSelectedRecordingDelete()
-        }
-        .disabled(recording.state.lowercased() == "active" || operationIsRunning)
-        .accessibilityHint(
-          "Requests a revision-bound confirmation. Active or leased recordings cannot be deleted."
-        )
-        Spacer()
-        Button("Done") {
-          explorer.cancelDeleteConfirmation()
-          explorer.clearOperationPresentation()
-          isPresented = false
-        }
-      }
-    }
-    .padding(22)
-    .focusSection()
-    .confirmationDialog(
-      "Delete this recording?",
-      isPresented: $showsDeleteConfirmation,
-      titleVisibility: .visible
-    ) {
-      Button("Delete Recording", role: .destructive) {
-        explorer.confirmSelectedRecordingDelete()
-      }
-      Button("Cancel", role: .cancel) {
-        explorer.cancelDeleteConfirmation()
-      }
-    } message: {
-      Text(
-        "Deletion is permanent. The confirmation is valid only for the exact current recording and annotation revisions."
-      )
-    }
-    .onChange(of: explorer.revision) { _ in
-      if explorer.recordingOperationState == .awaitingDeleteConfirmation {
-        showsDeleteConfirmation = true
-      }
-      if explorer.recordingOperationState == .succeeded("Annotation appended."),
-        !editor.annotation.isEmpty
-      {
-        editor.clearAnnotation()
-      }
-      if explorer.recordingOperationState == .succeeded("Recording deleted.") {
-        isPresented = false
-      }
-    }
-    .onChange(of: showsDeleteConfirmation) { presented in
-      if !presented, explorer.recordingOperationState == .awaitingDeleteConfirmation {
-        explorer.cancelDeleteConfirmation()
-      }
-    }
-  }
-
-  @ViewBuilder
-  private var operationStatus: some View {
-    switch explorer.recordingOperationState {
-    case .idle:
-      EmptyView()
-    case .running:
-      ProgressView("Applying revision-safe recording operation")
-    case .awaitingDeleteConfirmation:
-      Label("Delete confirmation ready", systemImage: "exclamationmark.triangle")
-        .font(.caption)
-        .foregroundStyle(.orange)
-    case .succeeded(let message):
-      Label(message, systemImage: "checkmark.circle")
-        .font(.caption)
-        .foregroundStyle(.green)
-    case .failed(let failure):
-      Label(failure.operatorMessage, systemImage: "exclamationmark.triangle")
-        .font(.caption)
-        .foregroundStyle(.red)
-    }
-  }
-
-  private var operationIsRunning: Bool {
-    if case .running = explorer.recordingOperationState { return true }
-    return false
-  }
-
-}
-
-private struct ViewerExportSheet: View {
+struct ViewerExportSheet: View {
   @ObservedObject var explorer: ViewerEventExplorerController
   @Binding var isPresented: Bool
 
@@ -767,7 +554,7 @@ private struct ViewerExportSheet: View {
       ViewerExplorerEmptyState(
         title: "No Export Prepared",
         systemImage: "square.and.arrow.up",
-        description: "Choose Complete Recording or Current Filtered Result."
+        description: "Choose Complete Session or Current Filtered Result."
       )
     case .preparing:
       VStack(spacing: 12) {
@@ -911,26 +698,98 @@ private struct ViewerExportSheet: View {
 extension ViewerExportMode {
   fileprivate var title: String {
     switch self {
-    case .completeRecording: return "Complete Recording"
+    case .completeRecording: return "Complete Session"
     case .currentFilteredResult: return "Current Filtered Result"
     }
   }
 }
 
-struct ViewerExplorerInspectorView: View {
-  enum Tab: String, CaseIterable {
-    case metadata = "Metadata"
-    case raw = "Raw"
-    case tree = "Tree"
-    case pretty = "Pretty"
-    case renderer = "Renderer"
-    case causality = "Causality"
+private struct ViewerInspectorPresentationSignature: Equatable {
+  let selectedEventID: ViewerExplorerEventIdentity?
+  let state: ViewerExplorerInspectorState
+  let metadata: ViewerInspectorEventMetadata?
+  let contentByteCount: Int
+  let rawChunkIndex: Int
+  let rawChunk: ViewerRawJSONChunk?
+  let treeState: ViewerJSONTreeState?
+  let rendererPreparation: ViewerRendererPreparation?
+  let causalityState: ViewerExplorerCausalityState
+
+  @MainActor
+  static func make(_ explorer: ViewerEventExplorerController) -> Self {
+    Self(
+      selectedEventID: explorer.selectedEventID,
+      state: explorer.inspectorState,
+      metadata: explorer.inspectorMetadata,
+      contentByteCount: explorer.inspectorContentByteCount,
+      rawChunkIndex: explorer.rawChunkIndex,
+      rawChunk: explorer.rawChunk,
+      treeState: explorer.inspectorTreeState,
+      rendererPreparation: explorer.rendererPreparation,
+      causalityState: explorer.causalityState
+    )
+  }
+}
+
+@MainActor
+final class ViewerInspectorPresentationObserver: ObservableObject {
+  @Published private(set) var revision: UInt64 = 0
+  private weak var explorer: ViewerEventExplorerController?
+  private var signature: ViewerInspectorPresentationSignature
+  private var cancellable: AnyCancellable?
+  private var refreshScheduled = false
+
+  init(explorer: ViewerEventExplorerController) {
+    self.explorer = explorer
+    signature = .make(explorer)
+    cancellable = explorer.$revision.dropFirst().sink { [weak self] _ in
+      self?.scheduleRefresh()
+    }
   }
 
-  @ObservedObject var explorer: ViewerEventExplorerController
-  @State private var tab: Tab = .metadata
+  private func scheduleRefresh() {
+    guard !refreshScheduled else { return }
+    refreshScheduled = true
+    Task { @MainActor [weak self] in
+      await Task.yield()
+      guard let self else { return }
+      self.refreshScheduled = false
+      guard let explorer = self.explorer else { return }
+      let next = ViewerInspectorPresentationSignature.make(explorer)
+      guard next != self.signature else { return }
+      self.signature = next
+      self.revision &+= 1
+    }
+  }
+}
+
+enum ViewerExplorerInspectorTab: String, CaseIterable {
+  case metadata = "Metadata"
+  case raw = "Raw"
+  case tree = "Tree"
+  case pretty = "Pretty"
+  case renderer = "Renderer"
+  case causality = "Causality"
+}
+
+struct ViewerExplorerInspectorView: View {
+  let explorer: ViewerEventExplorerController
+  @StateObject private var presentationObserver: ViewerInspectorPresentationObserver
+  @Binding private var tab: ViewerExplorerInspectorTab
+
+  init(
+    explorer: ViewerEventExplorerController,
+    tab: Binding<ViewerExplorerInspectorTab>
+  ) {
+    self.explorer = explorer
+    _tab = tab
+    _presentationObserver = StateObject(
+      wrappedValue: ViewerInspectorPresentationObserver(explorer: explorer)
+    )
+  }
 
   var body: some View {
+    let _ = presentationObserver.revision
     VStack(spacing: 0) {
       HStack {
         Label("Event Inspector", systemImage: "sidebar.right").font(.headline)
@@ -971,14 +830,27 @@ struct ViewerExplorerInspectorView: View {
       )
     case .ready:
       VStack(spacing: 0) {
-        Picker("Inspector view", selection: $tab) {
-          ForEach(Tab.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+        ViewThatFits(in: .horizontal) {
+          Picker("Inspector view", selection: $tab) {
+            inspectorTabOptions
+          }
+          .pickerStyle(.segmented)
+          Picker("Inspector view", selection: $tab) {
+            inspectorTabOptions
+          }
+          .pickerStyle(.menu)
         }
-        .pickerStyle(.segmented)
         .padding(10)
         Divider()
         tabContent
       }
+    }
+  }
+
+  @ViewBuilder
+  private var inspectorTabOptions: some View {
+    ForEach(ViewerExplorerInspectorTab.allCases, id: \.self) {
+      Text($0.rawValue).tag($0)
     }
   }
 
@@ -1257,8 +1129,17 @@ struct ViewerExplorerInspectorView: View {
 }
 
 struct ViewerExplorerFilterSheet: View {
-  @ObservedObject var explorer: ViewerEventExplorerController
+  let explorer: ViewerEventExplorerController
+  @StateObject private var presentationObserver: ViewerFilterPresentationObserver
   @Binding var isPresented: Bool
+
+  init(explorer: ViewerEventExplorerController, isPresented: Binding<Bool>) {
+    self.explorer = explorer
+    _isPresented = isPresented
+    _presentationObserver = StateObject(
+      wrappedValue: ViewerFilterPresentationObserver(explorer: explorer)
+    )
+  }
 
   var body: some View {
     VStack(alignment: .leading, spacing: 16) {
@@ -1299,21 +1180,41 @@ struct ViewerExplorerFilterSheet: View {
           filterSection("Direction and priority", identifier: "direction-priority") {
             VStack(alignment: .leading, spacing: 10) {
               HStack(spacing: 24) {
-                setToggle("App → Viewer", value: "appToViewer", keyPath: \.directions)
-                setToggle("Viewer → App", value: "viewerToApp", keyPath: \.directions)
+                setToggle(
+                  "App → Viewer",
+                  value: "appToViewer",
+                  keyPath: \.directions,
+                  draftKeyPath: \.directions
+                )
+                setToggle(
+                  "Viewer → App",
+                  value: "viewerToApp",
+                  keyPath: \.directions,
+                  draftKeyPath: \.directions
+                )
               }
               HStack(spacing: 24) {
-                setToggle("Low", value: "low", keyPath: \.priorities)
-                setToggle("Normal", value: "normal", keyPath: \.priorities)
-                setToggle("High", value: "high", keyPath: \.priorities)
+                setToggle("Low", value: "low", keyPath: \.priorities, draftKeyPath: \.priorities)
+                setToggle(
+                  "Normal",
+                  value: "normal",
+                  keyPath: \.priorities,
+                  draftKeyPath: \.priorities
+                )
+                setToggle(
+                  "High",
+                  value: "high",
+                  keyPath: \.priorities,
+                  draftKeyPath: \.priorities
+                )
               }
             }
           }
 
           filterSection("Viewer receive time", identifier: "viewer-time") {
             VStack(alignment: .leading, spacing: 10) {
-              optionalDate("From", keyPath: \.fromDate)
-              optionalDate("Through", keyPath: \.throughDate)
+              optionalDate("From", keyPath: \.fromDate, draftKeyPath: \.fromDate)
+              optionalDate("Through", keyPath: \.throughDate, draftKeyPath: \.throughDate)
             }
           }
 
@@ -1329,10 +1230,10 @@ struct ViewerExplorerFilterSheet: View {
               }
               .frame(maxWidth: 360, alignment: .leading)
               .accessibilityIdentifier("nearwire.filters.json-mode")
-              if explorer.filterDraft.jsonMode != .none {
+              if presentation.jsonMode != .none {
                 boundedFilterInput("JSON path", field: .jsonPath, value: \.jsonPathText)
               }
-              if explorer.filterDraft.jsonMode == .equals {
+              if presentation.jsonMode == .equals {
                 Picker(
                   "Value type",
                   selection: valueBinding(\.jsonScalarKind) { $0.jsonScalarKind = $1 }
@@ -1343,9 +1244,9 @@ struct ViewerExplorerFilterSheet: View {
                 }
                 .frame(maxWidth: 360, alignment: .leading)
               }
-              if explorer.filterDraft.jsonMode == .equals
-                && explorer.filterDraft.jsonScalarKind != .null
-                || explorer.filterDraft.jsonMode == .stringContains
+              if presentation.jsonMode == .equals
+                && presentation.jsonScalarKind != .null
+                || presentation.jsonMode == .stringContains
               {
                 boundedFilterInput(
                   "Comparison value",
@@ -1383,7 +1284,7 @@ struct ViewerExplorerFilterSheet: View {
       }
       .frame(maxHeight: .infinity)
       .accessibilityIdentifier("nearwire.filters.scroll")
-      if let message = explorer.filterValidationMessage {
+      if let message = presentation.validationMessage {
         Label(message, systemImage: "exclamationmark.triangle")
           .font(.caption)
           .foregroundStyle(.red)
@@ -1394,7 +1295,7 @@ struct ViewerExplorerFilterSheet: View {
           .accessibilityIdentifier("nearwire.filters.close")
         Button("Apply") {
           explorer.applyFilter()
-          if explorer.filterValidationMessage == nil { isPresented = false }
+          if presentation.validationMessage == nil { isPresented = false }
         }
         .buttonStyle(.borderedProminent)
         .keyboardShortcut(.return, modifiers: [.command])
@@ -1409,12 +1310,12 @@ struct ViewerExplorerFilterSheet: View {
   private func boundedFilterInput(
     _ label: String,
     field: ViewerExplorerFilterTextField,
-    value keyPath: KeyPath<ViewerExplorerFilterDraft, String>
+    value keyPath: KeyPath<ViewerFilterPresentationSignature, String>
   ) -> some View {
     VStack(alignment: .leading, spacing: 4) {
       Text(label).font(.caption).foregroundStyle(.secondary)
       ViewerBoundedTextInput(
-        text: explorer.filterDraft[keyPath: keyPath],
+        text: presentation[keyPath: keyPath],
         style: .singleLine,
         accessibilityLabel: label,
         accessibilityHelp: "Standard editing is bounded before this filter value is stored.",
@@ -1444,11 +1345,11 @@ struct ViewerExplorerFilterSheet: View {
   }
 
   private func valueBinding<Value>(
-    _ keyPath: KeyPath<ViewerExplorerFilterDraft, Value>,
+    _ keyPath: KeyPath<ViewerFilterPresentationSignature, Value>,
     _ update: @escaping (inout ViewerExplorerFilterDraft, Value) -> Void
   ) -> Binding<Value> {
     Binding(
-      get: { explorer.filterDraft[keyPath: keyPath] },
+      get: { presentation[keyPath: keyPath] },
       set: { value in explorer.updateFilterDraft { update(&$0, value) } }
     )
   }
@@ -1456,18 +1357,19 @@ struct ViewerExplorerFilterSheet: View {
   private func setToggle(
     _ title: String,
     value: String,
-    keyPath: WritableKeyPath<ViewerExplorerFilterDraft, Set<String>>
+    keyPath: KeyPath<ViewerFilterPresentationSignature, Set<String>>,
+    draftKeyPath: WritableKeyPath<ViewerExplorerFilterDraft, Set<String>>
   ) -> some View {
-    Toggle(
+    return Toggle(
       title,
       isOn: Binding(
-        get: { explorer.filterDraft[keyPath: keyPath].contains(value) },
+        get: { presentation[keyPath: keyPath].contains(value) },
         set: { selected in
           explorer.updateFilterDraft {
             if selected {
-              $0[keyPath: keyPath].insert(value)
+              $0[keyPath: draftKeyPath].insert(value)
             } else {
-              $0[keyPath: keyPath].remove(value)
+              $0[keyPath: draftKeyPath].remove(value)
             }
           }
         }
@@ -1478,33 +1380,39 @@ struct ViewerExplorerFilterSheet: View {
 
   private func optionalDate(
     _ title: String,
-    keyPath: WritableKeyPath<ViewerExplorerFilterDraft, Date?>
+    keyPath: KeyPath<ViewerFilterPresentationSignature, Date?>,
+    draftKeyPath: WritableKeyPath<ViewerExplorerFilterDraft, Date?>
   ) -> some View {
-    HStack {
+    return HStack {
       Toggle(
         title,
         isOn: Binding(
-          get: { explorer.filterDraft[keyPath: keyPath] != nil },
+          get: { presentation[keyPath: keyPath] != nil },
           set: { enabled in
             explorer.updateFilterDraft {
-              $0[keyPath: keyPath] = enabled ? ($0[keyPath: keyPath] ?? Date()) : nil
+              $0[keyPath: draftKeyPath] =
+                enabled ? ($0[keyPath: draftKeyPath] ?? Date()) : nil
             }
           }
         )
       )
       .accessibilityIdentifier("nearwire.filters.time.\(title.lowercased())")
-      if explorer.filterDraft[keyPath: keyPath] != nil {
+      if presentation[keyPath: keyPath] != nil {
         DatePicker(
           title,
           selection: Binding(
-            get: { explorer.filterDraft[keyPath: keyPath] ?? Date() },
-            set: { date in explorer.updateFilterDraft { $0[keyPath: keyPath] = date } }
+            get: { presentation[keyPath: keyPath] ?? Date() },
+            set: { date in explorer.updateFilterDraft { $0[keyPath: draftKeyPath] = date } }
           ),
           displayedComponents: [.date, .hourAndMinute]
         )
         .labelsHidden()
       }
     }
+  }
+
+  private var presentation: ViewerFilterPresentationSignature {
+    presentationObserver.value
   }
 
   private func jsonModeTitle(_ mode: ViewerExplorerJSONFilterMode) -> String {
@@ -1555,9 +1463,25 @@ extension ViewerStoreExplorerFailure {
     case .cancelled: return "The operation was cancelled."
     case .unavailable: return "Recorded data is currently unavailable. Live data may still appear."
     case .invalidRequest: return "The requested bounded view is no longer valid."
-    case .busy: return "Another history operation is still finishing. Try again shortly."
+    case .busy: return "Another Session operation is still finishing. Try again shortly."
     case .refineQuery: return "Refine the filters to stay within bounded query work."
+    case .exportTooLarge:
+      return "The complete Session is too large to export. Clear unneeded Events and try again."
     case .catalogChanged: return "The catalog changed. Reloading from a fresh snapshot is required."
+    }
+  }
+}
+
+extension ViewerWorkspaceMutationFailure {
+  var operatorMessage: String {
+    switch self {
+    case .unavailable: return "The current Session is unavailable."
+    case .busy: return "Another Session operation is still finishing."
+    case .invalidFile: return "The selected JSON file is not a valid NearWire Session export."
+    case .unsupportedFile: return "The selected JSON file uses an unsupported export format."
+    case .capacityExceeded:
+      return "The imported Session is too large for the current Viewer storage limit. Import a smaller Session."
+    case .cancelled: return "The Session operation was cancelled."
     }
   }
 }

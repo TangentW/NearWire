@@ -1685,7 +1685,7 @@ final class ViewerPerformanceDashboardController: CustomReflectable, CustomStrin
     case .storeReplaced: return .storeReplaced
     case .cancelled: return .cancelled
     case .unavailable, .busy: return .unavailable
-    case .invalidRequest, .refineQuery, .catalogChanged: return .invalidScope
+    case .invalidRequest, .refineQuery, .exportTooLarge, .catalogChanged: return .invalidScope
     }
   }
 
