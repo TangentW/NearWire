@@ -204,6 +204,7 @@
       }
     },
     "%@, %@, %@, %@" : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -404,6 +405,7 @@
       }
     },
     "%lld records · %@ · %@ – %@" : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -1155,6 +1157,7 @@
       }
     },
     "Bucket end" : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -1171,6 +1174,7 @@
       }
     },
     "Bucket start" : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -1900,6 +1904,9 @@
           }
         }
       }
+    },
+    "Continuous range segment" : {
+
     },
     "Continuous segment" : {
       "localizations" : {
@@ -2885,6 +2892,7 @@
       }
     },
     "Expand" : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -3564,6 +3572,7 @@
       }
     },
     "In memory" : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -4340,6 +4349,7 @@
       }
     },
     "More" : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -4959,6 +4969,7 @@
       }
     },
     "Offline" : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -5585,38 +5596,6 @@
         }
       }
     },
-    "Preview" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Preview"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "预览"
-          }
-        }
-      }
-    },
-    "Preview Unavailable" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Preview Unavailable"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "预览不可用"
-          }
-        }
-      }
-    },
     "Pretty" : {
       "extractionState" : "stale",
       "localizations" : {
@@ -5664,6 +5643,40 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "格式化 JSON 不可用"
+          }
+        }
+      }
+    },
+    "Preview" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Preview"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "预览"
+          }
+        }
+      }
+    },
+    "Preview Unavailable" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Preview Unavailable"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "预览不可用"
           }
         }
       }
@@ -5951,6 +5964,7 @@
       }
     },
     "Received Event content is display-only and has no clipboard command." : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -6624,6 +6638,23 @@
         }
       }
     },
+    "Select All" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Select All"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "全选"
+          }
+        }
+      }
+    },
     "Select an Event" : {
       "extractionState" : "stale",
       "localizations" : {
@@ -6671,22 +6702,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "最多选择 16 台设备。"
-          }
-        }
-      }
-    },
-    "Select All" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Select All"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "全选"
           }
         }
       }
@@ -7426,6 +7441,7 @@
       }
     },
     "The export includes Session timing and state, diagnostic gaps, Event metadata and content, and peer-provided App display name, identifier, and version; these can contain identifying or sensitive data." : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -7437,22 +7453,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "导出内容包括会话时间与状态、诊断缺口、事件元数据和内容，以及 App 提供的显示名称、标识符和版本；这些信息可能包含身份信息或敏感数据。"
-          }
-        }
-      }
-    },
-    "Viewer does not manage, retain, clean up, or delete the exported file." : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Viewer does not manage, retain, clean up, or delete the exported file."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Viewer 不会管理、保留、清理或删除导出的文件。"
           }
         }
       }
@@ -7542,6 +7542,7 @@
       }
     },
     "The pairing code and stable vid are visible to nearby Bonjour browsers. They are not secrets or passwords." : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -7710,22 +7711,6 @@
         }
       }
     },
-    "The selected Event could not be prepared for preview." : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "The selected Event could not be prepared for preview."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "无法为所选事件准备预览。"
-          }
-        }
-      }
-    },
     "The selected chunk could not be prepared." : {
       "extractionState" : "stale",
       "localizations" : {
@@ -7756,6 +7741,23 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "所选设备尚未准备好进行性能分析。"
+          }
+        }
+      }
+    },
+    "The selected Event could not be prepared for preview." : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The selected Event could not be prepared for preview."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法为所选事件准备预览。"
           }
         }
       }
@@ -8012,6 +8014,7 @@
       }
     },
     "TLS encrypted; Viewer identity is not authenticated." : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -8623,6 +8626,23 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Viewer +%@ – +%@"
+          }
+        }
+      }
+    },
+    "Viewer does not manage, retain, clean up, or delete the exported file." : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Viewer does not manage, retain, clean up, or delete the exported file."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Viewer 不会管理、保留、清理或删除导出的文件。"
           }
         }
       }
