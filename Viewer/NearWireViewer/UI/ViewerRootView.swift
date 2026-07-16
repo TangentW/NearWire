@@ -14,18 +14,22 @@ enum ViewerWorkspaceLayout {
   static let minimumWindowWidth: CGFloat = 1_000
   static let minimumWindowHeight: CGFloat = 720
   static let timelineMinimumWidth: CGFloat = 340
-  static let timelineIdealWidth: CGFloat = 500
+  static let timelineDefaultWidthFraction: CGFloat = 0.7
+  static let timelineIdealWidth: CGFloat = minimumWindowWidth * timelineDefaultWidthFraction
   static let inspectorMinimumWidth: CGFloat = 280
-  static let inspectorIdealWidth: CGFloat = 360
+  static let inspectorDefaultWidthFraction: CGFloat = 1 - timelineDefaultWidthFraction
+  static let inspectorIdealWidth: CGFloat = minimumWindowWidth * inspectorDefaultWidthFraction
   static let analysisMinimumHeight: CGFloat = 260
-  static let composerMinimumHeight: CGFloat = 180
-  static let composerContentMinimumHeight: CGFloat = 240
-  static let composerIdealHeight: CGFloat = 240
-  static let composerMaximumHeight: CGFloat = 360
+  static let composerExpandedHeight: CGFloat = 240
 }
 
 enum ViewerWorkspaceLayoutProbeKind: Equatable, Sendable {
+  case pairingHeader
+  case pairingCode
+  case approval
   case analysis
+  case eventTimeline
+  case eventInspector
   case timelineToolbar
   case composer
 }
@@ -56,10 +60,264 @@ struct ViewerWorkspaceLayoutProbe: NSViewRepresentable {
   }
 }
 
+final class ViewerWorkspaceHorizontalSplitView: NSSplitView {
+  var defaultLeadingFraction: CGFloat = ViewerWorkspaceLayout.timelineDefaultWidthFraction
+  var minimumLeadingWidth: CGFloat = ViewerWorkspaceLayout.timelineMinimumWidth
+  var minimumTrailingWidth: CGFloat = ViewerWorkspaceLayout.inspectorMinimumWidth
+  private(set) var hasAppliedDefaultPosition = false
+  private var savedLeadingFraction: CGFloat?
+
+  override func layout() {
+    super.layout()
+    applyDefaultPositionIfNeeded()
+  }
+
+  func updateArrangedSubviews(
+    leading: NSView?,
+    trailing: NSView?,
+    showsLeading: Bool,
+    showsTrailing: Bool
+  ) {
+    let previouslyShowedBoth =
+      leading.map(isArrangedSubview) == true && trailing.map(isArrangedSubview) == true
+    let shouldShowBoth = showsLeading && showsTrailing
+    if previouslyShowedBoth && !shouldShowBoth {
+      saveCurrentLeadingFraction()
+    }
+
+    if !showsLeading, let leading, isArrangedSubview(leading) {
+      removeArrangedSubview(leading)
+      leading.removeFromSuperview()
+    }
+    if !showsTrailing, let trailing, isArrangedSubview(trailing) {
+      removeArrangedSubview(trailing)
+      trailing.removeFromSuperview()
+    }
+    if showsLeading, let leading, !isArrangedSubview(leading) {
+      if let trailing, isArrangedSubview(trailing) {
+        insertArrangedSubview(leading, at: 0)
+      } else {
+        addArrangedSubview(leading)
+      }
+    }
+    if showsTrailing, let trailing, !isArrangedSubview(trailing) {
+      addArrangedSubview(trailing)
+    }
+
+    if shouldShowBoth && !previouslyShowedBoth {
+      hasAppliedDefaultPosition = false
+    }
+    needsLayout = true
+  }
+
+  private func isArrangedSubview(_ view: NSView) -> Bool {
+    arrangedSubviews.contains { $0 === view }
+  }
+
+  private func saveCurrentLeadingFraction() {
+    guard arrangedSubviews.count == 2 else { return }
+    let availableWidth =
+      arrangedSubviews[0].frame.width + arrangedSubviews[1].frame.width
+    guard availableWidth > 0 else { return }
+    savedLeadingFraction = arrangedSubviews[0].frame.width / availableWidth
+  }
+
+  private func applyDefaultPositionIfNeeded() {
+    guard !hasAppliedDefaultPosition, arrangedSubviews.count == 2 else { return }
+    let availableWidth = bounds.width - dividerThickness
+    guard availableWidth >= minimumLeadingWidth + minimumTrailingWidth else { return }
+    let maximumLeadingWidth = availableWidth - minimumTrailingWidth
+    let leadingFraction = savedLeadingFraction ?? defaultLeadingFraction
+    let targetWidth = min(
+      max(availableWidth * leadingFraction, minimumLeadingWidth),
+      maximumLeadingWidth
+    )
+    hasAppliedDefaultPosition = true
+    setPosition(targetWidth, ofDividerAt: 0)
+  }
+}
+
+struct ViewerSplitHostedContent<Content: View>: View {
+  let content: Content
+  let locale: Locale
+  let colorScheme: ColorScheme
+
+  var body: some View {
+    content
+      .environment(\.locale, locale)
+      .environment(\.colorScheme, colorScheme)
+  }
+}
+
+struct ViewerStableHorizontalSplitView<Leading: View, Trailing: View>: NSViewRepresentable {
+  @Environment(\.locale) private var locale
+  @Environment(\.colorScheme) private var colorScheme
+  let defaultLeadingFraction: CGFloat
+  let minimumLeadingWidth: CGFloat
+  let minimumTrailingWidth: CGFloat
+  let showsLeading: Bool
+  let showsTrailing: Bool
+  let leading: Leading
+  let trailing: Trailing
+
+  init(
+    defaultLeadingFraction: CGFloat,
+    minimumLeadingWidth: CGFloat,
+    minimumTrailingWidth: CGFloat,
+    showsLeading: Bool = true,
+    showsTrailing: Bool = true,
+    @ViewBuilder leading: () -> Leading,
+    @ViewBuilder trailing: () -> Trailing
+  ) {
+    self.defaultLeadingFraction = defaultLeadingFraction
+    self.minimumLeadingWidth = minimumLeadingWidth
+    self.minimumTrailingWidth = minimumTrailingWidth
+    self.showsLeading = showsLeading
+    self.showsTrailing = showsTrailing
+    self.leading = leading()
+    self.trailing = trailing()
+  }
+
+  func makeCoordinator() -> Coordinator {
+    Coordinator(
+      leading: hosted(leading),
+      trailing: hosted(trailing),
+      showsLeading: showsLeading,
+      showsTrailing: showsTrailing
+    )
+  }
+
+  func makeNSView(context: Context) -> ViewerWorkspaceHorizontalSplitView {
+    let splitView = ViewerWorkspaceHorizontalSplitView()
+    splitView.isVertical = true
+    splitView.dividerStyle = .thin
+    splitView.delegate = context.coordinator
+    configure(splitView, coordinator: context.coordinator)
+    return splitView
+  }
+
+  func updateNSView(_ splitView: ViewerWorkspaceHorizontalSplitView, context: Context) {
+    context.coordinator.prepare(
+      leading: hosted(leading),
+      trailing: hosted(trailing),
+      showsLeading: showsLeading,
+      showsTrailing: showsTrailing
+    )
+    configure(splitView, coordinator: context.coordinator)
+    context.coordinator.releaseHidden(
+      showsLeading: showsLeading,
+      showsTrailing: showsTrailing
+    )
+  }
+
+  private func hosted<Content: View>(_ content: Content) -> ViewerSplitHostedContent<Content> {
+    ViewerSplitHostedContent(
+      content: content,
+      locale: locale,
+      colorScheme: colorScheme
+    )
+  }
+
+  private func configure(
+    _ splitView: ViewerWorkspaceHorizontalSplitView,
+    coordinator: Coordinator
+  ) {
+    splitView.defaultLeadingFraction = defaultLeadingFraction
+    splitView.minimumLeadingWidth = minimumLeadingWidth
+    splitView.minimumTrailingWidth = minimumTrailingWidth
+    splitView.updateArrangedSubviews(
+      leading: coordinator.leadingHostingView,
+      trailing: coordinator.trailingHostingView,
+      showsLeading: showsLeading,
+      showsTrailing: showsTrailing
+    )
+  }
+
+  @MainActor
+  final class Coordinator: NSObject, NSSplitViewDelegate {
+    private(set) var leadingHostingView: NSHostingView<ViewerSplitHostedContent<Leading>>?
+    private(set) var trailingHostingView: NSHostingView<ViewerSplitHostedContent<Trailing>>?
+
+    init(
+      leading: ViewerSplitHostedContent<Leading>,
+      trailing: ViewerSplitHostedContent<Trailing>,
+      showsLeading: Bool,
+      showsTrailing: Bool
+    ) {
+      if showsLeading {
+        leadingHostingView = NSHostingView(rootView: leading)
+      }
+      if showsTrailing {
+        trailingHostingView = NSHostingView(rootView: trailing)
+      }
+    }
+
+    func prepare(
+      leading: ViewerSplitHostedContent<Leading>,
+      trailing: ViewerSplitHostedContent<Trailing>,
+      showsLeading: Bool,
+      showsTrailing: Bool
+    ) {
+      if showsLeading {
+        if let leadingHostingView {
+          leadingHostingView.rootView = leading
+        } else {
+          leadingHostingView = NSHostingView(rootView: leading)
+        }
+      }
+      if showsTrailing {
+        if let trailingHostingView {
+          trailingHostingView.rootView = trailing
+        } else {
+          trailingHostingView = NSHostingView(rootView: trailing)
+        }
+      }
+    }
+
+    func releaseHidden(showsLeading: Bool, showsTrailing: Bool) {
+      if !showsLeading {
+        leadingHostingView = nil
+      }
+      if !showsTrailing {
+        trailingHostingView = nil
+      }
+    }
+
+    func splitView(
+      _ splitView: NSSplitView,
+      constrainMinCoordinate proposedMinimumPosition: CGFloat,
+      ofSubviewAt dividerIndex: Int
+    ) -> CGFloat {
+      guard let splitView = splitView as? ViewerWorkspaceHorizontalSplitView else {
+        return proposedMinimumPosition
+      }
+      return max(proposedMinimumPosition, splitView.minimumLeadingWidth)
+    }
+
+    func splitView(
+      _ splitView: NSSplitView,
+      constrainMaxCoordinate proposedMaximumPosition: CGFloat,
+      ofSubviewAt dividerIndex: Int
+    ) -> CGFloat {
+      guard let splitView = splitView as? ViewerWorkspaceHorizontalSplitView else {
+        return proposedMaximumPosition
+      }
+      return min(
+        proposedMaximumPosition,
+        splitView.bounds.width - splitView.dividerThickness - splitView.minimumTrailingWidth
+      )
+    }
+
+    func splitView(_ splitView: NSSplitView, canCollapseSubview subview: NSView) -> Bool {
+      false
+    }
+  }
+}
+
 struct ViewerWorkspaceVisibility: Equatable, Sendable {
   var timeline = true
   var inspector = true
-  var composer = true
+  var composer = false
 }
 
 private struct ViewerRootPresentationSignature: Equatable {
@@ -144,10 +402,12 @@ struct ViewerRootView: View {
 
   init(
     model: ViewerApplicationModel,
+    initialWorkspaceVisibility: ViewerWorkspaceVisibility = ViewerWorkspaceVisibility(),
     openPerformanceWindow: @escaping () -> Void = {}
   ) {
     self.model = model
     self.openPerformanceWindow = openPerformanceWindow
+    _workspaceVisibility = State(initialValue: initialWorkspaceVisibility)
     _presentationObserver = StateObject(
       wrappedValue: ViewerRootPresentationObserver(model: model)
     )
@@ -169,43 +429,54 @@ struct ViewerRootView: View {
   }
 
   private var pairingHeader: some View {
-    VStack(alignment: .leading, spacing: 12) {
-      HStack(alignment: .firstTextBaseline, spacing: 16) {
-        VStack(alignment: .leading, spacing: 4) {
-          Text("Connect an iPhone App").font(.headline)
-          statusContent
-        }
-        Spacer()
+    VStack(alignment: .leading, spacing: 8) {
+      HStack {
+        Text("Connect an iPhone App").font(.headline)
+        Spacer(minLength: 12)
         performanceWindowButton
         workspaceVisibilityControls
-        Divider().frame(height: 24)
+      }
+      HStack(alignment: .center, spacing: 12) {
+        connectionStatusAndActions
+          .layoutPriority(1)
+          .background(ViewerWorkspaceLayoutProbe(kind: .pairingCode))
+        Spacer(minLength: 12)
+        Toggle(
+          "Require approval for new devices",
+          isOn: Binding(
+            get: { model.requiresApproval },
+            set: { model.requiresApproval = $0 }
+          )
+        )
+        .fixedSize()
+        .background(ViewerWorkspaceLayoutProbe(kind: .approval))
+        .accessibilityHint("New devices wait for explicit acceptance before session handoff.")
+      }
+    }
+    .padding(.horizontal, 20)
+    .padding(.vertical, 16)
+    .background(ViewerWorkspaceLayoutProbe(kind: .pairingHeader))
+  }
+
+  @ViewBuilder
+  private var connectionStatusAndActions: some View {
+    if pairingCode != nil {
+      HStack(alignment: .firstTextBaseline, spacing: 8) {
+        Text("Pairing Code")
+          .font(.caption)
+          .foregroundStyle(.secondary)
+        statusContent
         Button("Copy") { model.copyPairingCode() }
-          .disabled(pairingCode == nil)
           .accessibilityLabel("Copy pairing code")
         Button("Refresh") { model.refreshPairingCode() }
-          .disabled(pairingCode == nil)
           .accessibilityLabel("Refresh pairing code")
         Button(LocalizedStringKey(isPaused ? "Resume New Devices" : "Pause New Devices")) {
           model.togglePaused()
         }
-        .disabled(pairingCode == nil)
       }
-      Text("TLS encrypted; Viewer identity is not authenticated.")
-        .font(.caption).foregroundStyle(.secondary)
-      Text(
-        "The pairing code and stable vid are visible to nearby Bonjour browsers. They are not secrets or passwords."
-      )
-      .font(.caption).foregroundStyle(.secondary)
-      Toggle(
-        "Require approval for new devices",
-        isOn: Binding(
-          get: { model.requiresApproval },
-          set: { model.requiresApproval = $0 }
-        )
-      )
-        .accessibilityHint("New devices wait for explicit acceptance before session handoff.")
+    } else {
+      statusContent
     }
-    .padding(20)
   }
 
   @ViewBuilder
@@ -247,7 +518,7 @@ struct ViewerRootView: View {
     case .listening(let code, let paused):
       HStack(spacing: 8) {
         Text(code)
-          .font(.system(.title, design: .monospaced, weight: .semibold))
+          .font(.system(size: 30, weight: .semibold, design: .monospaced))
           .textSelection(.enabled)
           .accessibilityLabel("Pairing code \(code)")
         Text(LocalizedStringKey(paused ? "Paused" : "Listening"))
@@ -285,22 +556,16 @@ struct ViewerRootView: View {
   }
 
   private var analysisWorkspace: some View {
-    VSplitView {
+    VStack(spacing: 0) {
       analysisContent
         .frame(minHeight: ViewerWorkspaceLayout.analysisMinimumHeight, maxHeight: .infinity)
         .layoutPriority(1)
         .background(ViewerWorkspaceLayoutProbe(kind: .analysis))
         .clipped()
       if workspaceVisibility.composer {
-        ScrollView(.vertical) {
-          controlComposer
-            .frame(minHeight: ViewerWorkspaceLayout.composerContentMinimumHeight)
-        }
-          .frame(
-            minHeight: ViewerWorkspaceLayout.composerMinimumHeight,
-            idealHeight: ViewerWorkspaceLayout.composerIdealHeight,
-            maxHeight: ViewerWorkspaceLayout.composerMaximumHeight
-          )
+        Divider()
+        controlComposer
+          .frame(height: ViewerWorkspaceLayout.composerExpandedHeight)
           .background(ViewerWorkspaceLayoutProbe(kind: .composer))
           .clipped()
           .accessibilityIdentifier("nearwire.workspace.control-composer")
@@ -346,7 +611,8 @@ struct ViewerRootView: View {
   @ViewBuilder
   private var deviceDetailsSheet: some View {
     if let focusedDeviceID,
-      let session = model.sessions.first(where: { $0.connectionID == focusedDeviceID })
+      let row = model.explorerController?.deviceRows.first(where: { $0.id == focusedDeviceID }),
+      let session = model.sessions.first(where: { $0.connectionID == row.connectionID })
     {
       ViewerDeviceDetail(model: model, session: session)
         .id(session.route.storageKey)
@@ -495,6 +761,7 @@ private struct ViewerWorkspaceVisibilityControlsPlaceholder: View {
 private struct ViewerDevicesPresentation: Equatable {
   struct DeviceChip: Identifiable, Equatable {
     let id: UUID
+    let connectionID: UUID
     let title: String
     let subtitle: String
     let state: String
@@ -516,7 +783,13 @@ private struct ViewerDevicesPresentation: Equatable {
     let operationIsRunning = operation == .clearing || operation == .importing
     return Self(
       deviceRows: explorer.deviceRows.map {
-        DeviceChip(id: $0.id, title: $0.title, subtitle: $0.subtitle, state: $0.state)
+        DeviceChip(
+          id: $0.id,
+          connectionID: $0.connectionID,
+          title: $0.title,
+          subtitle: $0.subtitle,
+          state: $0.state
+        )
       },
       selectedDeviceIDs: explorer.selectedDeviceIDs,
       pendingApps: application.pendingApps,
@@ -727,12 +1000,14 @@ private struct ViewerDevicesStrip: View {
       title: row.title,
       subtitle: "\(row.subtitle) · \(ViewerLocalization.string(row.state.capitalized, locale: locale))",
       systemImage: row.state == "active" ? "iphone.radiowaves.left.and.right" : "iphone",
-      selected: presentation.value.selectedDeviceIDs.contains(row.id),
+      selected: presentation.value.selectedDeviceIDs.contains(row.connectionID),
       focused: focusedDeviceID == row.id
     ) {
-      explorer.toggleDevice(row.id)
+      explorer.toggleDevice(row.connectionID)
       focusedDeviceID = row.id
-      if let session = application.sessions.first(where: { $0.connectionID == row.id }) {
+      if let session = application.sessions.first(where: {
+        $0.connectionID == row.connectionID
+      }) {
         application.selectedRoute = session.route
       } else {
         application.selectedRoute = nil
@@ -1152,27 +1427,19 @@ struct ViewerAnalysisWorkspacePane: View {
 
   var body: some View {
     ZStack {
-      HSplitView {
-        if showsTimeline {
-          eventTimeline
-            .frame(
-              minWidth: ViewerWorkspaceLayout.timelineMinimumWidth,
-              idealWidth: ViewerWorkspaceLayout.timelineIdealWidth,
-              maxWidth: .infinity
-            )
-            .accessibilityIdentifier("nearwire.workspace.event-timeline")
+      if showsTimeline || showsInspector {
+        ViewerStableHorizontalSplitView(
+          defaultLeadingFraction: ViewerWorkspaceLayout.timelineDefaultWidthFraction,
+          minimumLeadingWidth: ViewerWorkspaceLayout.timelineMinimumWidth,
+          minimumTrailingWidth: ViewerWorkspaceLayout.inspectorMinimumWidth,
+          showsLeading: showsTimeline,
+          showsTrailing: showsInspector
+        ) {
+          timelinePanel
+        } trailing: {
+          inspectorPanel
         }
-        if showsInspector {
-          eventInspector
-            .frame(
-              minWidth: ViewerWorkspaceLayout.inspectorMinimumWidth,
-              idealWidth: ViewerWorkspaceLayout.inspectorIdealWidth,
-              maxWidth: .infinity
-            )
-            .accessibilityIdentifier("nearwire.workspace.event-inspector")
-        }
-      }
-      if !showsTimeline && !showsInspector {
+      } else {
         ViewerEmptyState(
           title: "Event Panels Hidden",
           systemImage: "rectangle.dashed",
@@ -1181,6 +1448,30 @@ struct ViewerAnalysisWorkspacePane: View {
         .accessibilityIdentifier("nearwire.workspace.events-hidden")
       }
     }
+  }
+
+  private var timelinePanel: some View {
+    eventTimeline
+      .frame(
+        minWidth: ViewerWorkspaceLayout.timelineMinimumWidth,
+        idealWidth: ViewerWorkspaceLayout.timelineIdealWidth,
+        maxWidth: .infinity,
+        maxHeight: .infinity
+      )
+      .background(ViewerWorkspaceLayoutProbe(kind: .eventTimeline))
+      .accessibilityIdentifier("nearwire.workspace.event-timeline")
+  }
+
+  private var inspectorPanel: some View {
+    eventInspector
+      .frame(
+        minWidth: ViewerWorkspaceLayout.inspectorMinimumWidth,
+        idealWidth: ViewerWorkspaceLayout.inspectorIdealWidth,
+        maxWidth: .infinity,
+        maxHeight: .infinity
+      )
+      .background(ViewerWorkspaceLayoutProbe(kind: .eventInspector))
+      .accessibilityIdentifier("nearwire.workspace.event-inspector")
   }
 
   @ViewBuilder

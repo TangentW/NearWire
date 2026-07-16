@@ -417,6 +417,9 @@ final class ViewerFlowControlTests: XCTestCase {
     explorer.updateSessionSnapshots(snapshots.value)
     explorer.toggleDevice(firstConnectionID)
     XCTAssertEqual(explorer.selectedDeviceIDs, Set([firstConnectionID]))
+    let firstDeviceRow = try XCTUnwrap(explorer.deviceRows.first)
+    XCTAssertEqual(explorer.deviceRows.count, 1)
+    XCTAssertEqual(firstDeviceRow.connectionID, firstConnectionID)
 
     let replacementConnection = try connect()
     waitUntil {
@@ -432,6 +435,10 @@ final class ViewerFlowControlTests: XCTestCase {
     XCTAssertNotEqual(firstCapability, replacementCapability)
     XCTAssertNotEqual(firstConnectionID, replacementConnectionID)
     XCTAssertEqual(explorer.selectedDeviceIDs, Set([replacementConnectionID]))
+    let replacementDeviceRow = try XCTUnwrap(explorer.deviceRows.first)
+    XCTAssertEqual(explorer.deviceRows.count, 1)
+    XCTAssertEqual(replacementDeviceRow.id, firstDeviceRow.id)
+    XCTAssertEqual(replacementDeviceRow.connectionID, replacementConnectionID)
     let historicalExplorer = ViewerEventExplorerController(
       inputs: ViewerRuntimeExplorerInputs(
         runtimeLogicalID: runtimeLogicalID,

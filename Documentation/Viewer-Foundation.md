@@ -49,6 +49,13 @@ The UI reports a code as listening only after both the listener and the exact Bo
 
 Pairing codes and `vid` values are public nearby-discovery identifiers. They are visible to devices that can browse the Bonjour service and are not passwords or proof of Viewer identity.
 
+The main header keeps this operational surface compact: Performance and workspace controls occupy
+the trailing side of the title row. A small Pairing Code label, prominent code, listener state, and
+Copy, Refresh, and Pause/Resume actions occupy the leading side of the second row, with the
+new-device approval setting at the far right. Connection actions appear only while a pairing code
+is available, leaving recovery states room for their bounded actions. The security and discovery
+explanation remains in this documentation instead of permanent captions below the code.
+
 ## Installation and TLS Identity
 
 Viewer stores two independent identities through `SecItem` in the per-user macOS login Keychain:
@@ -64,7 +71,7 @@ Every load verifies the fixed DER profile, current time, at least 30 days of rem
 
 `Reset TLS Identity` removes only the exact owned TLS records and preserves the installation ID. `Reset All Viewer Identity` is separately confirmed and also replaces the installation ID. A partial or unverifiable explicit reset fails closed. Pairing refresh never rotates either persistent identity.
 
-TLS 1.3 encryption and integrity are mandatory, but V1 does not authenticate the Viewer to the App. The App connection-local trust callback accepts a valid presented self-signed leaf without pinning it. The fixed UI wording is therefore `TLS encrypted; Viewer identity is not authenticated.` There is no plaintext fallback.
+TLS 1.3 encryption and integrity are mandatory, but V1 does not authenticate the Viewer to the App. The App connection-local trust callback accepts a valid presented self-signed leaf without pinning it. There is no plaintext fallback. This security boundary remains documented here instead of occupying a permanent caption in the main workspace.
 
 ## Admission Policy and Limits
 

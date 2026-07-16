@@ -5121,6 +5121,22 @@
         }
       }
     },
+    "Pairing Code" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Pairing Code"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "对频码"
+          }
+        }
+      }
+    },
     "Pairing code %@" : {
       "localizations" : {
         "en" : {

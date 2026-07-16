@@ -1,4 +1,5 @@
 import Combine
+import CryptoKit
 import Foundation
 
 typealias ViewerExportDestinationSelectionCancellation = @MainActor () -> Void
@@ -22,12 +23,162 @@ enum ViewerExplorerInspectorState: Equatable, Sendable {
 
 struct ViewerExplorerDevicePresentationRow: Identifiable, Equatable, Sendable {
   let id: UUID
+  let connectionID: UUID
   let title: String
   let subtitle: String
   let state: String
   let hasGap: Bool
   let hasDrop: Bool
   let isMaterialized: Bool
+}
+
+enum ViewerExplorerDeviceRowBuilder {
+  private enum GroupKey: Hashable {
+    case liveRoute(String)
+    case importedConnection(UUID)
+  }
+
+  private struct Candidate {
+    let key: GroupKey
+    let row: ViewerExplorerDevicePresentationRow
+    let priority: Int
+    let recency: UInt64
+  }
+
+  private struct Group {
+    var candidate: Candidate
+    var hasDrop: Bool
+    var isMaterialized: Bool
+  }
+
+  static func makeRows(
+    liveSessions: [ViewerLiveSessionSnapshot],
+    runtimeSessions: [ViewerSessionSnapshot],
+    eventConnections: Set<UUID>
+  ) -> [ViewerExplorerDevicePresentationRow] {
+    var groups: [GroupKey: Group] = [:]
+
+    for session in liveSessions {
+      let key: GroupKey
+      let presentationID: UUID
+      if session.isImported {
+        key = .importedConnection(session.connectionID)
+        presentationID = session.connectionID
+      } else {
+        let storageKey = ViewerLogicalRoute.storageKey(
+          installationID: session.metadata.installationID,
+          applicationIdentifier: session.metadata.applicationIdentifier
+        )
+        key = .liveRoute(storageKey)
+        presentationID = stablePresentationID(storageKey: storageKey)
+      }
+      insert(
+        Candidate(
+          key: key,
+          row: ViewerExplorerDevicePresentationRow(
+            id: presentationID,
+            connectionID: session.connectionID,
+            title: session.metadata.nickname ?? session.metadata.displayName,
+            subtitle: session.metadata.installationAlias,
+            state: session.isImported
+              ? "offline" : (session.endedWallMilliseconds == nil ? "active" : "recent"),
+            hasGap: false,
+            hasDrop: session.positiveDropCount > 0,
+            isMaterialized: eventConnections.contains(session.connectionID)
+          ),
+          priority: session.isImported ? 1 : (session.endedWallMilliseconds == nil ? 2 : 1),
+          recency: session.endedMonotonicNanoseconds ?? UInt64.max
+        ),
+        into: &groups
+      )
+    }
+
+    for session in runtimeSessions {
+      guard let connectionID = session.connectionID else { continue }
+      let storageKey = session.route.storageKey
+      insert(
+        Candidate(
+          key: .liveRoute(storageKey),
+          row: ViewerExplorerDevicePresentationRow(
+            id: stablePresentationID(storageKey: storageKey),
+            connectionID: connectionID,
+            title: session.title,
+            subtitle: session.installationAlias,
+            state: session.state.rawValue,
+            hasGap: false,
+            hasDrop: session.droppedEvents > 0 || session.remoteDroppedEvents > 0,
+            isMaterialized: eventConnections.contains(connectionID)
+          ),
+          priority: session.state == .recent ? 0 : 3,
+          recency: UInt64.max
+        ),
+        into: &groups
+      )
+    }
+
+    return groups.values.map { group in
+      let row = group.candidate.row
+      return ViewerExplorerDevicePresentationRow(
+        id: row.id,
+        connectionID: row.connectionID,
+        title: row.title,
+        subtitle: row.subtitle,
+        state: row.state,
+        hasGap: row.hasGap,
+        hasDrop: group.hasDrop,
+        isMaterialized: group.isMaterialized
+      )
+    }.sorted {
+      $0.title == $1.title ? $0.id.uuidString < $1.id.uuidString : $0.title < $1.title
+    }
+  }
+
+  private static func insert(
+    _ candidate: Candidate,
+    into groups: inout [GroupKey: Group]
+  ) {
+    guard var group = groups[candidate.key] else {
+      groups[candidate.key] = Group(
+        candidate: candidate,
+        hasDrop: candidate.row.hasDrop,
+        isMaterialized: candidate.row.isMaterialized
+      )
+      return
+    }
+    group.hasDrop = group.hasDrop || candidate.row.hasDrop
+    group.isMaterialized = group.isMaterialized || candidate.row.isMaterialized
+    if prefers(candidate, over: group.candidate) {
+      group.candidate = candidate
+    }
+    groups[candidate.key] = group
+  }
+
+  private static func prefers(_ candidate: Candidate, over current: Candidate) -> Bool {
+    if candidate.priority != current.priority {
+      return candidate.priority > current.priority
+    }
+    if candidate.recency != current.recency {
+      return candidate.recency > current.recency
+    }
+    return candidate.row.connectionID.uuidString > current.row.connectionID.uuidString
+  }
+
+  private static func stablePresentationID(storageKey: String) -> UUID {
+    let digest = SHA256.hash(
+      data: Data("nearwire.viewer.device-row.v1|\(storageKey)".utf8)
+    )
+    var bytes = Array(digest.prefix(16))
+    bytes[6] = (bytes[6] & 0x0F) | 0x80
+    bytes[8] = (bytes[8] & 0x3F) | 0x80
+    return UUID(
+      uuid: (
+        bytes[0], bytes[1], bytes[2], bytes[3],
+        bytes[4], bytes[5], bytes[6], bytes[7],
+        bytes[8], bytes[9], bytes[10], bytes[11],
+        bytes[12], bytes[13], bytes[14], bytes[15]
+      )
+    )
+  }
 }
 
 struct ViewerExplorerTimelinePresentationRow: Identifiable, Equatable, Sendable {
@@ -337,34 +488,11 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
   var deviceRows: [ViewerExplorerDevicePresentationRow] {
     let snapshot = live.snapshot()
     let eventConnections = Set(snapshot.events.map { $0.observation.key.connectionID })
-    var values: [UUID: ViewerExplorerDevicePresentationRow] = [:]
-    for session in snapshot.sessions {
-      values[session.connectionID] = ViewerExplorerDevicePresentationRow(
-        id: session.connectionID,
-        title: session.metadata.nickname ?? session.metadata.displayName,
-        subtitle: session.metadata.installationAlias,
-        state: session.isImported
-          ? "offline" : (session.endedWallMilliseconds == nil ? "active" : "recent"),
-        hasGap: false,
-        hasDrop: session.positiveDropCount > 0,
-        isMaterialized: eventConnections.contains(session.connectionID)
-      )
-    }
-    for session in sessionSnapshots {
-      guard let connectionID = session.connectionID, values[connectionID] == nil else { continue }
-      values[connectionID] = ViewerExplorerDevicePresentationRow(
-        id: connectionID,
-        title: session.title,
-        subtitle: session.installationAlias,
-        state: session.state.rawValue,
-        hasGap: false,
-        hasDrop: session.droppedEvents > 0 || session.remoteDroppedEvents > 0,
-        isMaterialized: false
-      )
-    }
-    return values.values.sorted {
-      $0.title == $1.title ? $0.id.uuidString < $1.id.uuidString : $0.title < $1.title
-    }
+    return ViewerExplorerDeviceRowBuilder.makeRows(
+      liveSessions: snapshot.sessions,
+      runtimeSessions: sessionSnapshots,
+      eventConnections: eventConnections
+    )
   }
 
   var selectedDeviceIDs: Set<UUID> { Set(selectedDevices) }

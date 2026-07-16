@@ -34,6 +34,16 @@ struct ViewerLogicalRoute: Codable, Hashable, Sendable {
   }
 
   var storageKey: String {
+    Self.storageKey(
+      installationID: installationID,
+      applicationIdentifier: applicationIdentifier
+    )
+  }
+
+  static func storageKey(
+    installationID: String,
+    applicationIdentifier: String?
+  ) -> String {
     let bundle = applicationIdentifier ?? "<missing>"
     return "\(installationID.utf8.count):\(installationID)|\(bundle.utf8.count):\(bundle)"
   }

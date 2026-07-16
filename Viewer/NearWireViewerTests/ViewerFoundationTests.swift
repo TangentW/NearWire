@@ -312,9 +312,13 @@ final class ViewerLocalizationTests: XCTestCase {
     )
     var missingKeys: [String] = []
     var hardCodedPanels: [String] = []
+    var rootViewSource: String?
 
     for url in sourceURLs {
       let source = try String(contentsOf: url, encoding: .utf8)
+      if url.lastPathComponent == "ViewerRootView.swift" {
+        rootViewSource = source
+      }
       let sourceRange = NSRange(source.startIndex..., in: source)
       for expression in [localizedCall, swiftUILiteral] {
         expression.enumerateMatches(in: source, range: sourceRange) { match, _, _ in
@@ -345,6 +349,14 @@ final class ViewerLocalizationTests: XCTestCase {
       [],
       "AppKit panels must use ViewerLocalization for fixed text: \(hardCodedPanels)"
     )
+    let rootSource = try XCTUnwrap(rootViewSource)
+    XCTAssertFalse(rootSource.contains("TLS encrypted; Viewer identity is not authenticated."))
+    XCTAssertFalse(
+      rootSource.contains(
+        "The pairing code and stable vid are visible to nearby Bonjour browsers."
+      )
+    )
+    XCTAssertTrue(rootSource.contains("Text(\"Pairing Code\")"))
   }
 
   private func compiledLocalization(_ language: String) throws -> [String: String] {
@@ -1920,10 +1932,20 @@ final class ViewerFoundationTests: XCTestCase {
       ViewerWorkspaceLayout.minimumWindowWidth,
       ViewerWorkspaceLayout.timelineMinimumWidth + ViewerWorkspaceLayout.inspectorMinimumWidth
     )
+    XCTAssertEqual(ViewerWorkspaceLayout.timelineDefaultWidthFraction, 0.7, accuracy: 0.001)
+    XCTAssertEqual(
+      ViewerWorkspaceLayout.timelineDefaultWidthFraction
+        + ViewerWorkspaceLayout.inspectorDefaultWidthFraction,
+      1,
+      accuracy: 0.001
+    )
+    XCTAssertFalse(ViewerWorkspaceVisibility().composer)
     XCTAssertLessThan(
-      ViewerWorkspaceLayout.composerMinimumHeight,
+      ViewerWorkspaceLayout.composerExpandedHeight,
       ViewerWorkspaceLayout.minimumWindowHeight
     )
+    let probes = descendantViews(of: ViewerWorkspaceLayoutProbeView.self, in: hostingView)
+    XCTAssertFalse(probes.contains { $0.kind == .composer })
     XCTAssertGreaterThan(hostingView.fittingSize.width, 0)
     XCTAssertGreaterThan(hostingView.fittingSize.height, 0)
     XCTAssertEqual(model.status, .stopped)
@@ -1966,37 +1988,102 @@ final class ViewerFoundationTests: XCTestCase {
 
     for (appearanceName, appearance) in appearances {
       for (sizeName, size) in sizes {
-        let hostingView = NSHostingView(rootView: ViewerRootView(model: model))
+        let hostingView = NSHostingView(
+          rootView: ViewerRootView(
+            model: model,
+            initialWorkspaceVisibility: ViewerWorkspaceVisibility(
+              timeline: true,
+              inspector: true,
+              composer: true
+            )
+          )
+        )
         hostingView.appearance = NSAppearance(named: appearance)
         hostingView.frame = NSRect(origin: .zero, size: size)
         hostingView.layoutSubtreeIfNeeded()
         hostingView.displayIfNeeded()
+        for _ in 0..<4 {
+          await Task.yield()
+          hostingView.layoutSubtreeIfNeeded()
+        }
+        try await Task<Never, Never>.sleep(nanoseconds: 75_000_000)
+        hostingView.layoutSubtreeIfNeeded()
         let probes = descendantViews(of: ViewerWorkspaceLayoutProbeView.self, in: hostingView)
+        let pairingCodeProbe = try XCTUnwrap(probes.first { $0.kind == .pairingCode })
+        let approvalProbe = try XCTUnwrap(probes.first { $0.kind == .approval })
         let analysisProbe = try XCTUnwrap(probes.first { $0.kind == .analysis })
+        let eventTimelineProbe = try XCTUnwrap(
+          probes.first { $0.kind == .eventTimeline }
+        )
+        let eventInspectorProbe = try XCTUnwrap(
+          probes.first { $0.kind == .eventInspector }
+        )
         let timelineToolbarProbe = try XCTUnwrap(
           probes.first { $0.kind == .timelineToolbar }
         )
         let composerProbe = try XCTUnwrap(probes.first { $0.kind == .composer })
+        let pairingCodeFrame = pairingCodeProbe.convert(pairingCodeProbe.bounds, to: hostingView)
+        let approvalFrame = approvalProbe.convert(approvalProbe.bounds, to: hostingView)
         let analysisFrame = analysisProbe.convert(analysisProbe.bounds, to: hostingView)
+        let eventTimelineFrame = eventTimelineProbe.convert(
+          eventTimelineProbe.bounds,
+          to: hostingView
+        )
+        let eventInspectorFrame = eventInspectorProbe.convert(
+          eventInspectorProbe.bounds,
+          to: hostingView
+        )
         let timelineToolbarFrame = timelineToolbarProbe.convert(
           timelineToolbarProbe.bounds,
           to: hostingView
         )
         let composerFrame = composerProbe.convert(composerProbe.bounds, to: hostingView)
         XCTAssertGreaterThanOrEqual(
+          pairingCodeFrame.height,
+          30,
+          "Pairing code is not visually prominent at \(appearanceName) \(sizeName)"
+        )
+        XCTAssertEqual(
+          pairingCodeFrame.midY,
+          approvalFrame.midY,
+          accuracy: 8,
+          "Pairing and approval are not aligned in one row at \(appearanceName) \(sizeName)"
+        )
+        XCTAssertLessThan(
+          pairingCodeFrame.maxX,
+          approvalFrame.minX,
+          "Pairing and approval overlap at \(appearanceName) \(sizeName)"
+        )
+        XCTAssertTrue(
+          hostingView.bounds.insetBy(dx: -1, dy: -1).contains(pairingCodeFrame)
+            && hostingView.bounds.insetBy(dx: -1, dy: -1).contains(approvalFrame),
+          "Compact header content is clipped at \(appearanceName) \(sizeName)"
+        )
+        XCTAssertGreaterThanOrEqual(
           analysisFrame.height,
           ViewerWorkspaceLayout.analysisMinimumHeight - 1,
           "Analysis is vertically compressed at \(appearanceName) \(sizeName): \(analysisFrame)"
         )
         XCTAssertGreaterThanOrEqual(
-          composerFrame.height,
-          ViewerWorkspaceLayout.composerMinimumHeight - 1,
-          "Composer is below its bounded viewport at \(appearanceName) \(sizeName): \(composerFrame)"
+          eventTimelineFrame.width,
+          ViewerWorkspaceLayout.timelineMinimumWidth - 1
         )
-        XCTAssertLessThanOrEqual(
+        XCTAssertGreaterThanOrEqual(
+          eventInspectorFrame.width,
+          ViewerWorkspaceLayout.inspectorMinimumWidth - 1
+        )
+        let eventPanelWidth = eventTimelineFrame.width + eventInspectorFrame.width
+        XCTAssertEqual(
+          eventTimelineFrame.width / eventPanelWidth,
+          ViewerWorkspaceLayout.timelineDefaultWidthFraction,
+          accuracy: 0.035,
+          "Unexpected Event panel split at \(appearanceName) \(sizeName): Timeline \(eventTimelineFrame), Inspector \(eventInspectorFrame)"
+        )
+        XCTAssertEqual(
           composerFrame.height,
-          ViewerWorkspaceLayout.composerMaximumHeight + 1,
-          "Composer exceeds its bounded viewport at \(appearanceName) \(sizeName): \(composerFrame)"
+          ViewerWorkspaceLayout.composerExpandedHeight,
+          accuracy: 1,
+          "Composer does not retain its fixed height at \(appearanceName) \(sizeName): \(composerFrame)"
         )
         XCTAssertTrue(
           hostingView.bounds.insetBy(dx: -1, dy: -1).contains(composerFrame),
@@ -2014,6 +2101,29 @@ final class ViewerFoundationTests: XCTestCase {
           timelineToolbarFrame.intersects(composerFrame),
           "Timeline toolbar overlaps Composer at \(appearanceName) \(sizeName): toolbar \(timelineToolbarFrame), composer \(composerFrame)"
         )
+        let composerEditors = descendantViews(
+          of: ViewerOperatorTextView.self,
+          in: hostingView
+        ).filter { editor in
+          let frame = editor.convert(editor.bounds, to: hostingView)
+          return composerFrame.intersects(frame)
+        }
+        XCTAssertGreaterThanOrEqual(
+          composerEditors.count,
+          3,
+          "Composer did not expose its maintained inputs at \(appearanceName) \(sizeName)"
+        )
+        for editor in composerEditors {
+          let frame = editor.convert(editor.bounds, to: hostingView)
+          XCTAssertTrue(
+            composerFrame.insetBy(dx: -1, dy: -1).contains(frame),
+            "Composer input is clipped at \(appearanceName) \(sizeName): \(frame)"
+          )
+        }
+        XCTAssertFalse(
+          descendantViews(of: NSSplitView.self, in: hostingView).contains { !$0.isVertical },
+          "Composer unexpectedly exposes a resizable horizontal divider at \(appearanceName) \(sizeName)"
+        )
         let data = try XCTUnwrap(renderedPNGData(of: hostingView))
         let image = try XCTUnwrap(NSImage(data: data))
         XCTAssertEqual(image.size, size)
@@ -2025,6 +2135,294 @@ final class ViewerFoundationTests: XCTestCase {
     }
 
     _ = await model.prepareForTermination()
+  }
+
+  @MainActor
+  func testCompactHeaderFitsSupportedLocalesAndIdentityFailureAtMinimumWidth() async throws {
+    let listener = FakeViewerSecureListener(
+      eventsOnStart: [.ready(port: 49_152), .serviceRegistered(exact: true)]
+    )
+    let listeningModel = makeApplicationModel(
+      listenerFactory: LockedListenerFactory([listener]),
+      pairingCodes: LockedPairingCodeSequence(["ABCDEF"])
+    )
+    listeningModel.openWindow()
+    await waitForStatus(.listening(code: "ABCDEF", paused: false), in: listeningModel)
+
+    let failedModel = ViewerApplicationModel(
+      preferences: ViewerPreferences(requiresApproval: { false }, setRequiresApproval: { _ in }),
+      dependencies: ViewerRuntimeDependencies(
+        loadIdentity: { throw ViewerPairingCodeGenerationError() },
+        resetTLSIdentity: {},
+        resetAllIdentity: {},
+        generatePairingCode: { try PairingCode("ABCDEF") }
+      )
+    )
+    failedModel.openWindow()
+    await waitForStatus(.failed(.identityUnavailable), in: failedModel)
+
+    for (name, model, locale) in [
+      ("English listening", listeningModel, Locale(identifier: "en")),
+      ("Simplified Chinese listening", listeningModel, Locale(identifier: "zh-Hans")),
+      ("English identity failure", failedModel, Locale(identifier: "en")),
+    ] {
+      let hostingView = NSHostingView(
+        rootView: ViewerRootView(model: model)
+          .environment(\.locale, locale)
+      )
+      hostingView.frame = NSRect(
+        x: 0,
+        y: 0,
+        width: ViewerWorkspaceLayout.minimumWindowWidth,
+        height: ViewerWorkspaceLayout.minimumWindowHeight
+      )
+      hostingView.layoutSubtreeIfNeeded()
+      await Task.yield()
+      hostingView.layoutSubtreeIfNeeded()
+
+      let probes = descendantViews(of: ViewerWorkspaceLayoutProbeView.self, in: hostingView)
+      let headerProbe = try XCTUnwrap(probes.first { $0.kind == .pairingHeader }, name)
+      let statusProbe = try XCTUnwrap(probes.first { $0.kind == .pairingCode }, name)
+      let approvalProbe = try XCTUnwrap(probes.first { $0.kind == .approval }, name)
+      let headerFrame = headerProbe.convert(headerProbe.bounds, to: hostingView)
+      let statusFrame = statusProbe.convert(statusProbe.bounds, to: hostingView)
+      let approvalFrame = approvalProbe.convert(approvalProbe.bounds, to: hostingView)
+
+      XCTAssertTrue(
+        hostingView.bounds.insetBy(dx: -1, dy: -1).contains(headerFrame),
+        "\(name) header escapes the maintained window: \(headerFrame)"
+      )
+      XCTAssertTrue(
+        headerFrame.insetBy(dx: -1, dy: -1).contains(statusFrame)
+          && headerFrame.insetBy(dx: -1, dy: -1).contains(approvalFrame),
+        "\(name) header content is clipped: status \(statusFrame), approval \(approvalFrame)"
+      )
+      XCTAssertLessThan(
+        statusFrame.maxX,
+        approvalFrame.minX,
+        "\(name) status and approval overlap"
+      )
+      let headerButtons = descendantViews(of: NSButton.self, in: hostingView).filter { button in
+        headerFrame.intersects(button.convert(button.bounds, to: hostingView))
+      }
+      XCTAssertFalse(headerButtons.isEmpty, name)
+      for button in headerButtons {
+        let frame = button.convert(button.bounds, to: hostingView)
+        XCTAssertTrue(
+          headerFrame.insetBy(dx: -1, dy: -1).contains(frame),
+          "\(name) header button is clipped: \(frame)"
+        )
+      }
+    }
+
+    _ = await listeningModel.prepareForTermination()
+    _ = await failedModel.prepareForTermination()
+  }
+
+  @MainActor
+  func testStableWorkspaceSplitRetainsDefaultAndOperatorPositionAcrossUpdates() async throws {
+    func fixture(
+      token: Int,
+      showsLeading: Bool = true,
+      showsTrailing: Bool = true
+    ) -> ViewerStableHorizontalSplitView<AnyView, AnyView> {
+      ViewerStableHorizontalSplitView(
+        defaultLeadingFraction: ViewerWorkspaceLayout.timelineDefaultWidthFraction,
+        minimumLeadingWidth: ViewerWorkspaceLayout.timelineMinimumWidth,
+        minimumTrailingWidth: ViewerWorkspaceLayout.inspectorMinimumWidth,
+        showsLeading: showsLeading,
+        showsTrailing: showsTrailing
+      ) {
+        AnyView(
+          VStack {
+            ViewerTestHostedContentProbe(token: token)
+            Text(verbatim: "Update \(token)")
+          }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        )
+      } trailing: {
+        AnyView(
+          Text("Inspector \(token)")
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        )
+      }
+    }
+
+    func localizedFixture(
+      token: Int,
+      localeIdentifier: String,
+      showsLeading: Bool = true,
+      showsTrailing: Bool = true
+    ) -> some View {
+      fixture(
+        token: token,
+        showsLeading: showsLeading,
+        showsTrailing: showsTrailing
+      )
+      .environment(\.locale, Locale(identifier: localeIdentifier))
+    }
+
+    let hostingView = NSHostingView(
+      rootView: localizedFixture(token: 0, localeIdentifier: "en")
+    )
+    hostingView.frame = NSRect(x: 0, y: 0, width: 1_000, height: 520)
+    hostingView.layoutSubtreeIfNeeded()
+    try await Task<Never, Never>.sleep(nanoseconds: 100_000_000)
+    hostingView.layoutSubtreeIfNeeded()
+
+    let splitView = try XCTUnwrap(
+      descendantViews(of: ViewerWorkspaceHorizontalSplitView.self, in: hostingView).first
+    )
+    XCTAssertTrue(splitView.hasAppliedDefaultPosition)
+    let initialPanelWidth =
+      splitView.subviews[0].frame.width + splitView.subviews[1].frame.width
+    XCTAssertEqual(
+      splitView.subviews[0].frame.width / initialPanelWidth,
+      ViewerWorkspaceLayout.timelineDefaultWidthFraction,
+      accuracy: 0.01
+    )
+    let leadingHostingView = splitView.subviews[0]
+    let trailingHostingView = ViewerWeakViewReference(splitView.subviews[1])
+    var contentProbe = try XCTUnwrap(
+      descendantViews(of: ViewerTestHostedContentProbeView.self, in: hostingView).first
+    )
+    XCTAssertEqual(contentProbe.token, 0)
+    XCTAssertTrue(contentProbe.localeIdentifier.hasPrefix("en"))
+
+    hostingView.rootView = localizedFixture(token: 1, localeIdentifier: "zh-Hans")
+    for _ in 0..<4 {
+      await Task.yield()
+      hostingView.layoutSubtreeIfNeeded()
+    }
+    try await Task<Never, Never>.sleep(nanoseconds: 100_000_000)
+    hostingView.layoutSubtreeIfNeeded()
+
+    let updatedSplitView = try XCTUnwrap(
+      descendantViews(of: ViewerWorkspaceHorizontalSplitView.self, in: hostingView).first
+    )
+    XCTAssertTrue(updatedSplitView === splitView)
+    contentProbe = try XCTUnwrap(
+      descendantViews(of: ViewerTestHostedContentProbeView.self, in: hostingView).first
+    )
+    XCTAssertEqual(contentProbe.token, 1)
+    XCTAssertTrue(contentProbe.localeIdentifier.hasPrefix("zh"))
+    XCTAssertEqual(
+      updatedSplitView.subviews[0].frame.width / initialPanelWidth,
+      ViewerWorkspaceLayout.timelineDefaultWidthFraction,
+      accuracy: 0.01
+    )
+
+    updatedSplitView.setPosition(0, ofDividerAt: 0)
+    updatedSplitView.layoutSubtreeIfNeeded()
+    XCTAssertEqual(
+      updatedSplitView.subviews[0].frame.width,
+      ViewerWorkspaceLayout.timelineMinimumWidth,
+      accuracy: 1
+    )
+    updatedSplitView.setPosition(updatedSplitView.bounds.width, ofDividerAt: 0)
+    updatedSplitView.layoutSubtreeIfNeeded()
+    XCTAssertEqual(
+      updatedSplitView.subviews[1].frame.width,
+      ViewerWorkspaceLayout.inspectorMinimumWidth,
+      accuracy: 1
+    )
+
+    updatedSplitView.setPosition(560, ofDividerAt: 0)
+    updatedSplitView.layoutSubtreeIfNeeded()
+    let operatorLeadingWidth = updatedSplitView.subviews[0].frame.width
+    XCTAssertEqual(operatorLeadingWidth, 560, accuracy: 1)
+
+    hostingView.rootView = localizedFixture(token: 2, localeIdentifier: "en")
+    for _ in 0..<4 {
+      await Task.yield()
+      hostingView.layoutSubtreeIfNeeded()
+    }
+    try await Task<Never, Never>.sleep(nanoseconds: 100_000_000)
+    hostingView.layoutSubtreeIfNeeded()
+    let liveSplitView = try XCTUnwrap(
+      descendantViews(of: ViewerWorkspaceHorizontalSplitView.self, in: hostingView).first
+    )
+    XCTAssertTrue(liveSplitView === splitView)
+    contentProbe = try XCTUnwrap(
+      descendantViews(of: ViewerTestHostedContentProbeView.self, in: hostingView).first
+    )
+    XCTAssertEqual(contentProbe.token, 2)
+    XCTAssertTrue(contentProbe.localeIdentifier.hasPrefix("en"))
+    XCTAssertEqual(
+      liveSplitView.subviews[0].frame.width,
+      operatorLeadingWidth,
+      accuracy: 1
+    )
+
+    hostingView.rootView = localizedFixture(
+      token: 3,
+      localeIdentifier: "en",
+      showsTrailing: false
+    )
+    for _ in 0..<4 {
+      await Task.yield()
+      hostingView.layoutSubtreeIfNeeded()
+    }
+    let singlePanelSplitView = try XCTUnwrap(
+      descendantViews(of: ViewerWorkspaceHorizontalSplitView.self, in: hostingView).first
+    )
+    XCTAssertTrue(singlePanelSplitView === splitView)
+    XCTAssertEqual(singlePanelSplitView.subviews.count, 1)
+    XCTAssertTrue(singlePanelSplitView.subviews[0] === leadingHostingView)
+    XCTAssertNil(trailingHostingView.view)
+    XCTAssertGreaterThanOrEqual(
+      singlePanelSplitView.subviews[0].frame.width,
+      singlePanelSplitView.bounds.width - 1
+    )
+
+    hostingView.rootView = localizedFixture(token: 4, localeIdentifier: "en")
+    for _ in 0..<4 {
+      await Task.yield()
+      hostingView.layoutSubtreeIfNeeded()
+    }
+    let restoredSplitView = try XCTUnwrap(
+      descendantViews(of: ViewerWorkspaceHorizontalSplitView.self, in: hostingView).first
+    )
+    XCTAssertTrue(restoredSplitView === splitView)
+    XCTAssertEqual(restoredSplitView.subviews.count, 2)
+    XCTAssertTrue(restoredSplitView.subviews[0] === leadingHostingView)
+    XCTAssertEqual(
+      restoredSplitView.subviews[0].frame.width,
+      operatorLeadingWidth,
+      accuracy: 1
+    )
+  }
+
+  @MainActor
+  func testSingleVisibleEventPanelExpandsAcrossAnalysisWidth() async throws {
+    for (name, showsTimeline, showsInspector, expectedKind) in [
+      ("Timeline", true, false, ViewerWorkspaceLayoutProbeKind.eventTimeline),
+      ("Inspector", false, true, ViewerWorkspaceLayoutProbeKind.eventInspector),
+    ] {
+      let hostingView = NSHostingView(
+        rootView: ViewerAnalysisWorkspacePane(
+          explorer: nil,
+          showsTimeline: showsTimeline,
+          showsInspector: showsInspector
+        )
+      )
+      hostingView.frame = NSRect(x: 0, y: 0, width: 1_000, height: 520)
+      hostingView.layoutSubtreeIfNeeded()
+      hostingView.displayIfNeeded()
+      await Task.yield()
+      hostingView.layoutSubtreeIfNeeded()
+
+      let probe = try XCTUnwrap(
+        descendantViews(of: ViewerWorkspaceLayoutProbeView.self, in: hostingView)
+          .first { $0.kind == expectedKind }
+      )
+      let frame = probe.convert(probe.bounds, to: hostingView)
+      XCTAssertGreaterThanOrEqual(
+        frame.width,
+        hostingView.bounds.width - 2,
+        "\(name) did not fill the single-panel workspace: \(frame)"
+      )
+    }
   }
 
   @MainActor
@@ -2453,6 +2851,60 @@ final class ViewerFoundationTests: XCTestCase {
       ["控制事件类型", "控制事件 JSON 内容", "TTL（毫秒）"]
     )
     XCTAssertTrue(chineseEditors.allSatisfy(\.acceptsFirstResponder))
+    controller.sealAndClear()
+  }
+
+  @MainActor
+  func testFixedHeightComposerContainsValidationAndFailureStateWithInternalScrolling() throws {
+    let runtimeID = UUID()
+    let owner = FakeAdmissionHandoffOwner(runtimeLogicalID: runtimeID)
+    let controller = try ViewerControlComposerController(
+      runtimeLogicalID: runtimeID,
+      sessionControl: owner
+    )
+    XCTAssertFalse(
+      controller.replaceWhole(.eventType, with: String(repeating: "x", count: 10_000))
+    )
+    controller.send()
+
+    let hostingView = NSHostingView(
+      rootView: ViewerControlComposerView(controller: controller)
+        .environment(\.locale, Locale(identifier: "en"))
+    )
+    hostingView.frame = NSRect(
+      x: 0,
+      y: 0,
+      width: ViewerWorkspaceLayout.minimumWindowWidth,
+      height: ViewerWorkspaceLayout.composerExpandedHeight
+    )
+    hostingView.layoutSubtreeIfNeeded()
+
+    let probes = descendantViews(of: ViewerComposerLayoutProbeView.self, in: hostingView)
+    let inputProbe = try XCTUnwrap(probes.first { $0.kind == .input })
+    let actionProbe = try XCTUnwrap(probes.first { $0.kind == .action })
+    let dynamicProbe = try XCTUnwrap(probes.first { $0.kind == .actionDynamic })
+    let inputFrame = inputProbe.convert(inputProbe.bounds, to: hostingView)
+    let actionFrame = actionProbe.convert(actionProbe.bounds, to: hostingView)
+    let dynamicFrame = dynamicProbe.convert(dynamicProbe.bounds, to: hostingView)
+
+    XCTAssertTrue(hostingView.bounds.insetBy(dx: -1, dy: -1).contains(inputFrame))
+    XCTAssertTrue(hostingView.bounds.insetBy(dx: -1, dy: -1).contains(actionFrame))
+    XCTAssertTrue(actionFrame.insetBy(dx: -1, dy: -1).contains(dynamicFrame))
+    XCTAssertGreaterThan(dynamicFrame.height, 0)
+    XCTAssertTrue(
+      descendantViews(of: NSScrollView.self, in: hostingView).contains { scrollView in
+        let frame = scrollView.convert(scrollView.bounds, to: hostingView)
+        return dynamicFrame.insetBy(dx: -1, dy: -1).contains(frame)
+      },
+      "Dynamic Composer feedback does not own a bounded internal scroll region"
+    )
+    for editor in descendantViews(of: ViewerOperatorTextView.self, in: hostingView) {
+      XCTAssertTrue(
+        hostingView.bounds.insetBy(dx: -1, dy: -1).contains(
+          editor.convert(editor.bounds, to: hostingView)
+        )
+      )
+    }
     controller.sealAndClear()
   }
 
@@ -4682,6 +5134,110 @@ final class ViewerFoundationTests: XCTestCase {
     XCTAssertEqual(controller.previewRawChunk?.index, 0)
   }
 
+  func testTimelineMomentumStopsOnlyTheActiveDecelerationSequence() {
+    var state = ViewerTimelineMomentumPhaseState()
+
+    XCTAssertFalse(
+      state.observe(gesturePhase: [], momentumPhase: .began)
+    )
+    XCTAssertTrue(state.isMomentumActive)
+    XCTAssertTrue(state.stopForContentUpdate())
+    XCTAssertFalse(state.isMomentumActive)
+    XCTAssertTrue(state.suppressesMomentumUntilTerminalPhase)
+    XCTAssertTrue(
+      state.observe(gesturePhase: [], momentumPhase: .changed)
+    )
+    XCTAssertTrue(state.suppressesMomentumUntilTerminalPhase)
+    XCTAssertFalse(
+      state.observe(gesturePhase: [], momentumPhase: .ended)
+    )
+    XCTAssertFalse(state.suppressesMomentumUntilTerminalPhase)
+    XCTAssertFalse(
+      state.observe(gesturePhase: .began, momentumPhase: [])
+    )
+    XCTAssertFalse(state.stopForContentUpdate())
+
+    XCTAssertFalse(
+      state.observe(gesturePhase: [], momentumPhase: .began)
+    )
+    XCTAssertTrue(state.stopForContentUpdate())
+    XCTAssertFalse(
+      state.observe(gesturePhase: .began, momentumPhase: [])
+    )
+    XCTAssertFalse(state.suppressesMomentumUntilTerminalPhase)
+  }
+
+  func testDeviceRowsCoalesceReconnectHistoryButKeepDifferentAndImportedRoutes() throws {
+    let firstConnectionID = UUID()
+    let secondConnectionID = UUID()
+    let currentConnectionID = UUID()
+    let differentRouteID = UUID()
+    let importedID = UUID()
+    let metadata = try ViewerFrozenSessionMetadata(
+      installationID: "stable-installation",
+      installationAlias: "App tallation",
+      displayName: "NearWire Demo",
+      applicationIdentifier: "com.example.demo",
+      applicationVersion: "1"
+    )
+    let differentMetadata = try ViewerFrozenSessionMetadata(
+      installationID: "stable-installation",
+      installationAlias: "App tallation",
+      displayName: "NearWire Demo Beta",
+      applicationIdentifier: "com.example.demo.beta",
+      applicationVersion: "1"
+    )
+
+    func session(
+      _ connectionID: UUID,
+      metadata: ViewerFrozenSessionMetadata,
+      imported: Bool = false,
+      dropCount: UInt64 = 0,
+      endedAt: UInt64? = nil
+    ) -> ViewerLiveSessionSnapshot {
+      ViewerLiveSessionSnapshot(
+        connectionID: connectionID,
+        metadata: metadata,
+        isImported: imported,
+        positiveDropCount: dropCount,
+        endedWallMilliseconds: endedAt.map(Int64.init),
+        endedMonotonicNanoseconds: endedAt
+      )
+    }
+
+    let rows = ViewerExplorerDeviceRowBuilder.makeRows(
+      liveSessions: [
+        session(firstConnectionID, metadata: metadata, endedAt: 10),
+        session(secondConnectionID, metadata: metadata, dropCount: 1, endedAt: 20),
+        session(currentConnectionID, metadata: metadata),
+        session(differentRouteID, metadata: differentMetadata),
+        session(importedID, metadata: metadata, imported: true),
+      ],
+      runtimeSessions: [],
+      eventConnections: [firstConnectionID]
+    )
+
+    XCTAssertEqual(rows.count, 3)
+    let current = try XCTUnwrap(rows.first { $0.connectionID == currentConnectionID })
+    XCTAssertTrue(current.hasDrop)
+    XCTAssertTrue(current.isMaterialized)
+    XCTAssertNotEqual(current.id, current.connectionID)
+    XCTAssertTrue(rows.contains { $0.connectionID == differentRouteID })
+    XCTAssertTrue(rows.contains { $0.connectionID == importedID && $0.id == importedID })
+
+    let endedOnly = ViewerExplorerDeviceRowBuilder.makeRows(
+      liveSessions: [
+        session(firstConnectionID, metadata: metadata, endedAt: 10),
+        session(secondConnectionID, metadata: metadata, endedAt: 20),
+      ],
+      runtimeSessions: [],
+      eventConnections: []
+    )
+    XCTAssertEqual(endedOnly.count, 1)
+    XCTAssertEqual(endedOnly[0].id, current.id)
+    XCTAssertEqual(endedOnly[0].connectionID, secondConnectionID)
+  }
+
   @MainActor
   func testTimelinePublishesEveryByteValidRowBeyondLegacyCountCap() async throws {
     let runtimeLogicalID = UUID()
@@ -4809,6 +5365,23 @@ final class ViewerFoundationTests: XCTestCase {
         ($0.documentView?.frame.height ?? 0) < ($1.documentView?.frame.height ?? 0)
       }
     )
+    let timelineTableView = try XCTUnwrap(
+      descendantViews(of: NSTableView.self, in: hostingView).max {
+        $0.numberOfRows < $1.numberOfRows
+      }
+    )
+    let momentumAnchor = try XCTUnwrap(
+      descendantViews(
+        of: ViewerTimelineScrollMomentumAnchorView.self,
+        in: hostingView
+      ).first
+    )
+    for _ in 0..<4 where momentumAnchor.controller?.scrollView == nil {
+      await Task.yield()
+      hostingView.layoutSubtreeIfNeeded()
+    }
+    XCTAssertTrue(momentumAnchor.controller?.scrollView === timelineScrollView)
+    XCTAssertEqual(timelineTableView.numberOfRows, 120)
     let documentView = try XCTUnwrap(timelineScrollView.documentView)
     let clipView = timelineScrollView.contentView
     XCTAssertGreaterThan(documentView.bounds.height, clipView.bounds.height)
@@ -4820,6 +5393,29 @@ final class ViewerFoundationTests: XCTestCase {
     clipView.scroll(to: NSPoint(x: clipView.bounds.minX, y: bottomY))
     timelineScrollView.reflectScrolledClipView(clipView)
     try await Task<Never, Never>.sleep(nanoseconds: 30_000_000)
+    await waitUntilExplorer { controller.autoFollow }
+
+    try offer(120)
+    window.waitForProjectionForTesting()
+    await waitUntilExplorer { controller.timelineRows.count == 121 }
+    for _ in 0..<6 {
+      await Task.yield()
+      hostingView.layoutSubtreeIfNeeded()
+    }
+    try await Task<Never, Never>.sleep(nanoseconds: 30_000_000)
+    XCTAssertEqual(timelineTableView.numberOfRows, 121)
+    XCTAssertTrue(controller.autoFollow)
+    let latestRowRect = timelineTableView.rect(
+      ofRow: timelineTableView.numberOfRows - 1
+    )
+    let visibleInTable = timelineTableView.convert(
+      timelineScrollView.documentVisibleRect,
+      from: documentView
+    )
+    XCTAssertTrue(
+      visibleInTable.insetBy(dx: 0, dy: -1).contains(latestRowRect),
+      "Followed append did not reveal the latest real Event row: visible \(visibleInTable), latest \(latestRowRect)"
+    )
 
     let awayY =
       documentView.isFlipped
@@ -4831,9 +5427,9 @@ final class ViewerFoundationTests: XCTestCase {
     await waitUntilExplorer { !controller.autoFollow }
     let readingOrigin = clipView.bounds.origin
 
-    try offer(120)
+    try offer(121)
     window.waitForProjectionForTesting()
-    await waitUntilExplorer { controller.timelineRows.count == 121 }
+    await waitUntilExplorer { controller.timelineRows.count == 122 }
     for _ in 0..<6 {
       await Task.yield()
       hostingView.layoutSubtreeIfNeeded()
@@ -4841,6 +5437,7 @@ final class ViewerFoundationTests: XCTestCase {
     try await Task<Never, Never>.sleep(nanoseconds: 30_000_000)
 
     XCTAssertFalse(controller.autoFollow)
+    XCTAssertEqual(timelineTableView.numberOfRows, 122)
     XCTAssertEqual(clipView.bounds.origin.y, readingOrigin.y, accuracy: 4)
     let visible = timelineScrollView.documentVisibleRect
     let isAtBottom =
@@ -8406,6 +9003,36 @@ final class ViewerFoundationTests: XCTestCase {
         generatePairingCode: { try pairingCodes.next() }
       )
     )
+  }
+}
+
+private final class ViewerTestHostedContentProbeView: NSView {
+  var token = -1
+  var localeIdentifier = ""
+}
+
+private final class ViewerWeakViewReference {
+  weak var view: NSView?
+
+  init(_ view: NSView) {
+    self.view = view
+  }
+}
+
+private struct ViewerTestHostedContentProbe: NSViewRepresentable {
+  let token: Int
+  @Environment(\.locale) private var locale
+
+  func makeNSView(context: Context) -> ViewerTestHostedContentProbeView {
+    let view = ViewerTestHostedContentProbeView()
+    view.token = token
+    view.localeIdentifier = locale.identifier
+    return view
+  }
+
+  func updateNSView(_ nsView: ViewerTestHostedContentProbeView, context: Context) {
+    nsView.token = token
+    nsView.localeIdentifier = locale.identifier
   }
 }
 

@@ -152,6 +152,7 @@ struct ViewerExplorerTimelineView: View {
   @Environment(\.locale) private var locale
   let explorer: ViewerEventExplorerController
   @StateObject private var presentationObserver: ViewerTimelinePresentationObserver
+  @StateObject private var momentumController: ViewerTimelineMomentumController
   @State private var showsFilters = false
   @State private var showsGaps = false
   @State private var showsClearConfirmation = false
@@ -168,6 +169,7 @@ struct ViewerExplorerTimelineView: View {
     _presentationObserver = StateObject(
       wrappedValue: ViewerTimelinePresentationObserver(explorer: explorer)
     )
+    _momentumController = StateObject(wrappedValue: ViewerTimelineMomentumController())
   }
 
   var body: some View {
@@ -366,7 +368,9 @@ struct ViewerExplorerTimelineView: View {
       ScrollViewReader { proxy in
         List(selection: selectedEventBinding) {
           ForEach(rows) { row in
+            let isLastEvent = row.id == rows.last?.id
             ViewerExplorerTimelineRowView(row: row)
+              .id(row.id)
               .tag(row.id)
               .onAppear {
                 if row.id == rows.first?.id, presentation.hasOlderEvents {
@@ -376,28 +380,32 @@ struct ViewerExplorerTimelineView: View {
                   explorer.loadNewerEvents()
                 }
               }
-          }
-          Color.clear
-            .frame(height: 1)
-            .id(ViewerTimelineScrollAnchor.tail)
-            .listRowInsets(EdgeInsets())
-            .listRowSeparator(.hidden)
-            .onDisappear { reportFallbackTailVisibility(false) }
-            .background {
-              GeometryReader { geometry in
-                Color.clear.preference(
-                  key: ViewerTimelineTailFramePreferenceKey.self,
-                  value: geometry.frame(in: .named(ViewerTimelineCoordinateSpace.name))
-                )
+              .onDisappear {
+                if isLastEvent {
+                  reportFallbackTailVisibility(false)
+                }
               }
-            }
+              .background {
+                if isLastEvent {
+                  GeometryReader { geometry in
+                    Color.clear.preference(
+                      key: ViewerTimelineTailFramePreferenceKey.self,
+                      value: geometry.frame(in: .named(ViewerTimelineCoordinateSpace.name))
+                    )
+                  }
+                }
+              }
+          }
         }
         .background {
-          GeometryReader { geometry in
-            Color.clear.preference(
-              key: ViewerTimelineViewportSizePreferenceKey.self,
-              value: geometry.size
-            )
+          ZStack {
+            GeometryReader { geometry in
+              Color.clear.preference(
+                key: ViewerTimelineViewportSizePreferenceKey.self,
+                value: geometry.size
+              )
+            }
+            ViewerTimelineScrollMomentumBridge(controller: momentumController)
           }
         }
         .coordinateSpace(name: ViewerTimelineCoordinateSpace.name)
@@ -413,8 +421,10 @@ struct ViewerExplorerTimelineView: View {
         .onAppear {
           tailViewport.mount()
           mountFallbackAppendState(lastEventID: rows.last?.id)
-          if presentation.autoFollow, !presentation.isPaused {
-            scrollToTail(using: proxy)
+          if presentation.autoFollow, !presentation.isPaused,
+            let lastEventID = rows.last?.id
+          {
+            scrollToLatest(lastEventID, using: proxy)
           }
         }
         .onDisappear {
@@ -431,16 +441,21 @@ struct ViewerExplorerTimelineView: View {
           timelineViewportSize = size
           reportMeasuredTailVisibility()
         }
-        .onChange(of: rows.last?.id) { _ in
-          if tailViewport.shouldFollowNewEvents, !presentation.isPaused {
-            scrollToTail(using: proxy)
+        .onChange(of: rows.last?.id) { lastEventID in
+          momentumController.stopMomentumForContentUpdate()
+          if tailViewport.shouldFollowNewEvents, !presentation.isPaused,
+            let lastEventID
+          {
+            scrollToLatest(lastEventID, using: proxy)
           } else {
-            settleFallbackAppendState(lastEventID: rows.last?.id)
+            settleFallbackAppendState(lastEventID: lastEventID)
           }
         }
         .onChange(of: presentation.autoFollow) { isFollowing in
-          if isFollowing, !presentation.isPaused {
-            scrollToTail(using: proxy)
+          if isFollowing, !presentation.isPaused,
+            let lastEventID = presentation.rows.last?.id
+          {
+            scrollToLatest(lastEventID, using: proxy)
           }
         }
         .accessibilityLabel("Event timeline")
@@ -449,7 +464,10 @@ struct ViewerExplorerTimelineView: View {
     }
   }
 
-  private func scrollToTail(using proxy: ScrollViewProxy) {
+  private func scrollToLatest(
+    _ eventID: ViewerExplorerEventIdentity,
+    using proxy: ScrollViewProxy
+  ) {
     tailScrollGeneration &+= 1
     let generation = tailScrollGeneration
     isApplyingTailScroll = true
@@ -463,7 +481,7 @@ struct ViewerExplorerTimelineView: View {
       var transaction = Transaction()
       transaction.disablesAnimations = true
       withTransaction(transaction) {
-        proxy.scrollTo(ViewerTimelineScrollAnchor.tail, anchor: .bottom)
+        proxy.scrollTo(eventID, anchor: .bottom)
       }
       await Task.yield()
       guard generation == tailScrollGeneration else { return }
@@ -483,9 +501,9 @@ struct ViewerExplorerTimelineView: View {
     else { return }
     publishTailVisibility(token)
     if tailViewport.shouldFollowNewEvents, current.contentHeight > previous.contentHeight,
-      !current.isAtBottom
+      !current.isAtBottom, let lastEventID = presentation.rows.last?.id
     {
-      scrollToTail(using: proxy)
+      scrollToLatest(lastEventID, using: proxy)
     }
   }
 
@@ -741,10 +759,6 @@ enum ViewerExplorerTimelineDispositionPresentation {
   }
 }
 
-private enum ViewerTimelineScrollAnchor: Hashable {
-  case tail
-}
-
 struct ViewerTimelineTailViewportState: Equatable {
   private(set) var isMounted = false
   private(set) var isTailVisible = false
@@ -836,6 +850,204 @@ struct ViewerTimelineFallbackAppendState<EventID: Equatable>: Equatable {
     currentLastEventID: EventID?
   ) -> Bool {
     wasFollowing && settledLastEventID != currentLastEventID
+  }
+}
+
+struct ViewerTimelineMomentumPhaseState: Equatable {
+  private(set) var isMomentumActive = false
+  private(set) var suppressesMomentumUntilTerminalPhase = false
+
+  mutating func observe(
+    gesturePhase: NSEvent.Phase,
+    momentumPhase: NSEvent.Phase
+  ) -> Bool {
+    if gesturePhase.contains(.began) {
+      isMomentumActive = false
+      suppressesMomentumUntilTerminalPhase = false
+    }
+    guard !momentumPhase.isEmpty else { return false }
+
+    if suppressesMomentumUntilTerminalPhase {
+      if momentumPhase.contains(.ended) || momentumPhase.contains(.cancelled) {
+        suppressesMomentumUntilTerminalPhase = false
+        return false
+      }
+      return true
+    }
+
+    if momentumPhase.contains(.began) || momentumPhase.contains(.changed)
+      || momentumPhase.contains(.stationary)
+    {
+      isMomentumActive = true
+    }
+    if momentumPhase.contains(.ended) || momentumPhase.contains(.cancelled) {
+      isMomentumActive = false
+    }
+    return false
+  }
+
+  mutating func stopForContentUpdate() -> Bool {
+    guard isMomentumActive else { return false }
+    isMomentumActive = false
+    suppressesMomentumUntilTerminalPhase = true
+    return true
+  }
+}
+
+@MainActor
+final class ViewerTimelineMomentumController: ObservableObject {
+  private weak var anchorView: ViewerTimelineScrollMomentumAnchorView?
+  private(set) weak var scrollView: NSScrollView?
+  private var eventMonitor: Any?
+  private var attachmentGeneration: UInt64 = 0
+  private var phaseState = ViewerTimelineMomentumPhaseState()
+
+  func attach(to anchorView: ViewerTimelineScrollMomentumAnchorView) {
+    guard self.anchorView !== anchorView || scrollView == nil else { return }
+    self.anchorView = anchorView
+    attachmentGeneration &+= 1
+    let generation = attachmentGeneration
+    Task { @MainActor [weak self, weak anchorView] in
+      await Task.yield()
+      guard let self, let anchorView, self.anchorView === anchorView,
+        generation == self.attachmentGeneration
+      else { return }
+      self.scrollView = Self.resolveTimelineScrollView(from: anchorView)
+      if self.scrollView != nil {
+        self.installMonitorIfNeeded()
+      }
+    }
+  }
+
+  func detach(from anchorView: ViewerTimelineScrollMomentumAnchorView) {
+    guard self.anchorView === anchorView else { return }
+    attachmentGeneration &+= 1
+    self.anchorView = nil
+    scrollView = nil
+    phaseState = ViewerTimelineMomentumPhaseState()
+    removeMonitor()
+  }
+
+  @discardableResult
+  func stopMomentumForContentUpdate() -> Bool {
+    guard phaseState.stopForContentUpdate() else { return false }
+    if let scrollView {
+      let clipView = scrollView.contentView
+      let origin = clipView.bounds.origin
+      NSAnimationContext.runAnimationGroup { context in
+        context.duration = 0
+        context.allowsImplicitAnimation = false
+        clipView.scroll(to: origin)
+        scrollView.reflectScrolledClipView(clipView)
+      }
+    }
+    return true
+  }
+
+  private func installMonitorIfNeeded() {
+    guard eventMonitor == nil else { return }
+    eventMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) {
+      [weak self] event in
+      self?.filter(event) ?? event
+    }
+  }
+
+  private func removeMonitor() {
+    if let eventMonitor {
+      NSEvent.removeMonitor(eventMonitor)
+      self.eventMonitor = nil
+    }
+  }
+
+  private func filter(_ event: NSEvent) -> NSEvent? {
+    guard eventBelongsToTimeline(event) else { return event }
+    return phaseState.observe(
+      gesturePhase: event.phase,
+      momentumPhase: event.momentumPhase
+    ) ? nil : event
+  }
+
+  private func eventBelongsToTimeline(_ event: NSEvent) -> Bool {
+    guard let scrollView, event.window === scrollView.window else { return false }
+    if phaseState.isMomentumActive || phaseState.suppressesMomentumUntilTerminalPhase {
+      return true
+    }
+    let location = scrollView.convert(event.locationInWindow, from: nil)
+    return scrollView.bounds.contains(location)
+  }
+
+  private static func resolveTimelineScrollView(
+    from anchorView: ViewerTimelineScrollMomentumAnchorView
+  ) -> NSScrollView? {
+    if let enclosingScrollView = anchorView.enclosingScrollView {
+      return enclosingScrollView
+    }
+    var ancestor = anchorView.superview
+    while let current = ancestor {
+      let anchorFrame = anchorView.convert(anchorView.bounds, to: current)
+      let candidates = descendantScrollViews(in: current).filter { scrollView in
+        scrollView.convert(scrollView.bounds, to: current).intersects(anchorFrame)
+      }
+      if let best = candidates.max(by: {
+        $0.bounds.width * $0.bounds.height < $1.bounds.width * $1.bounds.height
+      }) {
+        return best
+      }
+      ancestor = current.superview
+    }
+    return nil
+  }
+
+  private static func descendantScrollViews(in view: NSView) -> [NSScrollView] {
+    var result: [NSScrollView] = []
+    if let scrollView = view as? NSScrollView {
+      result.append(scrollView)
+    }
+    for subview in view.subviews {
+      result.append(contentsOf: descendantScrollViews(in: subview))
+    }
+    return result
+  }
+}
+
+final class ViewerTimelineScrollMomentumAnchorView: NSView {
+  weak var controller: ViewerTimelineMomentumController?
+
+  override func viewDidMoveToWindow() {
+    super.viewDidMoveToWindow()
+    if window == nil {
+      controller?.detach(from: self)
+    } else {
+      controller?.attach(to: self)
+    }
+  }
+
+  override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
+struct ViewerTimelineScrollMomentumBridge: NSViewRepresentable {
+  let controller: ViewerTimelineMomentumController
+
+  func makeNSView(context: Context) -> ViewerTimelineScrollMomentumAnchorView {
+    let view = ViewerTimelineScrollMomentumAnchorView()
+    view.controller = controller
+    return view
+  }
+
+  func updateNSView(
+    _ nsView: ViewerTimelineScrollMomentumAnchorView,
+    context: Context
+  ) {
+    nsView.controller = controller
+    controller.attach(to: nsView)
+  }
+
+  static func dismantleNSView(
+    _ nsView: ViewerTimelineScrollMomentumAnchorView,
+    coordinator: Void
+  ) {
+    nsView.controller?.detach(from: nsView)
+    nsView.controller = nil
   }
 }
 

@@ -1,6 +1,38 @@
 @_spi(NearWireInternal) import NearWireCore
 import SwiftUI
 
+enum ViewerComposerLayoutProbeKind: Equatable, Sendable {
+  case input
+  case action
+  case actionDynamic
+}
+
+final class ViewerComposerLayoutProbeView: NSView {
+  var kind: ViewerComposerLayoutProbeKind
+
+  init(kind: ViewerComposerLayoutProbeKind) {
+    self.kind = kind
+    super.init(frame: .zero)
+  }
+
+  @available(*, unavailable)
+  required init?(coder: NSCoder) { nil }
+
+  override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
+struct ViewerComposerLayoutProbe: NSViewRepresentable {
+  let kind: ViewerComposerLayoutProbeKind
+
+  func makeNSView(context: Context) -> ViewerComposerLayoutProbeView {
+    ViewerComposerLayoutProbeView(kind: kind)
+  }
+
+  func updateNSView(_ nsView: ViewerComposerLayoutProbeView, context: Context) {
+    nsView.kind = kind
+  }
+}
+
 struct ViewerControlComposerView: View {
   @Environment(\.locale) private var locale
   @ObservedObject var controller: ViewerControlComposerController
@@ -96,6 +128,7 @@ struct ViewerControlComposerView: View {
       }
     }
     .padding(12)
+    .background(ViewerComposerLayoutProbe(kind: .input))
     .focusSection()
     .accessibilitySortPriority(3)
   }
@@ -151,11 +184,12 @@ struct ViewerControlComposerView: View {
           controller.replaceCharacters(.content, range: range, replacement: replacement)
         }
       )
-      .frame(minHeight: 110)
+      .frame(minHeight: 82, maxHeight: .infinity)
       if let message = controller.inputValidationMessage {
         Label(LocalizedStringKey(message), systemImage: "exclamationmark.triangle")
           .font(.caption)
           .foregroundStyle(.red)
+          .lineLimit(2)
       }
     }
     .padding(12)
@@ -213,21 +247,26 @@ struct ViewerControlComposerView: View {
       .keyboardShortcut(.return, modifiers: [.command])
       .accessibilityHint(
         "Validates once, then requests local queue admission on each selected App.")
-      composerState
-      if !controller.resultRows.isEmpty {
-        Divider()
-        ScrollView {
-          LazyVStack(alignment: .leading, spacing: 7) {
-            ForEach(controller.resultRows) { row in resultRow(row) }
+      ScrollView {
+        VStack(alignment: .leading, spacing: 7) {
+          composerState
+          if !controller.resultRows.isEmpty {
+            Divider()
+            LazyVStack(alignment: .leading, spacing: 7) {
+              ForEach(controller.resultRows) { row in resultRow(row) }
+            }
           }
+          Text("Queued locally is not delivery, receipt, acknowledgement, execution, or processing.")
+            .font(.caption2)
+            .foregroundStyle(.secondary)
         }
-        .frame(maxHeight: 88)
+        .frame(maxWidth: .infinity, alignment: .leading)
       }
-      Text("Queued locally is not delivery, receipt, acknowledgement, execution, or processing.")
-        .font(.caption2)
-        .foregroundStyle(.secondary)
+      .frame(maxHeight: .infinity)
+      .background(ViewerComposerLayoutProbe(kind: .actionDynamic))
     }
     .padding(12)
+    .background(ViewerComposerLayoutProbe(kind: .action))
     .focusSection()
     .accessibilitySortPriority(1)
   }

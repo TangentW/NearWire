@@ -16,17 +16,32 @@ Event Timeline | Event Inspector (optional)
 Viewer -> App composer (optional)
 ```
 
+When Timeline and Inspector first appear together, the native horizontal split gives Timeline
+approximately 70% of the available width and Inspector approximately 30%. The divider stays at that
+initial position through ordinary content updates, remains freely adjustable, and a single visible
+Event panel expands into the available width without recreating the surviving panel.
+
 The top toolbar has independent Timeline, Inspector, and Composer visibility controls. Each control
 uses an icon, a visible selected state, an accessibility value, and a tooltip. Hiding one region
 does not destroy the current filter, selection, composer draft, or Device scope. These controls
 remain meaningful because the main window is always the Event workspace. The labeled
 **Performance** button opens or focuses a separate singleton Performance window.
 
+Composer starts collapsed so Event analysis receives the full vertical workspace. When shown, it
+uses a fixed 240-point region that presents the complete maintained horizontal send form. There is
+no draggable vertical divider, so the Composer cannot be resized into a clipped state. Validation
+feedback uses the flexible input area, while send state and per-target results use a bounded
+internal scroll region instead of increasing the Composer height.
+
 ## Devices and scope
 
 The horizontal Devices strip begins with `All Devices` and then shows the bounded set of connected
 or materialized Apps for the current Session. Selecting a Device updates the Event scope and the
 target used by Device details. The Viewer can merge one through sixteen selected Device lanes.
+Repeated connections for the same live installation and application route reuse one Device card;
+the card keeps a stable process-local presentation identity and points at the newest current
+connection. Retained predecessor Events remain connection-scoped in the memory Session, while
+different App routes and imported Devices remain separate cards.
 Performance analysis uses its own exact-Device picker. On first open it adopts the Event Device only
 when exactly one valid Device is selected; later Event filter changes do not retarget a valid
 Performance choice. Recently disconnected or otherwise non-analyzable rows remain truthful in the
@@ -115,7 +130,9 @@ fixed guidance instead of widening the query.
 Viewer-to-App sending continue. `Resume` starts a fresh bounded snapshot. Manual scrolling turns
 off auto-follow from the actual scroll viewport before a successor Event is published. New content
 cannot turn it back on or move the reading position. Returning to the bottom or using
-`Jump to Latest` restores the tail view.
+`Jump to Latest` restores the tail view. If a new Event arrives while the Timeline is still
+decelerating after a released scroll gesture, NearWire stops the remaining Timeline momentum at
+the current visible origin. Other scroll views and the next ordinary gesture remain unaffected.
 
 ## Timeline stability
 

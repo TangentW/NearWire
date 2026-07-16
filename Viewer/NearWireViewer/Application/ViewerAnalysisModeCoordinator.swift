@@ -78,9 +78,9 @@ struct ViewerAnalysisEventDriver {
     }
     performanceDevices = { [weak controller] in
       controller?.deviceRows.map {
-        let selection = controller?.performanceTargetSelection(deviceID: $0.id)
+        let selection = controller?.performanceTargetSelection(deviceID: $0.connectionID)
         return ViewerPerformanceDeviceOption(
-          id: $0.id,
+          id: $0.connectionID,
           title: $0.title,
           subtitle: $0.subtitle,
           state: $0.state,
