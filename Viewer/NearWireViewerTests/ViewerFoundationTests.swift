@@ -455,10 +455,10 @@ final class ViewerWorkspacePresentationTests: XCTestCase {
     XCTAssertEqual(ViewerWorkspaceLayout.regions.count, ViewerWorkspaceRegion.allCases.count)
   }
 
-  func testInspectorOffersOnlyMetadataRawPrettyAndPreview() {
+  func testInspectorOrdersPrettyRawPreviewAndMetadata() {
     XCTAssertEqual(
       ViewerExplorerInspectorTab.allCases.map(\.rawValue),
-      ["Metadata", "Raw", "Pretty", "Preview"]
+      ["Pretty", "Raw", "Preview", "Metadata"]
     )
   }
 

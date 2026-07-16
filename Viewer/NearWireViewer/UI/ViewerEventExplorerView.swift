@@ -1338,10 +1338,10 @@ final class ViewerInspectorPresentationObserver: ObservableObject {
 }
 
 enum ViewerExplorerInspectorTab: String, CaseIterable {
-  case metadata = "Metadata"
-  case raw = "Raw"
   case pretty = "Pretty"
+  case raw = "Raw"
   case preview = "Preview"
+  case metadata = "Metadata"
 }
 
 struct ViewerExplorerInspectorView: View {
