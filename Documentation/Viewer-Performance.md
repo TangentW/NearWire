@@ -88,15 +88,17 @@ See [SDK-Performance.md](SDK-Performance.md) for the collection definitions.
 
 ## Buckets, charts, and crosshair
 
-The inclusive range is divided into no more than 512 equal-width monotonic buckets. Bucket width is
-the ceiling of range span divided by 512; the final bucket is clipped to the upper bound. A sample
+The interactive dashboard divides the inclusive range into no more than 120 equal-width monotonic
+display buckets; 512 remains the defensive carrier limit. Bucket width is the ceiling of range span
+divided by the chosen display count, and the final bucket is clipped to the upper bound. A sample
 on an interior boundary belongs to the later bucket.
 
 Each numeric series stores finite minimum, average, maximum, measurement count, nonmeasurement
 counts, continuity, and one metric-specific representative Event identity. It does not retain the
 raw sample list. The six chart groups are Frame Rate, CPU, Memory, Battery, Throughput, and Queues
-and Drops. An average line and min-max envelope describe each aggregate; an absent measurement is
-not plotted as zero.
+and Drops. A strong monotone average line and translucent min-max band describe each aggregate.
+Point markers are subtle for a trend and prominent for a single measurement. An absent measurement
+is not plotted as zero.
 
 Hover or drag sets one crosshair shared by every chart. Left and right move across buckets; up and
 down cycle metrics in the focused chart. The selected aggregate reports its Viewer-relative span,
@@ -115,10 +117,11 @@ becomes an **Unplaced gap** and suppresses every inter-bucket line segment for t
 min-max envelopes may remain visible. NearWire never guesses a monotonic position from an
 unreliable wall interval.
 
-Adjacent samples also split when their receive-time distance reaches the freshness horizon derived
-from their intervals. An invalid snapshot breaks every metric. A missing or unavailable value
-breaks only that metric. At most 128 gap details and 128 invalid-snapshot details are retained;
-additional evidence increments bounded loss accounting and cannot reconnect a line.
+An empty display bucket does not by itself split a series; periodic samples remain connected across
+such buckets. Adjacent samples split when their receive-time distance reaches the freshness horizon
+derived from their intervals. An invalid snapshot breaks every metric. A missing or unavailable
+value breaks only that metric. At most 128 gap details and 128 invalid-snapshot details are
+retained; additional evidence increments bounded loss accounting and cannot reconnect a line.
 
 ## Open the raw Event
 
@@ -182,9 +185,10 @@ dashboard adds no logging, analytics, clipboard, drag, share, file export, resto
 history. Raw Event content remains governed by Event Explorer's privacy and JSON-export rules.
 
 V1 intentionally excludes multi-device or reconnect-spanning overlays, custom formulas, alerts,
-thresholds, annotations, MetricKit payloads, interpolation, third-party charts, derived-data export,
-dashboard persistence, a performance-specific transport, and changes to SDK
-sampling.
+thresholds, annotations, MetricKit payloads, fabricated sample resampling, third-party charts,
+derived-data export, dashboard persistence, a performance-specific transport, and changes to SDK
+sampling. Monotone line rendering is visual presentation of measured aggregates and does not create
+new sample values.
 
 Dashboard development and CI may use unsigned Viewer builds. That validates compilation, behavior,
 resource contracts, and cleanup but does not validate the login-Keychain cross-update boundary.

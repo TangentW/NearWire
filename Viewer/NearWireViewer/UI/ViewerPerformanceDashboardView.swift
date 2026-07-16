@@ -1067,66 +1067,65 @@ struct ViewerPerformanceDashboardContent: View {
               let seriesTitle = ViewerPerformanceMetricPresentation.descriptor(
                 for: metric.key
               ).title
-              RectangleMark(
-                  xStart: .value(
-                    "Bucket start",
-                    elapsedNanoseconds(
-                      point.lowerMonotonicNanoseconds,
-                      from: projection.lowerMonotonicNanoseconds
-                    )
-                  ),
-                  xEnd: .value(
-                    "Bucket end",
-                    elapsedNanoseconds(
-                      point.upperMonotonicNanoseconds,
-                      from: projection.lowerMonotonicNanoseconds
-                    )
-                  ),
-                  yStart: .value(
-                    "Minimum",
-                    ViewerPerformanceFormatting.chartValue(point.minimum, metric: metric)
-                  ),
-                  yEnd: .value(
-                    "Maximum",
-                    ViewerPerformanceFormatting.chartValue(point.maximum, metric: metric)
+              AreaMark(
+                x: .value(
+                  "Viewer time",
+                  elapsedNanoseconds(
+                    point.centerMonotonicNanoseconds,
+                    from: projection.lowerMonotonicNanoseconds
                   )
+                ),
+                yStart: .value(
+                  "Minimum",
+                  ViewerPerformanceFormatting.chartValue(point.minimum, metric: metric)
+                ),
+                yEnd: .value(
+                  "Maximum",
+                  ViewerPerformanceFormatting.chartValue(point.maximum, metric: metric)
+                ),
+                series: .value(
+                  "Continuous range segment",
+                  "\(metric.rawValue):\(point.segmentStartBucketIndex)"
                 )
+              )
               .foregroundStyle(by: .value("Metric", seriesTitle))
-              .opacity(0.16)
+              .interpolationMethod(.monotone)
+              .opacity(0.13)
               LineMark(
-                  x: .value(
-                    "Viewer time",
-                    elapsedNanoseconds(
-                      point.centerMonotonicNanoseconds,
-                      from: projection.lowerMonotonicNanoseconds
-                    )
-                  ),
-                  y: .value(
-                    "Average",
-                    ViewerPerformanceFormatting.chartValue(point.average, metric: metric)
-                  ),
-                  series: .value(
-                    "Continuous segment",
-                    "\(metric.rawValue):\(point.segmentStartBucketIndex)"
+                x: .value(
+                  "Viewer time",
+                  elapsedNanoseconds(
+                    point.centerMonotonicNanoseconds,
+                    from: projection.lowerMonotonicNanoseconds
                   )
+                ),
+                y: .value(
+                  "Average",
+                  ViewerPerformanceFormatting.chartValue(point.average, metric: metric)
+                ),
+                series: .value(
+                  "Continuous segment",
+                  "\(metric.rawValue):\(point.segmentStartBucketIndex)"
                 )
+              )
               .foregroundStyle(by: .value("Metric", seriesTitle))
+              .interpolationMethod(.monotone)
               .lineStyle(seriesLineStyle(metric))
               PointMark(
-                  x: .value(
-                    "Viewer time",
-                    elapsedNanoseconds(
-                      point.centerMonotonicNanoseconds,
-                      from: projection.lowerMonotonicNanoseconds
-                    )
-                  ),
-                  y: .value(
-                    "Average",
-                    ViewerPerformanceFormatting.chartValue(point.average, metric: metric)
+                x: .value(
+                  "Viewer time",
+                  elapsedNanoseconds(
+                    point.centerMonotonicNanoseconds,
+                    from: projection.lowerMonotonicNanoseconds
                   )
+                ),
+                y: .value(
+                  "Average",
+                  ViewerPerformanceFormatting.chartValue(point.average, metric: metric)
                 )
+              )
               .foregroundStyle(by: .value("Metric", seriesTitle))
-              .symbolSize(20)
+              .symbolSize(series.points.count == 1 ? 38 : 10)
             }
           }
           if let crosshair = model.crosshair {
@@ -1173,6 +1172,11 @@ struct ViewerPerformanceDashboardContent: View {
           }
         }
         .chartLegend(position: .top, alignment: .leading, spacing: 8)
+        .chartPlotStyle { plotArea in
+          plotArea
+            .background(Color(nsColor: .windowBackgroundColor).opacity(0.35))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+        }
         .chartOverlay { proxy in
           GeometryReader { geometry in
             Rectangle()
@@ -1253,11 +1257,11 @@ struct ViewerPerformanceDashboardContent: View {
   private func seriesLineStyle(_ metric: ViewerPerformanceNumericMetric) -> StrokeStyle {
     switch metric.rawValue % 3 {
     case 1:
-      return StrokeStyle(lineWidth: 1.6, dash: [7, 3])
+      return StrokeStyle(lineWidth: 2.2, lineCap: .round, lineJoin: .round, dash: [8, 3])
     case 2:
-      return StrokeStyle(lineWidth: 1.6, dash: [2, 3])
+      return StrokeStyle(lineWidth: 2.2, lineCap: .round, lineJoin: .round, dash: [2, 3])
     default:
-      return StrokeStyle(lineWidth: 1.6)
+      return StrokeStyle(lineWidth: 2.2, lineCap: .round, lineJoin: .round)
     }
   }
 

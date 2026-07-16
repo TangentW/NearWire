@@ -57,19 +57,17 @@ struct ViewerPerformanceChartProjection: Identifiable, Equatable, Sendable {
         var points: [ViewerPerformanceChartPoint] = []
         points.reserveCapacity(buckets.count)
         var segmentStartBucketIndex: Int?
-        var previousMeasuredBucketIndex: Int?
         var previousWasDiscontinuous = false
+        var pendingBreak = false
         for bucket in buckets {
           let accumulator = bucket.numeric.accumulator(for: metric)
           guard accumulator.measurementCount > 0 else {
-            segmentStartBucketIndex = nil
-            previousMeasuredBucketIndex = nil
-            previousWasDiscontinuous = false
+            pendingBreak = pendingBreak || accumulator.isDiscontinuous
             continue
           }
           try validate(accumulator)
-          if accumulator.isDiscontinuous || previousWasDiscontinuous
-            || previousMeasuredBucketIndex != bucket.index - 1
+          if segmentStartBucketIndex == nil || accumulator.isDiscontinuous
+            || previousWasDiscontinuous || pendingBreak
           {
             segmentStartBucketIndex = bucket.index
           }
@@ -91,8 +89,8 @@ struct ViewerPerformanceChartProjection: Identifiable, Equatable, Sendable {
               isDiscontinuous: accumulator.isDiscontinuous
             )
           )
-          previousMeasuredBucketIndex = bucket.index
           previousWasDiscontinuous = accumulator.isDiscontinuous
+          pendingBreak = false
         }
         preparedSeries.append(ViewerPerformanceChartSeries(metric: metric, points: points))
       }

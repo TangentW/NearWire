@@ -113,7 +113,9 @@ fixed guidance instead of widening the query.
 
 `Pause` freezes presentation only. Networking, queue admission, current-Session retention, and
 Viewer-to-App sending continue. `Resume` starts a fresh bounded snapshot. Manual scrolling turns
-off auto-follow, and `Jump to Latest` restores the tail view.
+off auto-follow from the actual scroll viewport before a successor Event is published. New content
+cannot turn it back on or move the reading position. Returning to the bottom or using
+`Jump to Latest` restores the tail view.
 
 ## Timeline stability
 

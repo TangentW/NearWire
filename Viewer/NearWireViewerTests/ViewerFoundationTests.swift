@@ -1027,7 +1027,7 @@ final class ViewerPerformancePresentationTests: XCTestCase {
     )
   }
 
-  func testChartSegmentsDisconnectBothSidesOfMetricBreaksAndMissingBuckets() throws {
+  func testChartSegmentsDisconnectExplicitBreaksButBridgeEmptyDisplayBuckets() throws {
     var buckets = try chartBuckets(count: 4, samplesPerBucket: 1)
     buckets[1].markDiscontinuous(.cpuPercent)
     let projection = try XCTUnwrap(
@@ -1055,6 +1055,16 @@ final class ViewerPerformancePresentationTests: XCTestCase {
     )
     XCTAssertEqual(
       missingProjection.point(metric: .cpuPercent, bucketIndex: 2, buckets: missing)?
+        .segmentStartBucketIndex,
+      0
+    )
+
+    missing[1].markDiscontinuous(.cpuPercent)
+    let brokenProjection = try XCTUnwrap(
+      ViewerPerformanceChartProjection.makeAll(buckets: missing).first { $0.group == .cpu }
+    )
+    XCTAssertEqual(
+      brokenProjection.point(metric: .cpuPercent, bucketIndex: 2, buckets: missing)?
         .segmentStartBucketIndex,
       2
     )
@@ -4446,6 +4456,55 @@ final class ViewerFoundationTests: XCTestCase {
     XCTAssertFalse(viewport.shouldFollowNewEvents)
     XCTAssertFalse(viewport.accepts(returnedToken))
 
+    viewport.mount()
+    let geometryBottom = ViewerTimelineScrollGeometry(
+      visibleMaxY: 1_000,
+      contentHeight: 1_000
+    )
+    let geometryAway = ViewerTimelineScrollGeometry(
+      visibleMaxY: 760,
+      contentHeight: 1_000
+    )
+    _ = viewport.observe(previous: geometryBottom, current: geometryAway)
+    XCTAssertFalse(viewport.shouldFollowNewEvents)
+    _ = viewport.observe(
+      previous: geometryAway,
+      current: ViewerTimelineScrollGeometry(
+        visibleMaxY: 760,
+        contentHeight: 1_120
+      )
+    )
+    XCTAssertFalse(viewport.shouldFollowNewEvents)
+    _ = viewport.observe(previous: geometryAway, current: geometryBottom)
+    XCTAssertTrue(viewport.shouldFollowNewEvents)
+    _ = viewport.observe(
+      previous: geometryBottom,
+      current: ViewerTimelineScrollGeometry(
+        visibleMaxY: 1_000,
+        contentHeight: 1_120
+      )
+    )
+    XCTAssertTrue(viewport.shouldFollowNewEvents)
+    viewport.unmount()
+
+    var fallbackAppend = ViewerTimelineFallbackAppendState<Int>()
+    fallbackAppend.mount(lastEventID: 1)
+    XCTAssertFalse(
+      fallbackAppend.shouldPreserveFollow(wasFollowing: true, currentLastEventID: 1)
+    )
+    XCTAssertTrue(
+      fallbackAppend.shouldPreserveFollow(wasFollowing: true, currentLastEventID: 2)
+    )
+    XCTAssertFalse(
+      fallbackAppend.shouldPreserveFollow(wasFollowing: false, currentLastEventID: 2)
+    )
+    fallbackAppend.settle(lastEventID: 2)
+    XCTAssertFalse(
+      fallbackAppend.shouldPreserveFollow(wasFollowing: true, currentLastEventID: 2)
+    )
+    fallbackAppend.unmount()
+    XCTAssertNil(fallbackAppend.settledLastEventID)
+
     let runtimeLogicalID = UUID()
     let context = try makeObservationContext(
       connectionID: UUID(),
@@ -4680,6 +4739,115 @@ final class ViewerFoundationTests: XCTestCase {
 
     controller.updateTimelineTailFollowing(false)
     XCTAssertFalse(controller.autoFollow)
+  }
+
+  @MainActor
+  func testHostedTimelineDoesNotJumpAfterOperatorScrollsAwayFromBottom() async throws {
+    guard #available(macOS 15.0, *) else { return }
+    let runtimeLogicalID = UUID()
+    let context = try makeObservationContext(
+      connectionID: UUID(),
+      displayName: "Hosted scroll tracking"
+    )
+    let epoch = SessionEpoch()
+    let window = ViewerLiveEventWindow(
+      runtimeLogicalID: runtimeLogicalID,
+      refreshScheduler: ViewerLiveRefreshScheduler(
+        now: { 0 },
+        scheduleOnMain: { _, action in Task { @MainActor in action() } }
+      )
+    )
+    let controller = ViewerEventExplorerController(
+      inputs: ViewerRuntimeExplorerInputs(
+        runtimeLogicalID: runtimeLogicalID,
+        liveObservations: window
+      )
+    )
+    controller.start()
+    defer { _ = controller.sealAndClear() }
+
+    func offer(_ sequence: UInt64) throws {
+      let observation = try ViewerCommittedEventObservation(
+        runtimeLogicalID: runtimeLogicalID,
+        context: context,
+        nickname: nil,
+        envelope: makeObservationEnvelope(
+          content: .object(["value": .integer(Int64(sequence))]),
+          createdAt: Date(timeIntervalSince1970: Double(sequence)),
+          sessionEpoch: epoch,
+          sequence: sequence
+        ),
+        viewerWallMilliseconds: Int64(sequence),
+        viewerMonotonicNanoseconds: sequence,
+        deterministicEventBytes: 1,
+        initialDisposition: .buffered
+      )
+      XCTAssertEqual(window.offer(observation), .accepted)
+    }
+
+    for sequence in 0..<UInt64(120) {
+      try offer(sequence)
+      if sequence % UInt64(ViewerLiveProjectionLimits.ingressCount) == 63 {
+        window.waitForProjectionForTesting()
+      }
+    }
+    window.waitForProjectionForTesting()
+    await waitUntilExplorer { controller.timelineRows.count == 120 }
+
+    let hostingView = NSHostingView(
+      rootView: ViewerExplorerTimelineView(explorer: controller)
+        .frame(width: 620, height: 520)
+    )
+    hostingView.frame = NSRect(x: 0, y: 0, width: 620, height: 520)
+    for _ in 0..<8 {
+      await Task.yield()
+      hostingView.layoutSubtreeIfNeeded()
+      hostingView.displayIfNeeded()
+    }
+    let timelineScrollView = try XCTUnwrap(
+      descendantViews(of: NSScrollView.self, in: hostingView).max {
+        ($0.documentView?.frame.height ?? 0) < ($1.documentView?.frame.height ?? 0)
+      }
+    )
+    let documentView = try XCTUnwrap(timelineScrollView.documentView)
+    let clipView = timelineScrollView.contentView
+    XCTAssertGreaterThan(documentView.bounds.height, clipView.bounds.height)
+
+    let bottomY =
+      documentView.isFlipped
+      ? max(documentView.bounds.minY, documentView.bounds.maxY - clipView.bounds.height)
+      : documentView.bounds.minY
+    clipView.scroll(to: NSPoint(x: clipView.bounds.minX, y: bottomY))
+    timelineScrollView.reflectScrolledClipView(clipView)
+    try await Task<Never, Never>.sleep(nanoseconds: 30_000_000)
+
+    let awayY =
+      documentView.isFlipped
+      ? max(documentView.bounds.minY, bottomY - 220)
+      : min(documentView.bounds.maxY - clipView.bounds.height, bottomY + 220)
+    clipView.scroll(to: NSPoint(x: clipView.bounds.minX, y: awayY))
+    timelineScrollView.reflectScrolledClipView(clipView)
+    try await Task<Never, Never>.sleep(nanoseconds: 50_000_000)
+    await waitUntilExplorer { !controller.autoFollow }
+    let readingOrigin = clipView.bounds.origin
+
+    try offer(120)
+    window.waitForProjectionForTesting()
+    await waitUntilExplorer { controller.timelineRows.count == 121 }
+    for _ in 0..<6 {
+      await Task.yield()
+      hostingView.layoutSubtreeIfNeeded()
+    }
+    try await Task<Never, Never>.sleep(nanoseconds: 30_000_000)
+
+    XCTAssertFalse(controller.autoFollow)
+    XCTAssertEqual(clipView.bounds.origin.y, readingOrigin.y, accuracy: 4)
+    let visible = timelineScrollView.documentVisibleRect
+    let isAtBottom =
+      documentView.isFlipped
+      ? visible.maxY >= documentView.bounds.maxY - 2
+      : visible.minY <= documentView.bounds.minY + 2
+    XCTAssertFalse(isAtBottom)
   }
 
   func testCommittedObservationConsumesPrecomputedCanonicalContent() throws {
@@ -4985,7 +5153,7 @@ final class ViewerFoundationTests: XCTestCase {
       connectionID: connectionID,
       displayName: "Performance controller"
     )
-    let anchor: UInt64 = 10_000_000_000
+    let anchor: UInt64 = 12_000_000_000
     let window = ViewerLiveEventWindow(
       runtimeLogicalID: runtimeLogicalID,
       refreshScheduler: ViewerLiveRefreshScheduler(
@@ -4997,31 +5165,43 @@ final class ViewerFoundationTests: XCTestCase {
       try ViewerFrozenSessionMetadata(context: context, nickname: nil),
       connectionID: connectionID
     )
-    let content = Data(
-      """
-      {"schemaVersion":1,"sampledAt":"2026-07-14T01:02:03Z","sampleIntervalMilliseconds":1000,"process":{"cpuPercent":12.5,"memoryFootprintBytes":1024},"display":{"estimatedFramesPerSecond":60,"maximumFramesPerSecond":60},"device":{"batteryLevel":0.5,"batteryState":"unplugged","thermalState":"nominal","lowPowerModeEnabled":false},"transport":{"uplinkBytesPerSecond":20,"downlinkBytesPerSecond":30,"uplinkQueueDepth":1,"downlinkQueueDepth":2,"droppedEventCount":0},"unavailable":[]}
-      """.utf8
-    )
-    let envelope = try makeObservationEnvelope(
-      eventType: PerformanceSnapshotSchema.eventType(),
-      content: .object(["schemaVersion": .integer(1)]),
-      createdAt: Date(timeIntervalSince1970: 1),
-      monotonicTimestampNanoseconds: anchor,
-      sessionEpoch: SessionEpoch(),
-      sequence: 1
-    )
-    let observation = try ViewerCommittedEventObservation(
-      runtimeLogicalID: runtimeLogicalID,
-      context: context,
-      nickname: nil,
-      envelope: envelope,
-      viewerWallMilliseconds: 1_000,
-      viewerMonotonicNanoseconds: anchor,
-      deterministicEventBytes: content.count,
-      canonicalContent: content,
-      initialDisposition: .buffered
-    )
-    XCTAssertEqual(window.offer(observation), .accepted)
+    let sessionEpoch = SessionEpoch()
+    var observations: [ViewerCommittedEventObservation] = []
+    for sample in 1...10 {
+      for reading in 0..<2 {
+        let sampleAnchor =
+          UInt64(sample) * 1_000_000_000 + UInt64(reading) * 10_000_000
+        let cpu = 8 + Double(sample) * 1.4 + Double(reading) * 4
+        let estimatedFPS = 52 + Double((sample * 3) % 8) + Double(reading) * 5
+        let content = Data(
+          """
+          {"schemaVersion":1,"sampledAt":"2026-07-14T01:02:\(String(format: "%02d", sample))Z","sampleIntervalMilliseconds":1000,"process":{"cpuPercent":\(cpu),"memoryFootprintBytes":\(1024 * sample + reading * 384)},"display":{"estimatedFramesPerSecond":\(estimatedFPS),"maximumFramesPerSecond":60},"device":{"batteryLevel":\(0.62 - Double(sample) * 0.008 - Double(reading) * 0.002),"batteryState":"unplugged","thermalState":"nominal","lowPowerModeEnabled":false},"transport":{"uplinkBytesPerSecond":\(20 * sample + reading * 30),"downlinkBytesPerSecond":\(15 * sample + reading * 20),"uplinkQueueDepth":\(sample % 3 + reading),"downlinkQueueDepth":\(sample % 2 + reading),"droppedEventCount":0},"unavailable":[]}
+          """.utf8
+        )
+        let sequence = UInt64((sample - 1) * 2 + reading + 1)
+        let envelope = try makeObservationEnvelope(
+          eventType: PerformanceSnapshotSchema.eventType(),
+          content: .object(["schemaVersion": .integer(1)]),
+          createdAt: Date(timeIntervalSince1970: Double(sample) + Double(reading) * 0.01),
+          monotonicTimestampNanoseconds: sampleAnchor,
+          sessionEpoch: sessionEpoch,
+          sequence: sequence
+        )
+        let observation = try ViewerCommittedEventObservation(
+          runtimeLogicalID: runtimeLogicalID,
+          context: context,
+          nickname: nil,
+          envelope: envelope,
+          viewerWallMilliseconds: Int64(sample * 1_000 + reading * 10),
+          viewerMonotonicNanoseconds: sampleAnchor,
+          deterministicEventBytes: content.count,
+          canonicalContent: content,
+          initialDisposition: .buffered
+        )
+        observations.append(observation)
+        XCTAssertEqual(window.offer(observation), .accepted)
+      }
+    }
     window.waitForProjectionForTesting()
 
     let controller = ViewerPerformanceDashboardController(
@@ -5036,7 +5216,7 @@ final class ViewerFoundationTests: XCTestCase {
     )
     let target = try ViewerPerformanceDashboardTarget.memoryCurrent(
       source: source,
-      deviceStartMonotonicNanoseconds: 0
+      deviceStartMonotonicNanoseconds: 1_000_000_000
     )
     _ = controller.replace(target: target, rangeKind: .currentSession)
     controller.requestRefresh()
@@ -5050,10 +5230,16 @@ final class ViewerFoundationTests: XCTestCase {
       controller.model.chartProjections.map(\.group),
       ViewerPerformanceChartGroupKind.allCases
     )
-    XCTAssertEqual(
-      controller.model.chartProjections.first { $0.group == .cpu }?.points(for: .cpuPercent).count,
-      1
+    let cpuPoints = try XCTUnwrap(
+      controller.model.chartProjections.first { $0.group == .cpu }?.points(for: .cpuPercent)
     )
+    XCTAssertLessThan(cpuPoints.count, observations.count)
+    XCTAssertTrue(
+      cpuPoints.contains {
+        $0.measurementCount > 1 && $0.minimum < $0.average && $0.average < $0.maximum
+      }
+    )
+    XCTAssertEqual(Set(cpuPoints.map(\.segmentStartBucketIndex)).count, 2)
     let performanceView = NSHostingView(
       rootView: ViewerPerformanceDashboardContent(
         model: controller.model,
@@ -5069,7 +5255,7 @@ final class ViewerFoundationTests: XCTestCase {
     let renderedData = try XCTUnwrap(renderedPNGData(of: performanceView))
     let renderedImage = try XCTUnwrap(NSImage(data: renderedData))
     let attachment = XCTAttachment(image: renderedImage)
-    attachment.name = "NearWire populated Performance chart"
+    attachment.name = "NearWire continuous Performance trends"
     attachment.lifetime = .keepAlways
     add(attachment)
     let bucketIndex = try XCTUnwrap(
@@ -5080,7 +5266,7 @@ final class ViewerFoundationTests: XCTestCase {
     let request = try XCTUnwrap(
       controller.rawEventRequest(bucketIndex: bucketIndex, metric: .cpuPercent)
     )
-    XCTAssertEqual(request.key, observation.key)
+    XCTAssertTrue(observations.contains { $0.key == request.key })
     await controller.sealAndWait().value
     XCTAssertTrue(controller.diagnostics.isSealed)
   }
@@ -8181,7 +8367,7 @@ final class ViewerFoundationTests: XCTestCase {
     file: StaticString = #filePath,
     line: UInt = #line
   ) async {
-    for _ in 0..<1_000 {
+    for _ in 0..<10_000 {
       if condition() { return }
       await Task.yield()
     }

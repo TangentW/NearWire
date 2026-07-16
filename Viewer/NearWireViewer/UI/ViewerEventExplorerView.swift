@@ -160,6 +160,8 @@ struct ViewerExplorerTimelineView: View {
   @State private var timelineViewportSize = CGSize.zero
   @State private var tailViewport = ViewerTimelineTailViewportState()
   @State private var tailScrollGeneration: UInt64 = 0
+  @State private var fallbackAppendState =
+    ViewerTimelineFallbackAppendState<ViewerExplorerEventIdentity>()
 
   init(explorer: ViewerEventExplorerController) {
     self.explorer = explorer
@@ -380,6 +382,7 @@ struct ViewerExplorerTimelineView: View {
             .id(ViewerTimelineScrollAnchor.tail)
             .listRowInsets(EdgeInsets())
             .listRowSeparator(.hidden)
+            .onDisappear { reportFallbackTailVisibility(false) }
             .background {
               GeometryReader { geometry in
                 Color.clear.preference(
@@ -398,14 +401,25 @@ struct ViewerExplorerTimelineView: View {
           }
         }
         .coordinateSpace(name: ViewerTimelineCoordinateSpace.name)
+        .modifier(
+          ViewerTimelineScrollGeometryModifier { previous, current in
+            handleScrollGeometryChange(
+              previous: previous,
+              current: current,
+              proxy: proxy
+            )
+          }
+        )
         .onAppear {
           tailViewport.mount()
+          mountFallbackAppendState(lastEventID: rows.last?.id)
           if presentation.autoFollow, !presentation.isPaused {
             scrollToTail(using: proxy)
           }
         }
         .onDisappear {
           tailViewport.unmount()
+          unmountFallbackAppendState()
           tailScrollGeneration &+= 1
           isApplyingTailScroll = false
         }
@@ -420,6 +434,8 @@ struct ViewerExplorerTimelineView: View {
         .onChange(of: rows.last?.id) { _ in
           if tailViewport.shouldFollowNewEvents, !presentation.isPaused {
             scrollToTail(using: proxy)
+          } else {
+            settleFallbackAppendState(lastEventID: rows.last?.id)
           }
         }
         .onChange(of: presentation.autoFollow) { isFollowing in
@@ -453,16 +469,51 @@ struct ViewerExplorerTimelineView: View {
       guard generation == tailScrollGeneration else { return }
       isApplyingTailScroll = false
       reportTailVisibility(true)
+      settleFallbackAppendState(lastEventID: presentation.rows.last?.id)
+    }
+  }
+
+  private func handleScrollGeometryChange(
+    previous: ViewerTimelineScrollGeometry,
+    current: ViewerTimelineScrollGeometry,
+    proxy: ScrollViewProxy
+  ) {
+    guard !isApplyingTailScroll,
+      let token = tailViewport.observe(previous: previous, current: current)
+    else { return }
+    publishTailVisibility(token)
+    if tailViewport.shouldFollowNewEvents, current.contentHeight > previous.contentHeight,
+      !current.isAtBottom
+    {
+      scrollToTail(using: proxy)
     }
   }
 
   private func reportMeasuredTailVisibility() {
-    guard !isApplyingTailScroll,
-      let token = tailViewport.observe(
+    if #available(macOS 15.0, *) { return }
+    guard !isApplyingTailScroll else { return }
+    let wasFollowing = tailViewport.shouldFollowNewEvents
+    guard var token = tailViewport.observe(
         tailFrame: tailFrame,
         viewportSize: timelineViewportSize
       )
     else { return }
+    token = preserveFallbackAppendFollowIfNeeded(
+      wasFollowing: wasFollowing,
+      reportedToken: token
+    )
+    publishTailVisibility(token)
+  }
+
+  private func reportFallbackTailVisibility(_ isVisible: Bool) {
+    if #available(macOS 15.0, *) { return }
+    guard !isApplyingTailScroll else { return }
+    let wasFollowing = tailViewport.shouldFollowNewEvents
+    guard var token = tailViewport.observe(isVisible: isVisible) else { return }
+    token = preserveFallbackAppendFollowIfNeeded(
+      wasFollowing: wasFollowing,
+      reportedToken: token
+    )
     publishTailVisibility(token)
   }
 
@@ -477,6 +528,35 @@ struct ViewerExplorerTimelineView: View {
       guard tailViewport.accepts(token) else { return }
       explorer.updateTimelineTailFollowing(tailViewport.isTailVisible)
     }
+  }
+
+  private func preserveFallbackAppendFollowIfNeeded(
+    wasFollowing: Bool,
+    reportedToken: UInt64
+  ) -> UInt64 {
+    guard !tailViewport.shouldFollowNewEvents,
+      fallbackAppendState.shouldPreserveFollow(
+        wasFollowing: wasFollowing,
+        currentLastEventID: presentation.rows.last?.id
+      ),
+      let restoredToken = tailViewport.observe(isVisible: true)
+    else { return reportedToken }
+    return restoredToken
+  }
+
+  private func mountFallbackAppendState(lastEventID: ViewerExplorerEventIdentity?) {
+    if #available(macOS 15.0, *) { return }
+    fallbackAppendState.mount(lastEventID: lastEventID)
+  }
+
+  private func settleFallbackAppendState(lastEventID: ViewerExplorerEventIdentity?) {
+    if #available(macOS 15.0, *) { return }
+    fallbackAppendState.settle(lastEventID: lastEventID)
+  }
+
+  private func unmountFallbackAppendState() {
+    if #available(macOS 15.0, *) { return }
+    fallbackAppendState.unmount()
   }
 
   private var workspaceOperationIsRunning: Bool {
@@ -699,8 +779,83 @@ struct ViewerTimelineTailViewportState: Equatable {
     return reportGeneration
   }
 
+  mutating func observe(
+    previous: ViewerTimelineScrollGeometry,
+    current: ViewerTimelineScrollGeometry
+  ) -> UInt64? {
+    guard isMounted else { return nil }
+    let movedUp = current.visibleMaxY < previous.visibleMaxY - current.tolerance
+    let contentGrew = current.contentHeight > previous.contentHeight + current.tolerance
+    if current.isAtBottom {
+      return observe(isVisible: true)
+    }
+    if isTailVisible, contentGrew, !movedUp {
+      return observe(isVisible: true)
+    }
+    return observe(isVisible: false)
+  }
+
   func accepts(_ token: UInt64) -> Bool {
     isMounted && reportGeneration == token
+  }
+}
+
+struct ViewerTimelineScrollGeometry: Equatable {
+  let visibleMaxY: CGFloat
+  let contentHeight: CGFloat
+  let tolerance: CGFloat
+
+  init(visibleMaxY: CGFloat, contentHeight: CGFloat, tolerance: CGFloat = 2) {
+    self.visibleMaxY = visibleMaxY
+    self.contentHeight = contentHeight
+    self.tolerance = tolerance
+  }
+
+  var isAtBottom: Bool {
+    contentHeight <= tolerance || visibleMaxY >= contentHeight - tolerance
+  }
+}
+
+struct ViewerTimelineFallbackAppendState<EventID: Equatable>: Equatable {
+  private(set) var settledLastEventID: EventID?
+
+  mutating func mount(lastEventID: EventID?) {
+    settledLastEventID = lastEventID
+  }
+
+  mutating func settle(lastEventID: EventID?) {
+    settledLastEventID = lastEventID
+  }
+
+  mutating func unmount() {
+    settledLastEventID = nil
+  }
+
+  func shouldPreserveFollow(
+    wasFollowing: Bool,
+    currentLastEventID: EventID?
+  ) -> Bool {
+    wasFollowing && settledLastEventID != currentLastEventID
+  }
+}
+
+private struct ViewerTimelineScrollGeometryModifier: ViewModifier {
+  let onChange: (ViewerTimelineScrollGeometry, ViewerTimelineScrollGeometry) -> Void
+
+  @ViewBuilder
+  func body(content: Content) -> some View {
+    if #available(macOS 15.0, *) {
+      content.onScrollGeometryChange(for: ViewerTimelineScrollGeometry.self) { geometry in
+        ViewerTimelineScrollGeometry(
+          visibleMaxY: geometry.visibleRect.maxY,
+          contentHeight: geometry.contentSize.height
+        )
+      } action: { previous, current in
+        onChange(previous, current)
+      }
+    } else {
+      content
+    }
   }
 }
 
