@@ -48,6 +48,7 @@ struct ViewerPerformanceProjectionPublication: Equatable, Sendable {
   let cacheKey: ViewerPerformanceCacheKey
   let result: ViewerPerformanceAggregationResult
   let cards: ViewerPerformanceCardEvaluation
+  let chartProjections: [ViewerPerformanceChartProjection]
   let coverage: ViewerPerformanceProjectionCoverage
   let freshnessReceipt: ViewerPerformanceFreshnessReceipt
   let decodedEventCount: UInt64
@@ -67,6 +68,7 @@ struct ViewerPerformanceProjectionPublication: Equatable, Sendable {
       cacheKey: cacheKey,
       result: result,
       cards: try cards.restatingNoRecentSample(),
+      chartProjections: chartProjections,
       coverage: coverage,
       freshnessReceipt: freshnessReceipt,
       decodedEventCount: decodedEventCount,
@@ -318,6 +320,7 @@ struct ViewerPerformanceProjectionSession: Sendable {
       ),
       result: result,
       cards: cards,
+      chartProjections: try ViewerPerformanceChartProjection.makeAll(buckets: result.buckets),
       coverage: coverage,
       freshnessReceipt: freshnessReceipt,
       decodedEventCount: reducer.decodedEventCount,

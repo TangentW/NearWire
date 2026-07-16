@@ -5,12 +5,13 @@ import Foundation
 enum ViewerLiveProjectionLimits {
   static let ingressCount = 64
   static let ingressBytes = 20 * 1_024 * 1_024
-  static let retainedCount = 512
   static let retainedBytes = 32 * 1_024 * 1_024
   static let maximumSessions = 16
   // Deterministic accounting reserve for bounded metadata and fixed entry fields. This is not a
   // claim about Swift heap usage; process heap high-water remains a diagnostic measurement.
   static let fixedEntryOverheadBytes = 32 * 1_024
+  static let maximumByteDerivedEventSlots = retainedBytes / fixedEntryOverheadBytes
+  static let maximumPendingEventKeys = maximumByteDerivedEventSlots + ingressCount
   static let refreshIntervalNanoseconds: UInt64 = 100_000_000
 
   static func accountedBytes(for observation: ViewerCommittedEventObservation) -> Int? {
@@ -151,9 +152,11 @@ private struct ViewerLiveWindowNode: Sendable {
 private struct ViewerLiveEventDeque: Sendable {
   private var slots = [ViewerLiveWindowNode?](
     repeating: nil,
-    count: ViewerLiveProjectionLimits.retainedCount
+    count: ViewerLiveProjectionLimits.maximumByteDerivedEventSlots
   )
-  private var freeSlots = Array((0..<ViewerLiveProjectionLimits.retainedCount).reversed())
+  private var freeSlots = Array(
+    (0..<ViewerLiveProjectionLimits.maximumByteDerivedEventSlots).reversed()
+  )
   private var indices: [ViewerEventJournalKey: Int] = [:]
   private var head: Int?
   private var tail: Int?
@@ -171,9 +174,7 @@ private struct ViewerLiveEventDeque: Sendable {
     accountedBytes: Int
   ) -> [ViewerLiveWindowNode] {
     var displaced: [ViewerLiveWindowNode] = []
-    while count >= ViewerLiveProjectionLimits.retainedCount
-      || accountedBytes > ViewerLiveProjectionLimits.retainedBytes - self.accountedBytes
-    {
+    while accountedBytes > ViewerLiveProjectionLimits.retainedBytes - self.accountedBytes {
       guard let removed = removeHead() else { break }
       displaced.append(removed)
     }
@@ -304,7 +305,7 @@ private struct ViewerLiveEventDeque: Sendable {
 private struct ViewerLiveConflictMarkers: Sendable {
   private var ring = [ViewerEventJournalKey?](
     repeating: nil,
-    count: ViewerLiveProjectionLimits.retainedCount
+    count: ViewerLiveProjectionLimits.maximumByteDerivedEventSlots
   )
   private var keys: Set<ViewerEventJournalKey> = []
   private var head = 0
@@ -347,7 +348,10 @@ private struct ViewerLiveConflictMarkers: Sendable {
   }
 
   mutating func removeAll() {
-    ring = Array(repeating: nil, count: ViewerLiveProjectionLimits.retainedCount)
+    ring = Array(
+      repeating: nil,
+      count: ViewerLiveProjectionLimits.maximumByteDerivedEventSlots
+    )
     keys.removeAll(keepingCapacity: false)
     head = 0
     tail = 0
@@ -479,7 +483,8 @@ final class ViewerLiveEventWindow: ViewerLiveObservationProviding, @unchecked Se
     } else if let existing = authority[observation.key] {
       if existing.header != header {
         if pendingConflictKeys.contains(observation.key)
-          || pendingConflictKeys.count < ViewerLiveProjectionLimits.retainedCount
+          || pendingConflictKeys.count
+            < ViewerLiveProjectionLimits.maximumPendingEventKeys
         {
           pendingConflictKeys.insert(observation.key)
         } else {
@@ -505,8 +510,7 @@ final class ViewerLiveEventWindow: ViewerLiveObservationProviding, @unchecked Se
         shouldSchedule = markDirtyLocked()
         result = .untracked
       }
-    } else if authority.count < ViewerLiveProjectionLimits.retainedCount
-      + ViewerLiveProjectionLimits.ingressCount,
+    } else if authority.count < ViewerLiveProjectionLimits.maximumPendingEventKeys,
       admitIngressLocked(
         ViewerLiveIngressEntry(
           kind: .newAuthority,
@@ -564,7 +568,8 @@ final class ViewerLiveEventWindow: ViewerLiveObservationProviding, @unchecked Se
     ingressLock.lock()
     if !cleared, authority[key] != nil {
       if pendingDispositions[key] != nil
-        || pendingDispositions.count < ViewerLiveProjectionLimits.retainedCount
+        || pendingDispositions.count
+          < ViewerLiveProjectionLimits.maximumPendingEventKeys
       {
         pendingDispositions[key] = disposition
       } else {
@@ -705,7 +710,7 @@ final class ViewerLiveEventWindow: ViewerLiveObservationProviding, @unchecked Se
     let sessionIDs = replacement.sessions.map(\.connectionID)
     guard replacement.sessions.count <= ViewerLiveProjectionLimits.maximumSessions,
       Set(sessionIDs).count == sessionIDs.count,
-      replacement.events.count <= ViewerLiveProjectionLimits.retainedCount,
+      replacement.events.count <= ViewerLiveProjectionLimits.maximumByteDerivedEventSlots,
       replacement.events.allSatisfy({
         $0.key.runtimeLogicalID == runtimeLogicalID && Set(sessionIDs).contains($0.key.connectionID)
       })

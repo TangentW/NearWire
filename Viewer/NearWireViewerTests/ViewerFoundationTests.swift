@@ -372,6 +372,24 @@ final class ViewerLocalizationTests: XCTestCase {
 }
 
 final class ViewerWorkspacePresentationTests: XCTestCase {
+  func testTimelineHidesNormalAdmissionProgressAndKeepsExceptionalDisposition() {
+    for disposition in [
+      ViewerEventDisposition.buffered,
+      .transportAdmitted,
+      .consumerAccepted,
+    ] {
+      XCTAssertNil(
+        ViewerExplorerTimelineDispositionPresentation.visibleDisposition(disposition.rawValue)
+      )
+    }
+    XCTAssertEqual(
+      ViewerExplorerTimelineDispositionPresentation.visibleDisposition(
+        ViewerEventDisposition.overflowDisplaced.rawValue
+      ),
+      ViewerEventDisposition.overflowDisplaced.rawValue
+    )
+  }
+
   @MainActor
   func testTimelineOnlyMutationDoesNotPublishInspectorPresentation() async {
     let runtimeLogicalID = UUID()
@@ -815,7 +833,7 @@ final class ViewerPerformancePresentationTests: XCTestCase {
 
     XCTAssertEqual(projections.map(\.group), ViewerPerformanceChartGroupKind.allCases)
     XCTAssertEqual(projections.flatMap(\.metrics), ViewerPerformanceNumericMetric.allCases)
-    XCTAssertEqual(projections.reduce(0) { $0 + $1.markCount }, 40)
+    XCTAssertEqual(projections.reduce(0) { $0 + $1.markCount }, 60)
     let cpu = try XCTUnwrap(projections.first { $0.group == .cpu })
     let first = try XCTUnwrap(cpu.point(metric: .cpuPercent, bucketIndex: 0, buckets: buckets))
     XCTAssertEqual(first.minimum, 1)
@@ -824,28 +842,47 @@ final class ViewerPerformancePresentationTests: XCTestCase {
     XCTAssertEqual(first.measurementCount, 2)
     XCTAssertEqual(first.segmentStartBucketIndex, 0)
     XCTAssertFalse(first.isDiscontinuous)
+    let second = try XCTUnwrap(
+      cpu.point(metric: .cpuPercent, bucketIndex: 1, buckets: buckets)
+    )
+    XCTAssertEqual(cpu.points(for: .cpuPercent), [first, second])
   }
 
-  func testChartProjectionStaysBelowExactGlobalMarkBoundAt512Buckets() throws {
-    let buckets = try chartBuckets(count: 512, samplesPerBucket: 1)
+  func testChartProjectionUsesPracticalDashboardBoundAndStaysBelowGlobalMarkLimit() throws {
+    let buckets = try chartBuckets(
+      count: ViewerPerformanceAggregationLimits.maximumDashboardBuckets,
+      samplesPerBucket: 1
+    )
     let projections = try ViewerPerformanceChartProjection.makeAll(buckets: buckets)
 
     XCTAssertEqual(projections.count, 6)
-    XCTAssertEqual(projections.map(\.markCount), [2_048, 1_024, 1_024, 1_024, 2_048, 3_072])
-    XCTAssertEqual(projections.reduce(0) { $0 + $1.markCount }, 10_240)
+    XCTAssertEqual(projections.map(\.markCount), [720, 360, 360, 360, 720, 1_080])
+    XCTAssertEqual(projections.reduce(0) { $0 + $1.markCount }, 3_600)
+    XCTAssertEqual(
+      try ViewerPerformanceAccounting.chartProjectionBytes(pointCount: 1_200),
+      ViewerPerformanceAggregationLimits.maximumChartProjectionBytes
+    )
     XCTAssertLessThanOrEqual(
       projections.reduce(0) { $0 + $1.markCount },
       ViewerPerformanceAggregationLimits.maximumTotalMarks
     )
-    XCTAssertEqual(
-      try ViewerPerformancePresentationBounds.maximumMarkCount(bucketCount: 512),
-      12_288
+    XCTAssertThrowsError(
+      try ViewerPerformanceChartProjection.makeAll(
+        buckets: chartBuckets(
+          count: ViewerPerformanceAggregationLimits.maximumDashboardBuckets + 1,
+          samplesPerBucket: 1
+        )
+      )
     )
   }
 
   func testChartAccessibilityUsesAtMost64DeterministicNonColorSummaries() throws {
-    var buckets = try chartBuckets(count: 512, samplesPerBucket: 2)
-    buckets[511].markDiscontinuous(.estimatedFramesPerSecond)
+    var buckets = try chartBuckets(
+      count: ViewerPerformanceAggregationLimits.maximumDashboardBuckets,
+      samplesPerBucket: 2
+    )
+    let finalIndex = buckets.count - 1
+    buckets[finalIndex].markDiscontinuous(.estimatedFramesPerSecond)
     let projection = try XCTUnwrap(
       ViewerPerformanceChartProjection.makeAll(buckets: buckets).first { $0.group == .display }
     )
@@ -853,20 +890,20 @@ final class ViewerPerformancePresentationTests: XCTestCase {
 
     XCTAssertEqual(indices.count, 64)
     XCTAssertEqual(indices.first, 0)
-    XCTAssertEqual(indices.last, 511)
+    XCTAssertEqual(indices.last, finalIndex)
     XCTAssertEqual(Set(indices).count, indices.count)
     XCTAssertEqual(
       ViewerPerformanceAccessibilityFormatting.chartLabel(projection),
-      "Frame Rate performance chart. Aggregated average lines and min–max envelopes. 512 buckets."
+      "Frame Rate performance chart. Aggregated average lines and min–max envelopes. 120 buckets."
     )
     let label = try XCTUnwrap(
       ViewerPerformanceAccessibilityFormatting.bucketLabel(
-        511,
+        finalIndex,
         projection: projection,
         buckets: buckets
       )
     )
-    XCTAssertTrue(label.contains("Aggregated bucket 512 of 512. Viewer time"))
+    XCTAssertTrue(label.contains("Aggregated bucket 120 of 120. Viewer time"))
     XCTAssertTrue(label.contains("Estimated Frame Rate, unit fps"))
     XCTAssertTrue(label.contains("minimum 3 fps, average 3.5 fps, maximum 4 fps, 2 samples"))
     XCTAssertTrue(label.contains("discontinuous"))
@@ -876,12 +913,25 @@ final class ViewerPerformancePresentationTests: XCTestCase {
     let point = try XCTUnwrap(
       projection.point(
         metric: .estimatedFramesPerSecond,
-        bucketIndex: 511,
+        bucketIndex: finalIndex,
         buckets: buckets
       )
     )
     XCTAssertEqual(String(reflecting: point), "ViewerPerformanceChartPoint(redacted)")
     XCTAssertEqual(String(reflecting: projection), "ViewerPerformanceChartProjection(redacted)")
+  }
+
+  func testSingleMeasuredBucketPreparesAnExplicitVisiblePoint() throws {
+    let buckets = try chartBuckets(count: 1, samplesPerBucket: 1)
+    let cpu = try XCTUnwrap(
+      ViewerPerformanceChartProjection.makeAll(buckets: buckets).first { $0.group == .cpu }
+    )
+
+    XCTAssertEqual(cpu.series.count, 1)
+    XCTAssertEqual(cpu.series[0].metric, .cpuPercent)
+    XCTAssertEqual(cpu.series[0].points.count, 1)
+    XCTAssertEqual(cpu.markCount, 3)
+    XCTAssertTrue(cpu.hasMeasurements)
   }
 
   func testKeyboardNavigationClampsBucketsAndCyclesMetricSeries() throws {
@@ -1097,6 +1147,18 @@ final class ViewerPerformancePresentationTests: XCTestCase {
 }
 
 final class ViewerPerformanceAggregationTests: XCTestCase {
+  func testDashboardRangeBoundsUseAtMost120AlignedBuckets() throws {
+    let bounds = try ViewerPerformanceRangeBounds(
+      lowerMonotonicNanoseconds: 0,
+      upperMonotonicNanoseconds: 1_199
+    )
+
+    XCTAssertEqual(bounds.bucketCount, ViewerPerformanceAggregationLimits.maximumDashboardBuckets)
+    XCTAssertEqual(bounds.bucketWidthNanoseconds, 10)
+    XCTAssertEqual(try bounds.bucketBounds(at: 0), 0...9)
+    XCTAssertEqual(try bounds.bucketBounds(at: 119), 1_190...1_199)
+  }
+
   func testNumericAccumulatorHandlesZeroOne512513And100000SamplesWithoutRawStorage() throws {
     let counts = [0, 1, 512, 513, 100_000]
     for count in counts {
@@ -4561,6 +4623,65 @@ final class ViewerFoundationTests: XCTestCase {
     XCTAssertEqual(controller.previewRawChunk?.index, 0)
   }
 
+  @MainActor
+  func testTimelinePublishesEveryByteValidRowBeyondLegacyCountCap() async throws {
+    let runtimeLogicalID = UUID()
+    let context = try makeObservationContext(
+      connectionID: UUID(),
+      displayName: "Count-cap regression"
+    )
+    let window = ViewerLiveEventWindow(
+      runtimeLogicalID: runtimeLogicalID,
+      refreshScheduler: ViewerLiveRefreshScheduler(
+        now: { 0 },
+        scheduleOnMain: { _, action in Task { @MainActor in action() } }
+      )
+    )
+    let controller = ViewerEventExplorerController(
+      inputs: ViewerRuntimeExplorerInputs(
+        runtimeLogicalID: runtimeLogicalID,
+        liveObservations: window
+      )
+    )
+    controller.start()
+    defer { _ = controller.sealAndClear() }
+
+    for sequence in 0..<UInt64(600) {
+      let observation = try ViewerCommittedEventObservation(
+        runtimeLogicalID: runtimeLogicalID,
+        context: context,
+        nickname: nil,
+        envelope: makeObservationEnvelope(
+          content: .integer(Int64(sequence)),
+          createdAt: Date(timeIntervalSince1970: Double(sequence)),
+          sessionEpoch: SessionEpoch(),
+          sequence: sequence
+        ),
+        viewerWallMilliseconds: Int64(sequence),
+        viewerMonotonicNanoseconds: sequence,
+        deterministicEventBytes: 1,
+        initialDisposition: .buffered
+      )
+      XCTAssertEqual(window.offer(observation), .accepted)
+      if sequence % UInt64(ViewerLiveProjectionLimits.ingressCount) == 63 {
+        window.waitForProjectionForTesting()
+      }
+    }
+    window.waitForProjectionForTesting()
+    await waitUntilExplorer { controller.timelineRows.count == 600 }
+
+    XCTAssertEqual(window.snapshot().events.count, 600)
+    XCTAssertEqual(window.snapshot().gaps.windowOverflowCount, 0)
+    guard case .memory(let firstKey)? = controller.timelineRows.first?.id,
+      case .memory(let lastKey)? = controller.timelineRows.last?.id
+    else { return XCTFail("Expected memory-backed Timeline rows") }
+    XCTAssertEqual(firstKey.wireSequence, 0)
+    XCTAssertEqual(lastKey.wireSequence, 599)
+
+    controller.updateTimelineTailFollowing(false)
+    XCTAssertFalse(controller.autoFollow)
+  }
+
   func testCommittedObservationConsumesPrecomputedCanonicalContent() throws {
     let runtimeLogicalID = UUID()
     let context = try makeObservationContext(
@@ -4648,22 +4769,38 @@ final class ViewerFoundationTests: XCTestCase {
     XCTAssertEqual(initialDiagnostics.maximumConcurrentDrainCount, 1)
     XCTAssertEqual(initialDiagnostics.snapshotPublicationCount, 1)
 
-    for sequence in UInt64(ViewerLiveProjectionLimits.ingressCount + 1)..<513 {
+    for sequence in UInt64(ViewerLiveProjectionLimits.ingressCount + 1)..<600 {
       XCTAssertEqual(try window.offer(observation(sequence: sequence)), .accepted)
       if sequence % 32 == 0 { window.waitForProjectionForTesting() }
     }
     window.waitForProjectionForTesting()
-    XCTAssertEqual(try window.offer(observation(sequence: 513)), .accepted)
+    XCTAssertEqual(try window.offer(observation(sequence: 600)), .accepted)
     window.waitForProjectionForTesting()
 
     snapshot = window.snapshot()
-    XCTAssertEqual(snapshot.events.count, ViewerLiveProjectionLimits.retainedCount)
-    XCTAssertEqual(snapshot.gaps.windowOverflowCount, 1)
-    XCTAssertEqual(window.lostHorizonCount, 2)
-    XCTAssertFalse(snapshot.events.contains { $0.observation.key.wireSequence == 0 })
+    XCTAssertEqual(snapshot.events.count, 600)
+    XCTAssertEqual(snapshot.gaps.windowOverflowCount, 0)
+    XCTAssertTrue(snapshot.events.contains { $0.observation.key.wireSequence == 0 })
+
+    let halfWindowEventBytes =
+      ViewerLiveProjectionLimits.retainedBytes / 2
+      - ViewerLiveProjectionLimits.fixedEntryOverheadBytes
+    for sequence in UInt64(601)...602 {
+      XCTAssertEqual(
+        try window.offer(observation(sequence: sequence, bytes: halfWindowEventBytes)),
+        .accepted
+      )
+      window.waitForProjectionForTesting()
+    }
+
+    snapshot = window.snapshot()
+    XCTAssertEqual(snapshot.events.count, 2)
+    XCTAssertEqual(snapshot.gaps.windowOverflowCount, 600)
+    XCTAssertEqual(window.lostHorizonCount, 601)
+    XCTAssertEqual(snapshot.accountedEventBytes, ViewerLiveProjectionLimits.retainedBytes)
 
     let latest = try XCTUnwrap(
-      snapshot.events.first { $0.observation.key.wireSequence == 513 }
+      snapshot.events.first { $0.observation.key.wireSequence == 602 }
     ).observation
     window.laterDisposition(key: latest.key, disposition: .consumerAccepted)
     window.dropsChanged(
@@ -4729,6 +4866,42 @@ final class ViewerFoundationTests: XCTestCase {
     XCTAssertTrue(fixture.window.snapshot().events.isEmpty)
     XCTAssertEqual(fixture.window.snapshot().sessions.count, 1)
     XCTAssertEqual(fixture.window.snapshot().sessions.first?.isImported, false)
+  }
+
+  func testMemorySessionImportAcceptsMoreThanLegacyCountWithinByteBudget() async throws {
+    let fixture = try makeMemorySessionFixture()
+    let directory = try makeTemporaryTestDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let exportURL = directory.appendingPathComponent("source.json")
+    let expandedURL = directory.appendingPathComponent("expanded.json")
+
+    let sourceTransfer = ViewerMemorySessionTransferService(liveWindow: fixture.window)
+    let ticket = try await prepareMemorySessionExport(using: sourceTransfer)
+    try await executeMemorySessionExport(ticket, using: sourceTransfer, to: exportURL)
+
+    var document = try XCTUnwrap(
+      JSONSerialization.jsonObject(with: Data(contentsOf: exportURL)) as? [String: Any]
+    )
+    let originalEvent = try XCTUnwrap((document["events"] as? [[String: Any]])?.first)
+    document["events"] = (0..<600).map { sequence in
+      var event = originalEvent
+      event["wireSequence"] = sequence
+      event["viewerMonotonicNanoseconds"] = sequence
+      return event
+    }
+    try JSONSerialization.data(withJSONObject: document, options: [.sortedKeys])
+      .write(to: expandedURL, options: .atomic)
+
+    let importedWindow = ViewerLiveEventWindow(runtimeLogicalID: UUID())
+    let importedTransfer = ViewerMemorySessionTransferService(liveWindow: importedWindow)
+    try await importMemorySession(using: importedTransfer, from: expandedURL).get()
+    importedWindow.waitForProjectionForTesting()
+
+    let snapshot = importedWindow.snapshot()
+    XCTAssertEqual(snapshot.events.count, 600)
+    XCTAssertEqual(snapshot.events.first?.observation.key.wireSequence, 0)
+    XCTAssertEqual(snapshot.events.last?.observation.key.wireSequence, 599)
+    XCTAssertLessThan(snapshot.accountedEventBytes, ViewerLiveProjectionLimits.retainedBytes)
   }
 
   func testMemorySessionImportRejectsInvalidAndOverCapacityFilesWithoutReplacement()
@@ -4873,6 +5046,32 @@ final class ViewerFoundationTests: XCTestCase {
     }
 
     XCTAssertFalse(controller.model.buckets.isEmpty)
+    XCTAssertEqual(
+      controller.model.chartProjections.map(\.group),
+      ViewerPerformanceChartGroupKind.allCases
+    )
+    XCTAssertEqual(
+      controller.model.chartProjections.first { $0.group == .cpu }?.points(for: .cpuPercent).count,
+      1
+    )
+    let performanceView = NSHostingView(
+      rootView: ViewerPerformanceDashboardContent(
+        model: controller.model,
+        guidance: nil,
+        rangeKind: .currentSession
+      )
+      .environment(\.locale, Locale(identifier: "en"))
+      .frame(width: 1_000, height: 800)
+    )
+    performanceView.frame = NSRect(x: 0, y: 0, width: 1_000, height: 800)
+    performanceView.layoutSubtreeIfNeeded()
+    performanceView.displayIfNeeded()
+    let renderedData = try XCTUnwrap(renderedPNGData(of: performanceView))
+    let renderedImage = try XCTUnwrap(NSImage(data: renderedData))
+    let attachment = XCTAttachment(image: renderedImage)
+    attachment.name = "NearWire populated Performance chart"
+    attachment.lifetime = .keepAlways
+    add(attachment)
     let bucketIndex = try XCTUnwrap(
       controller.model.buckets.firstIndex {
         $0.numeric.accumulator(for: .cpuPercent).representative != nil
@@ -5065,11 +5264,14 @@ final class ViewerFoundationTests: XCTestCase {
       )
     }
 
-    for sequence in 0..<UInt64(ViewerLiveProjectionLimits.retainedCount) {
+    let maximumMinimumSizedEvents =
+      ViewerLiveProjectionLimits.retainedBytes
+      / (ViewerLiveProjectionLimits.fixedEntryOverheadBytes + 1)
+    for sequence in 0..<UInt64(maximumMinimumSizedEvents) {
       XCTAssertEqual(try window.offer(observation(sequence: sequence)), .accepted)
       window.waitForProjectionForTesting()
     }
-    XCTAssertEqual(window.retainedObservationCount, ViewerLiveProjectionLimits.retainedCount)
+    XCTAssertEqual(window.retainedObservationCount, maximumMinimumSizedEvents)
     XCTAssertEqual(refreshScheduler.pendingCount, 1)
     let baseline = window.diagnosticsForTesting()
 
@@ -5077,7 +5279,7 @@ final class ViewerFoundationTests: XCTestCase {
     projectionQueue.async { gate.run() }
     XCTAssertEqual(gate.waitUntilEntered(), .success)
 
-    let repeated = try observation(sequence: UInt64(ViewerLiveProjectionLimits.retainedCount))
+    let repeated = try observation(sequence: UInt64(maximumMinimumSizedEvents))
     let baselineFootprint = currentFoundationProcessPhysicalFootprintBytes()
     let callbackStart = DispatchTime.now().uptimeNanoseconds
     var acceptedCount = 0
@@ -5120,7 +5322,7 @@ final class ViewerFoundationTests: XCTestCase {
     XCTAssertEqual(refreshScheduler.pendingCount, 1)
 
     let snapshot = window.snapshot()
-    XCTAssertEqual(snapshot.events.count, ViewerLiveProjectionLimits.retainedCount)
+    XCTAssertEqual(snapshot.events.count, maximumMinimumSizedEvents)
     XCTAssertEqual(
       snapshot.gaps.ingressOverflowCount,
       UInt64(100_000 - ViewerLiveProjectionLimits.ingressCount)
@@ -5128,7 +5330,7 @@ final class ViewerFoundationTests: XCTestCase {
     XCTAssertEqual(snapshot.gaps.windowOverflowCount, 1)
     XCTAssertEqual(
       snapshot.accountedEventBytes,
-      ViewerLiveProjectionLimits.retainedCount
+      maximumMinimumSizedEvents
         * (ViewerLiveProjectionLimits.fixedEntryOverheadBytes + 1)
     )
 
@@ -5149,6 +5351,96 @@ final class ViewerFoundationTests: XCTestCase {
     await window.runtimeEnded()
     XCTAssertTrue(window.isCleared)
     XCTAssertTrue(window.snapshot().events.isEmpty)
+  }
+
+  func testPendingMetadataCoversRetainedWindowPlusBlockedIngress() throws {
+    let runtimeLogicalID = UUID()
+    let context = try makeObservationContext(
+      connectionID: UUID(),
+      displayName: "Pending metadata capacity"
+    )
+    let epoch = SessionEpoch()
+    let projectionQueue = DispatchQueue(
+      label: "ViewerFoundationTests.pending-metadata-capacity"
+    )
+    let window = ViewerLiveEventWindow(
+      runtimeLogicalID: runtimeLogicalID,
+      projectionQueue: projectionQueue
+    )
+
+    func observation(sequence: UInt64, conflicting: Bool = false) throws
+      -> ViewerCommittedEventObservation
+    {
+      try ViewerCommittedEventObservation(
+        runtimeLogicalID: runtimeLogicalID,
+        context: context,
+        nickname: nil,
+        envelope: makeObservationEnvelope(
+          content: .object([
+            "sequence": .integer(Int64(sequence)),
+            "conflicting": .bool(conflicting),
+          ]),
+          createdAt: Date(timeIntervalSince1970: Double(sequence)),
+          sessionEpoch: epoch,
+          sequence: sequence
+        ),
+        viewerWallMilliseconds: Int64(sequence),
+        viewerMonotonicNanoseconds: sequence,
+        deterministicEventBytes: 0,
+        initialDisposition: .buffered
+      )
+    }
+
+    for sequence in 0..<UInt64(ViewerLiveProjectionLimits.maximumByteDerivedEventSlots) {
+      XCTAssertEqual(window.offer(try observation(sequence: sequence)), .accepted)
+      if sequence % UInt64(ViewerLiveProjectionLimits.ingressCount) == 63 {
+        window.waitForProjectionForTesting()
+      }
+    }
+    window.waitForProjectionForTesting()
+    XCTAssertEqual(
+      window.snapshot().events.count,
+      ViewerLiveProjectionLimits.maximumByteDerivedEventSlots
+    )
+
+    let gate = BlockingViewerOperationGate()
+    projectionQueue.async { gate.run() }
+    XCTAssertEqual(gate.waitUntilEntered(), .success)
+
+    for sequence in 0..<UInt64(ViewerLiveProjectionLimits.maximumByteDerivedEventSlots) {
+      let original = try observation(sequence: sequence)
+      window.laterDisposition(key: original.key, disposition: .consumerAccepted)
+      XCTAssertEqual(
+        window.offer(try observation(sequence: sequence, conflicting: true)),
+        .presentationConflict
+      )
+    }
+
+    let firstPendingSequence = UInt64(ViewerLiveProjectionLimits.maximumByteDerivedEventSlots)
+    let pendingEnd = firstPendingSequence + UInt64(ViewerLiveProjectionLimits.ingressCount)
+    for sequence in firstPendingSequence..<pendingEnd {
+      let original = try observation(sequence: sequence)
+      XCTAssertEqual(window.offer(original), .accepted)
+      window.laterDisposition(key: original.key, disposition: .consumerAccepted)
+      XCTAssertEqual(
+        window.offer(try observation(sequence: sequence, conflicting: true)),
+        .presentationConflict
+      )
+    }
+
+    gate.release()
+    window.waitForProjectionForTesting()
+
+    let eventsBySequence = Dictionary(
+      uniqueKeysWithValues: window.snapshot().events.map {
+        ($0.observation.key.wireSequence, $0)
+      }
+    )
+    for sequence in firstPendingSequence..<pendingEnd {
+      let event = try XCTUnwrap(eventsBySequence[sequence])
+      XCTAssertEqual(event.laterDisposition, .consumerAccepted)
+      XCTAssertTrue(event.hasPresentationConflict)
+    }
   }
 
   func testLiveIngressAdmitsOneMaximumEventAndRejectsTheTwentyMiBOverflow() throws {
@@ -5923,7 +6215,7 @@ final class ViewerFoundationTests: XCTestCase {
     window.waitForProjectionForTesting()
 
     let churnCount =
-      ViewerLiveProjectionLimits.retainedCount
+      ViewerLiveProjectionLimits.maximumByteDerivedEventSlots
       + ViewerLiveProjectionLimits.ingressCount + 24
     for generation in 1...churnCount {
       let projectionEntered = DispatchSemaphore(value: 0)
@@ -6264,7 +6556,10 @@ final class ViewerFoundationTests: XCTestCase {
     let oversized = ViewerLiveProjectionSnapshot(
       runtimeLogicalID: runtimeLogicalID,
       generation: 2,
-      events: Array(repeating: event, count: ViewerLiveProjectionLimits.retainedCount + 1),
+      events: Array(
+        repeating: event,
+        count: ViewerLiveProjectionLimits.maximumByteDerivedEventSlots + 1
+      ),
       sessions: [],
       gaps: snapshot.gaps,
       accountedEventBytes: snapshot.accountedEventBytes
@@ -6302,13 +6597,15 @@ final class ViewerFoundationTests: XCTestCase {
       hasDrop: false,
       sessionEnded: false
     )
+    let maximumPredicateEventCount =
+      ViewerLiveEventEvaluator.maximumPredicateChecks / 32
     let maximumSnapshot = ViewerLiveProjectionSnapshot(
       runtimeLogicalID: runtimeLogicalID,
       generation: 3,
-      events: Array(repeating: deepEvent, count: ViewerLiveProjectionLimits.retainedCount),
+      events: Array(repeating: deepEvent, count: maximumPredicateEventCount),
       sessions: [],
       gaps: snapshot.gaps,
-      accountedEventBytes: ViewerLiveProjectionLimits.retainedCount
+      accountedEventBytes: maximumPredicateEventCount
         * (ViewerLiveProjectionLimits.fixedEntryOverheadBytes + 1)
     )
     let maximumPath = "$" + Array(repeating: ".a", count: 16).joined()
@@ -6321,7 +6618,7 @@ final class ViewerFoundationTests: XCTestCase {
         nowNanoseconds: { 0 }
       ).evaluate(snapshot: maximumSnapshot, request: maximumRequest)
     else { return XCTFail("Expected the exact maximum predicate shape to complete") }
-    XCTAssertEqual(maximumOutput.matchedKeys.count, ViewerLiveProjectionLimits.retainedCount)
+    XCTAssertEqual(maximumOutput.matchedKeys.count, maximumPredicateEventCount)
     XCTAssertEqual(maximumOutput.predicateCheckCount, 16_384)
     XCTAssertEqual(maximumOutput.jsonNodeVisitCount, 512 * 32 * 16)
     XCTAssertLessThanOrEqual(

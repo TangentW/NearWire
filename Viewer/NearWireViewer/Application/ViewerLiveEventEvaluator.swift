@@ -278,7 +278,7 @@ struct ViewerLiveEventEvaluator: Sendable {
     request: ViewerLiveEvaluationRequest,
     isCancelled: @escaping @Sendable () -> Bool = { false }
   ) -> ViewerLiveEvaluationResult {
-    guard snapshot.events.count <= ViewerLiveProjectionLimits.retainedCount,
+    guard snapshot.events.count <= ViewerLiveProjectionLimits.maximumByteDerivedEventSlots,
       snapshot.accountedEventBytes <= ViewerLiveProjectionLimits.retainedBytes,
       snapshot.sessions.count <= ViewerLiveProjectionLimits.maximumSessions
     else { return .refineRequired }

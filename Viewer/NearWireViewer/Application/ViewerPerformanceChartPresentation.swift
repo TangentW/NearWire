@@ -14,21 +14,29 @@ struct ViewerPerformanceChartPoint: Equatable, Sendable {
   let isDiscontinuous: Bool
 }
 
+struct ViewerPerformanceChartSeries: Identifiable, Equatable, Sendable {
+  let metric: ViewerPerformanceNumericMetric
+  let points: [ViewerPerformanceChartPoint]
+
+  var id: ViewerPerformanceNumericMetric { metric }
+}
+
 struct ViewerPerformanceChartProjection: Identifiable, Equatable, Sendable {
   let group: ViewerPerformanceChartGroupKind
-  let metrics: [ViewerPerformanceNumericMetric]
+  let series: [ViewerPerformanceChartSeries]
   let bucketCount: Int
   let lowerMonotonicNanoseconds: Int64?
   let upperMonotonicNanoseconds: Int64?
   let markCount: Int
 
   var id: ViewerPerformanceChartGroupKind { group }
+  var metrics: [ViewerPerformanceNumericMetric] { series.map(\.metric) }
   var hasMeasurements: Bool { markCount > 0 }
 
   static func makeAll(
     buckets: [ViewerPerformanceBucket]
   ) throws -> [ViewerPerformanceChartProjection] {
-    guard buckets.count <= ViewerPerformanceAggregationLimits.maximumBuckets,
+    guard buckets.count <= ViewerPerformanceAggregationLimits.maximumDashboardBuckets,
       buckets.enumerated().allSatisfy({ $0.offset == $0.element.index })
     else { throw ViewerPerformanceFailure.limitExceeded }
 
@@ -43,18 +51,55 @@ struct ViewerPerformanceChartProjection: Identifiable, Equatable, Sendable {
     var projections: [ViewerPerformanceChartProjection] = []
     projections.reserveCapacity(groups.count)
     for group in groups {
-      var measuredBucketCount = 0
+      var preparedSeries: [ViewerPerformanceChartSeries] = []
+      preparedSeries.reserveCapacity(group.metrics.count)
       for metric in group.metrics {
+        var points: [ViewerPerformanceChartPoint] = []
+        points.reserveCapacity(buckets.count)
+        var segmentStartBucketIndex: Int?
+        var previousMeasuredBucketIndex: Int?
+        var previousWasDiscontinuous = false
         for bucket in buckets {
           let accumulator = bucket.numeric.accumulator(for: metric)
-          guard accumulator.measurementCount > 0 else { continue }
+          guard accumulator.measurementCount > 0 else {
+            segmentStartBucketIndex = nil
+            previousMeasuredBucketIndex = nil
+            previousWasDiscontinuous = false
+            continue
+          }
           try validate(accumulator)
-          measuredBucketCount += 1
+          if accumulator.isDiscontinuous || previousWasDiscontinuous
+            || previousMeasuredBucketIndex != bucket.index - 1
+          {
+            segmentStartBucketIndex = bucket.index
+          }
+          guard let segmentStartBucketIndex, let minimum = accumulator.minimum,
+            let average = accumulator.average, let maximum = accumulator.maximum
+          else { throw ViewerPerformanceFailure.invalidCarrier }
+          points.append(
+            ViewerPerformanceChartPoint(
+              metric: metric,
+              bucketIndex: bucket.index,
+              segmentStartBucketIndex: segmentStartBucketIndex,
+              lowerMonotonicNanoseconds: bucket.lowerMonotonicNanoseconds,
+              centerMonotonicNanoseconds: bucket.centerMonotonicNanoseconds,
+              upperMonotonicNanoseconds: bucket.upperMonotonicNanoseconds,
+              minimum: minimum,
+              average: average,
+              maximum: maximum,
+              measurementCount: accumulator.measurementCount,
+              isDiscontinuous: accumulator.isDiscontinuous
+            )
+          )
+          previousMeasuredBucketIndex = bucket.index
+          previousWasDiscontinuous = accumulator.isDiscontinuous
         }
+        preparedSeries.append(ViewerPerformanceChartSeries(metric: metric, points: points))
       }
+      let measuredBucketCount = preparedSeries.reduce(0) { $0 + $1.points.count }
       let (markCount, multiplicationOverflow) =
         measuredBucketCount
-        .multipliedReportingOverflow(by: 2)
+        .multipliedReportingOverflow(by: 3)
       let (nextMarkCount, additionOverflow) = totalMarkCount.addingReportingOverflow(markCount)
       guard !multiplicationOverflow, !additionOverflow,
         nextMarkCount <= ViewerPerformanceAggregationLimits.maximumTotalMarks
@@ -63,7 +108,7 @@ struct ViewerPerformanceChartProjection: Identifiable, Equatable, Sendable {
       projections.append(
         ViewerPerformanceChartProjection(
           group: group.id,
-          metrics: group.metrics,
+          series: preparedSeries,
           bucketCount: buckets.count,
           lowerMonotonicNanoseconds: buckets.first?.lowerMonotonicNanoseconds,
           upperMonotonicNanoseconds: buckets.last?.upperMonotonicNanoseconds,
@@ -71,6 +116,10 @@ struct ViewerPerformanceChartProjection: Identifiable, Equatable, Sendable {
         )
       )
     }
+    let pointCount = projections.reduce(0) { partialResult, projection in
+      partialResult + projection.series.reduce(0) { $0 + $1.points.count }
+    }
+    _ = try ViewerPerformanceAccounting.chartProjectionBytes(pointCount: pointCount)
     return projections
   }
 
@@ -82,49 +131,11 @@ struct ViewerPerformanceChartProjection: Identifiable, Equatable, Sendable {
     guard metrics.contains(metric), buckets.count == bucketCount,
       buckets.indices.contains(bucketIndex), buckets[bucketIndex].index == bucketIndex
     else { return nil }
-    let bucket = buckets[bucketIndex]
-    let accumulator = bucket.numeric.accumulator(for: metric)
-    guard accumulator.measurementCount > 0,
-      let minimum = accumulator.minimum,
-      let average = accumulator.average,
-      let maximum = accumulator.maximum
-    else { return nil }
-    return ViewerPerformanceChartPoint(
-      metric: metric,
-      bucketIndex: bucketIndex,
-      segmentStartBucketIndex: segmentStartBucketIndex(
-        metric: metric,
-        bucketIndex: bucketIndex,
-        buckets: buckets
-      ),
-      lowerMonotonicNanoseconds: bucket.lowerMonotonicNanoseconds,
-      centerMonotonicNanoseconds: bucket.centerMonotonicNanoseconds,
-      upperMonotonicNanoseconds: bucket.upperMonotonicNanoseconds,
-      minimum: minimum,
-      average: average,
-      maximum: maximum,
-      measurementCount: accumulator.measurementCount,
-      isDiscontinuous: accumulator.isDiscontinuous
-    )
+    return points(for: metric).first { $0.bucketIndex == bucketIndex }
   }
 
-  private func segmentStartBucketIndex(
-    metric: ViewerPerformanceNumericMetric,
-    bucketIndex: Int,
-    buckets: [ViewerPerformanceBucket]
-  ) -> Int {
-    let selected = buckets[bucketIndex].numeric.accumulator(for: metric)
-    guard !selected.isDiscontinuous else { return bucketIndex }
-    var start = bucketIndex
-    while start > 0 {
-      let current = buckets[start].numeric.accumulator(for: metric)
-      let previous = buckets[start - 1].numeric.accumulator(for: metric)
-      guard current.measurementCount > 0, previous.measurementCount > 0,
-        !current.isDiscontinuous, !previous.isDiscontinuous
-      else { break }
-      start -= 1
-    }
-    return start
+  func points(for metric: ViewerPerformanceNumericMetric) -> [ViewerPerformanceChartPoint] {
+    series.first { $0.metric == metric }?.points ?? []
   }
 
   private static func validate(

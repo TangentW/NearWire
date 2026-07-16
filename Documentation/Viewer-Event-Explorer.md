@@ -45,9 +45,11 @@ this lifetime once at the Session level rather than repeating an `In memory` bad
 The normal `consumerAccepted` pipeline state is likewise omitted from Timeline rows; Event detail
 can still expose it as technical metadata. Closing the process clears received Session content.
 
-The memory window retains at most 512 Events, 32 MiB of accounted Event data, and 16 Device-session
-metadata lanes. Older content can be evicted as newer Events arrive. Export contains only the
-snapshot still retained at the moment the operator starts the export.
+The memory window retains at most 32 MiB of accounted Event data and 16 Device-session metadata
+lanes. It has no independent fixed Event-count or Timeline row limit, so small Events can remain
+visible beyond the former 512-row ceiling. Older content is evicted only when the byte budget is
+needed by newer Events. Export contains only the snapshot still retained at the moment the
+operator starts the export.
 
 ## Time and ordering
 
@@ -120,8 +122,9 @@ signatures. Equivalent high-frequency snapshots are coalesced, data-only row cha
 animation disabled, and row identities remain stable. Selecting a tab or toggling a panel publishes
 layout state immediately. An Event arrival does not rebuild unrelated root regions.
 
-The Timeline is derived from the 512-Event memory window and bounded diagnostic markers. An evicted
-selection is cleared; an unrelated row is never selected in its place.
+The Timeline is derived from the complete byte-bounded memory window and bounded diagnostic
+markers; it does not apply another row-count suffix. An evicted selection is cleared, and an
+unrelated row is never selected in its place.
 
 Each Timeline row places Event type, exceptional status badges, and Viewer receive time on one
 compact top line. A content summary derived from at most 256 UTF-8 bytes appears below it, wraps to

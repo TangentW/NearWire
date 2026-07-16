@@ -587,8 +587,7 @@ struct ViewerExplorerTimelineRowView: View {
   }
 
   private var visibleDisposition: String? {
-    guard row.disposition != ViewerEventDisposition.consumerAccepted.rawValue else { return nil }
-    return row.disposition
+    ViewerExplorerTimelineDispositionPresentation.visibleDisposition(row.disposition)
   }
 
   private var visibleStatusCount: Int {
@@ -647,6 +646,18 @@ struct ViewerExplorerTimelineRowView: View {
       .padding(.horizontal, 5)
       .padding(.vertical, 2)
       .background(color.opacity(0.1), in: Capsule())
+  }
+}
+
+enum ViewerExplorerTimelineDispositionPresentation {
+  static func visibleDisposition(_ value: String?) -> String? {
+    guard let value else { return nil }
+    switch ViewerEventDisposition(rawValue: value) {
+    case .buffered, .transportAdmitted, .consumerAccepted:
+      return nil
+    case .expired, .overflowDisplaced, .sessionEnded, .none:
+      return value
+    }
   }
 }
 

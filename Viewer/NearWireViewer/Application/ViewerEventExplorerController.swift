@@ -951,7 +951,7 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
         event -> ViewerExplorerMemoryEventRow? in
         matched.contains(event.observation.key) ? ViewerExplorerMemoryEventRow(event) : nil
       }
-      rows = Array(successor.suffix(ViewerExplorerLimits.maximumEventRows))
+      rows = successor
       evaluationState = .complete(output.transientExclusion)
       memoryGapLane = ViewerExplorerMemoryGapLane(
         snapshotGeneration: delivery.snapshot.generation,

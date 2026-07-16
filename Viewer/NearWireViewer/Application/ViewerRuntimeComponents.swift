@@ -508,7 +508,7 @@ final class ViewerMemorySessionTransferService: ViewerWorkspaceSessionControllin
     var accountedBytes = 0
     try document.forEachEvent { imported in
       try cancellation.check()
-      guard observations.count < ViewerLiveProjectionLimits.retainedCount,
+      guard observations.count < ViewerLiveProjectionLimits.maximumByteDerivedEventSlots,
         let reference = references[imported.deviceReferenceKey]
       else { throw ViewerSessionTransferError.capacityExceeded }
       let prepared = try Self.prepareImportedEvent(imported)

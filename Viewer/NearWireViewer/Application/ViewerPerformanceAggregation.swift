@@ -3,6 +3,9 @@ import Foundation
 
 enum ViewerPerformanceAggregationLimits {
   static let maximumBuckets = 512
+  static let maximumDashboardBuckets = 120
+  static let maximumChartPoints = 1_200
+  static let maximumChartProjectionBytes = 157_696
   static let maximumDetailedGaps = 128
   static let maximumInvalidDetails = 128
   static let maximumCharts = 6
@@ -25,6 +28,8 @@ enum ViewerPerformanceAccounting {
   static let deliveryWrapperBytes = 256
   static let tooltipBytes = 2_048
   static let crosshairBytes = 64
+  static let chartProjectionBaseBytes = 4_096
+  static let chartPointBytes = 128
 
   static let deterministicPeakBytes =
     ViewerPerformanceAggregationLimits.maximumLedgerBytes
@@ -50,6 +55,17 @@ enum ViewerPerformanceAccounting {
       try checkedMultiply(invalidDetailCount, invalidDetailBytes),
       try checkedMultiply(availabilityCount, availabilityEntryBytes),
     ])
+  }
+
+  static func chartProjectionBytes(pointCount: Int) throws -> Int {
+    guard (0...ViewerPerformanceAggregationLimits.maximumChartPoints).contains(pointCount)
+    else { throw ViewerPerformanceFailure.limitExceeded }
+    let points = try checkedMultiply(pointCount, chartPointBytes)
+    let bytes = try checkedSum([chartProjectionBaseBytes, points])
+    guard bytes <= ViewerPerformanceAggregationLimits.maximumChartProjectionBytes else {
+      throw ViewerPerformanceFailure.limitExceeded
+    }
+    return bytes
   }
 
   static func activeReducerBytes(
@@ -868,14 +884,14 @@ struct ViewerPerformanceRangeBounds: Equatable, Hashable, Sendable {
     let lower = UInt64(lowerMonotonicNanoseconds)
     let upper = UInt64(upperMonotonicNanoseconds)
     let inclusiveSpanNanoseconds = upper - lower + 1
-    let bucketLimit = UInt64(ViewerPerformanceAggregationLimits.maximumBuckets)
+    let bucketLimit = UInt64(ViewerPerformanceAggregationLimits.maximumDashboardBuckets)
     let bucketWidthNanoseconds = Self.ceilingDivision(
       inclusiveSpanNanoseconds,
       by: bucketLimit
     )
     let count = Self.ceilingDivision(inclusiveSpanNanoseconds, by: bucketWidthNanoseconds)
     guard let bucketCount = Int(exactly: count),
-      (1...ViewerPerformanceAggregationLimits.maximumBuckets).contains(bucketCount)
+      (1...ViewerPerformanceAggregationLimits.maximumDashboardBuckets).contains(bucketCount)
     else { throw ViewerPerformanceFailure.limitExceeded }
     self.lowerMonotonicNanoseconds = lowerMonotonicNanoseconds
     self.upperMonotonicNanoseconds = upperMonotonicNanoseconds

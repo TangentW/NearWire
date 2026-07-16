@@ -126,6 +126,9 @@ final class ViewerPerformanceDashboardModel: ObservableObject, CustomReflectable
   var coverage: ViewerPerformanceProjectionCoverage? { publication?.coverage }
   var cards: ViewerPerformanceCardEvaluation? { publication?.cards }
   var buckets: [ViewerPerformanceBucket] { publication?.result.buckets ?? [] }
+  var chartProjections: [ViewerPerformanceChartProjection] {
+    publication?.chartProjections ?? []
+  }
   var gaps: [ViewerPerformanceGapCarrier] { publication?.result.gaps ?? [] }
   var invalidSnapshots: [ViewerPerformanceInvalidDetail] {
     publication?.result.invalidSnapshots ?? []
@@ -236,6 +239,7 @@ final class ViewerPerformanceDashboardModel: ObservableObject, CustomReflectable
       cacheKey: publication.cacheKey,
       result: publication.result,
       cards: restated,
+      chartProjections: publication.chartProjections,
       coverage: publication.coverage,
       freshnessReceipt: publication.freshnessReceipt,
       decodedEventCount: publication.decodedEventCount,
@@ -369,7 +373,11 @@ final class ViewerPerformanceDashboardModel: ObservableObject, CustomReflectable
       let last = publication.result.buckets.last,
       first.lowerMonotonicNanoseconds == publication.cacheKey.lowerMonotonicNanoseconds,
       last.upperMonotonicNanoseconds == publication.cacheKey.upperMonotonicNanoseconds,
-      bucketsAreContiguous(publication.result.buckets)
+      bucketsAreContiguous(publication.result.buckets),
+      publication.chartProjections.map(\.group) == ViewerPerformanceChartGroupKind.allCases,
+      publication.chartProjections.allSatisfy({
+        $0.bucketCount == publication.result.buckets.count
+      })
     else { return false }
     return true
   }

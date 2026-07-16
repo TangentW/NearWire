@@ -24,5 +24,4 @@ enum ViewerExplorerTraversalState: Equatable, Sendable {
 
 enum ViewerExplorerLimits {
   static let maximumSelectedDevices = 16
-  static let maximumEventRows = ViewerLiveProjectionLimits.retainedCount
 }

@@ -1,8 +1,5 @@
-# viewer-memory-session Specification
+## MODIFIED Requirements
 
-## Purpose
-Define the Viewer's single bounded process-lifetime Session, explicit Clear boundary, and bounded JSON transfer without automatic persistence.
-## Requirements
 ### Requirement: Viewer retains one bounded memory-only current Session
 
 The production Viewer SHALL use one process-lifetime in-memory current Session as the only authority for received Event presentation, detail, filtering, diagnostics, and Performance input. It SHALL retain Events within 32 MiB of accounted Event data and 16 Device-session metadata lanes, with the existing bounded ingress. It SHALL NOT apply an independent fixed Event-count retention policy. Internal slot capacity MAY be derived from the byte budget and the minimum fixed per-Event accounting overhead solely to represent every byte-valid Session with finite storage. It SHALL NOT create, open, query, recover, clean, or close a SQLite database or another local persistence engine for Sources or Sessions. A later process SHALL start empty unless the operator explicitly imports a supported JSON file.
@@ -40,16 +37,6 @@ Oldest-Event eviction SHALL occur only when required by the accounted-byte budge
 - **WHEN** a new Viewer process starts after a prior process ended or crashed
 - **THEN** it starts with an empty current Session
 - **AND** no prior Source or Session is recovered automatically
-
-### Requirement: Memory Session Clear has one serialized boundary
-
-Clear SHALL establish one serialized workspace boundary, remove all retained Events, Event details, dispositions, gaps, drops, and derived Performance content, and preserve listener state plus active Device connections. An Event admitted before the boundary SHALL be absent after success; an Event admitted after the boundary SHALL remain eligible for the successor snapshot. Stale pre-clear evaluation or projection completion SHALL NOT repopulate cleared content.
-
-#### Scenario: Clear runs while an App remains connected
-
-- **WHEN** the operator confirms Clear and an App is active
-- **THEN** the retained memory Session becomes empty and Performance resets
-- **AND** the App connection and Device lane remain available for successor Events
 
 ### Requirement: JSON transfer is explicit, bounded, and memory-backed
 

@@ -1014,6 +1014,7 @@ struct ViewerPerformanceDashboardContent: View {
   @ViewBuilder
   private var chartsSection: some View {
     let buckets = model.buckets
+    let projections = model.chartProjections
     if !buckets.isEmpty {
       VStack(alignment: .leading, spacing: 12) {
         VStack(alignment: .leading, spacing: 3) {
@@ -1022,7 +1023,7 @@ struct ViewerPerformanceDashboardContent: View {
             .font(.caption)
             .foregroundStyle(.secondary)
         }
-        if let projections = try? ViewerPerformanceChartProjection.makeAll(buckets: buckets) {
+        if !projections.isEmpty {
           LazyVStack(alignment: .leading, spacing: 14) {
             ForEach(projections) { projection in
               performanceChart(projection, buckets: buckets)
@@ -1060,17 +1061,13 @@ struct ViewerPerformanceDashboardContent: View {
       .foregroundStyle(.secondary)
       if projection.hasMeasurements {
         Chart {
-          ForEach(projection.metrics, id: \.self) { metric in
-            ForEach(0..<projection.bucketCount, id: \.self) { bucketIndex in
-              if let point = projection.point(
-                metric: metric,
-                bucketIndex: bucketIndex,
-                buckets: buckets
-              ) {
-                let seriesTitle = ViewerPerformanceMetricPresentation.descriptor(
-                  for: metric.key
-                ).title
-                RectangleMark(
+          ForEach(projection.series) { series in
+            ForEach(series.points, id: \.bucketIndex) { point in
+              let metric = series.metric
+              let seriesTitle = ViewerPerformanceMetricPresentation.descriptor(
+                for: metric.key
+              ).title
+              RectangleMark(
                   xStart: .value(
                     "Bucket start",
                     elapsedNanoseconds(
@@ -1094,9 +1091,9 @@ struct ViewerPerformanceDashboardContent: View {
                     ViewerPerformanceFormatting.chartValue(point.maximum, metric: metric)
                   )
                 )
-                .foregroundStyle(by: .value("Metric", seriesTitle))
-                .opacity(0.16)
-                LineMark(
+              .foregroundStyle(by: .value("Metric", seriesTitle))
+              .opacity(0.16)
+              LineMark(
                   x: .value(
                     "Viewer time",
                     elapsedNanoseconds(
@@ -1113,9 +1110,23 @@ struct ViewerPerformanceDashboardContent: View {
                     "\(metric.rawValue):\(point.segmentStartBucketIndex)"
                   )
                 )
-                .foregroundStyle(by: .value("Metric", seriesTitle))
-                .lineStyle(seriesLineStyle(metric))
-              }
+              .foregroundStyle(by: .value("Metric", seriesTitle))
+              .lineStyle(seriesLineStyle(metric))
+              PointMark(
+                  x: .value(
+                    "Viewer time",
+                    elapsedNanoseconds(
+                      point.centerMonotonicNanoseconds,
+                      from: projection.lowerMonotonicNanoseconds
+                    )
+                  ),
+                  y: .value(
+                    "Average",
+                    ViewerPerformanceFormatting.chartValue(point.average, metric: metric)
+                  )
+                )
+              .foregroundStyle(by: .value("Metric", seriesTitle))
+              .symbolSize(20)
             }
           }
           if let crosshair = model.crosshair {
