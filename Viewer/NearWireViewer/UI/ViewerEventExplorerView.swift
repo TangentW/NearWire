@@ -1342,6 +1342,8 @@ enum ViewerExplorerInspectorTab: String, CaseIterable {
   case raw = "Raw"
   case preview = "Preview"
   case metadata = "Metadata"
+
+  static let defaultSelection: Self = .pretty
 }
 
 struct ViewerExplorerInspectorView: View {

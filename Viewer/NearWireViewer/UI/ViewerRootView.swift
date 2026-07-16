@@ -1413,7 +1413,7 @@ struct ViewerAnalysisWorkspacePane: View {
   let explorer: ViewerEventExplorerController?
   let showsTimeline: Bool
   let showsInspector: Bool
-  @State private var inspectorTab = ViewerExplorerInspectorTab.metadata
+  @State private var inspectorTab = ViewerExplorerInspectorTab.defaultSelection
 
   init(
     explorer: ViewerEventExplorerController?,

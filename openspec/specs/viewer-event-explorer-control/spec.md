@@ -80,7 +80,7 @@ Selecting a retained Event SHALL resolve exact metadata and canonical content fr
 
 The immutable Viewer-internal Renderer registry SHALL remain available for Generic JSON, log line, key-value table, numeric-series, and timeline presentations. The Inspector SHALL label this presentation as Preview. Pattern selection and all existing input, time, derived-output, cancellation, accessibility, escaping, fallback, and redacted-reflection bounds SHALL remain enforced. A Generic JSON result SHALL show bounded Pretty content when available or bounded Raw content otherwise; it SHALL NOT present an empty instruction in place of the selected Event. Renderer preparation SHALL create no persistence or secondary Session authority.
 
-The Inspector SHALL expose only Pretty, Raw, Preview, and Metadata tabs, ordered from leading to trailing in that sequence. It SHALL NOT expose a Tree or Causality tab, Tree expansion state, causality loading/error state, cross-Event candidate graph, or database row lookup. `correlationID` and `replyTo` MAY remain visible as metadata for the selected Event.
+The Inspector SHALL expose only Pretty, Raw, Preview, and Metadata tabs, ordered from leading to trailing in that sequence. A newly created Viewer analysis workspace SHALL select Pretty by default while preserving subsequent operator selection through the existing workspace state. It SHALL NOT expose a Tree or Causality tab, Tree expansion state, causality loading/error state, cross-Event candidate graph, or database row lookup. `correlationID` and `replyTo` MAY remain visible as metadata for the selected Event.
 
 #### Scenario: Operator selects a renderer-compatible Event
 
@@ -112,6 +112,12 @@ The Inspector SHALL expose only Pretty, Raw, Preview, and Metadata tabs, ordered
 - **THEN** Pretty is the leftmost inspector choice
 - **AND** Metadata is the rightmost inspector choice
 - **AND** Raw and Preview remain available between them
+
+#### Scenario: Operator opens a new analysis workspace
+
+- **WHEN** the Event Inspector is created for a new Viewer analysis workspace
+- **THEN** Pretty is selected by default
+- **AND** the operator may still select any other available inspector representation
 
 ### Requirement: Current Session actions preserve one authoritative workspace
 

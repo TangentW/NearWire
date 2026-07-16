@@ -460,6 +460,7 @@ final class ViewerWorkspacePresentationTests: XCTestCase {
       ViewerExplorerInspectorTab.allCases.map(\.rawValue),
       ["Pretty", "Raw", "Preview", "Metadata"]
     )
+    XCTAssertEqual(ViewerExplorerInspectorTab.defaultSelection, .pretty)
   }
 
   @MainActor
