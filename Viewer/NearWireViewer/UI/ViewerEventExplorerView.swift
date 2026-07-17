@@ -178,11 +178,11 @@ struct ViewerExplorerTimelineView: View {
       toolbar
       Divider()
       guidance
-      content
       if hasDiagnostics {
-        Divider()
         diagnosticLane
+        Divider()
       }
+      content
     }
     .sheet(isPresented: $showsFilters) {
       ViewerExplorerFilterSheet(explorer: explorer, isPresented: $showsFilters)
@@ -610,11 +610,18 @@ struct ViewerExplorerTimelineView: View {
       }
       .padding(.top, 8)
     } label: {
-      Label("Diagnostic Gap Lane", systemImage: "exclamationmark.triangle")
+      Label("Timeline may be incomplete", systemImage: "exclamationmark.triangle")
         .font(.caption)
+        .foregroundStyle(.orange)
     }
+    .accessibilityHint(
+      Text(
+        "Expand to view ingress, memory-window, conflict, and diagnostic-loss counts."
+      )
+    )
     .padding(.horizontal, 14)
     .padding(.vertical, 8)
+    .background(Color.orange.opacity(0.06))
   }
 
   private func banner(_ message: String, systemImage: String, color: Color) -> some View {
@@ -631,6 +638,31 @@ struct ViewerExplorerTimelineView: View {
     presentationObserver.value
   }
 
+}
+
+struct ViewerExplorerTimelineRowStatusPresentation: Equatable {
+  let disposition: String?
+  let hasDrop: Bool
+  let hasPresentationConflict: Bool
+  let sessionEnded: Bool
+
+  init(row: ViewerExplorerTimelinePresentationRow) {
+    disposition = ViewerExplorerTimelineDispositionPresentation.visibleDisposition(row.disposition)
+    hasDrop = row.hasDrop
+    hasPresentationConflict = row.hasPresentationConflict
+    sessionEnded = row.sessionEnded
+  }
+
+  var count: Int {
+    (disposition == nil ? 0 : 1)
+      + (hasDrop ? 1 : 0)
+      + (hasPresentationConflict ? 1 : 0)
+      + (sessionEnded ? 1 : 0)
+  }
+
+  var usesCriticalColor: Bool {
+    hasDrop || hasPresentationConflict
+  }
 }
 
 struct ViewerExplorerTimelineRowView: View {
@@ -655,7 +687,7 @@ struct ViewerExplorerTimelineRowView: View {
 
   private var accessibilitySummary: String {
     var states: [String] = []
-    if let disposition = visibleDisposition {
+    if let disposition = statusPresentation.disposition {
       states.append(
         ViewerLocalization.format(
           "disposition %@",
@@ -664,12 +696,13 @@ struct ViewerExplorerTimelineRowView: View {
         )
       )
     }
-    if row.hasGap { states.append(ViewerLocalization.string("gap", locale: locale)) }
-    if row.hasDrop { states.append(ViewerLocalization.string("drop", locale: locale)) }
-    if row.hasPresentationConflict {
+    if statusPresentation.hasDrop {
+      states.append(ViewerLocalization.string("drop", locale: locale))
+    }
+    if statusPresentation.hasPresentationConflict {
       states.append(ViewerLocalization.string("presentation conflict", locale: locale))
     }
-    if row.sessionEnded {
+    if statusPresentation.sessionEnded {
       states.append(ViewerLocalization.string("session ended", locale: locale))
     }
     return ViewerLocalization.format(
@@ -684,21 +717,12 @@ struct ViewerExplorerTimelineRowView: View {
     )
   }
 
-  private var visibleDisposition: String? {
-    ViewerExplorerTimelineDispositionPresentation.visibleDisposition(row.disposition)
-  }
-
-  private var visibleStatusCount: Int {
-    (visibleDisposition == nil ? 0 : 1)
-      + (row.hasGap ? 1 : 0)
-      + (row.hasDrop ? 1 : 0)
-      + (row.hasPresentationConflict ? 1 : 0)
-      + (row.sessionEnded ? 1 : 0)
+  private var statusPresentation: ViewerExplorerTimelineRowStatusPresentation {
+    ViewerExplorerTimelineRowStatusPresentation(row: row)
   }
 
   private var compactStatusColor: Color {
-    if row.hasDrop || row.hasPresentationConflict { return .red }
-    if row.hasGap { return .orange }
+    if statusPresentation.usesCriticalColor { return .red }
     return .secondary
   }
 
@@ -711,15 +735,16 @@ struct ViewerExplorerTimelineRowView: View {
         .truncationMode(.middle)
         .frame(minWidth: 60, alignment: .leading)
       if compactStatuses {
-        if visibleStatusCount > 0 {
-          badge("+\(visibleStatusCount)", color: compactStatusColor, localized: false)
+        if statusPresentation.count > 0 {
+          badge("+\(statusPresentation.count)", color: compactStatusColor, localized: false)
         }
       } else {
-        if let disposition = visibleDisposition { badge(disposition, color: .secondary) }
-        if row.hasGap { badge("Gap", color: .orange) }
-        if row.hasDrop { badge("Drop", color: .red) }
-        if row.hasPresentationConflict { badge("Conflict", color: .red) }
-        if row.sessionEnded { badge("Session ended", color: .secondary) }
+        if let disposition = statusPresentation.disposition {
+          badge(disposition, color: .secondary)
+        }
+        if statusPresentation.hasDrop { badge("Drop", color: .red) }
+        if statusPresentation.hasPresentationConflict { badge("Conflict", color: .red) }
+        if statusPresentation.sessionEnded { badge("Session ended", color: .secondary) }
       }
       Spacer(minLength: 8)
       Text(ViewerExplorerFormatting.time(row.viewerWallMilliseconds, locale: locale))

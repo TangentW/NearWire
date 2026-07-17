@@ -1003,6 +1003,13 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
 
   private func refresh(reason: ViewerExplorerTraversalReason) {
     guard !sealed, !isPausedValue else { return }
+    let snapshot = live.snapshot()
+    let nextGapLane = ViewerExplorerMemoryGapLane(
+      snapshotGeneration: snapshot.generation,
+      gaps: snapshot.gaps
+    )
+    let gapDiagnosticsChanged = memoryGapLane?.gaps != nextGapLane.gaps
+    memoryGapLane = nextGapLane
     let filter: ViewerExplorerFilter
     do {
       filter = try filterDraft.makeFilter()
@@ -1036,12 +1043,13 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
     cancelEvaluation()
     let id = UUID()
     let cancellation = ViewerLiveEvaluationCancellation()
-    let snapshot = live.snapshot()
     activeEvaluationID = id
     evaluationCancellation = cancellation
     evaluationTracker.begin(id: id)
     if rows.isEmpty {
       traversalState = .loading(reason)
+      publish()
+    } else if gapDiagnosticsChanged {
       publish()
     }
     evaluationQueue.async { [weak self, evaluationTracker] in
@@ -1081,10 +1089,6 @@ final class ViewerEventExplorerController: ObservableObject, CustomReflectable,
       }
       rows = successor
       evaluationState = .complete(output.transientExclusion)
-      memoryGapLane = ViewerExplorerMemoryGapLane(
-        snapshotGeneration: delivery.snapshot.generation,
-        gaps: delivery.snapshot.gaps
-      )
       traversalState = .ready(delivery.reason)
       reconcileSelection(with: delivery.snapshot)
     }

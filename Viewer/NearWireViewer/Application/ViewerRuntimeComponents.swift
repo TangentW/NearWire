@@ -273,7 +273,7 @@ private struct ViewerMemorySessionExportDocument: Encodable {
 final class ViewerMemorySessionTransferService: ViewerWorkspaceSessionControlling,
   @unchecked Sendable
 {
-  static let maximumFileBytes = 64 * 1_024 * 1_024
+  static let maximumFileBytes = 256 * 1_024 * 1_024
 
   private struct DeviceReference {
     let connectionID: UUID

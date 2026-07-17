@@ -2908,6 +2908,22 @@
         }
       }
     },
+    "Expand to view ingress, memory-window, conflict, and diagnostic-loss counts." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Expand to view ingress, memory-window, conflict, and diagnostic-loss counts."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "展开以查看入口、内存窗口、冲突和诊断丢失计数。"
+          }
+        }
+      }
+    },
     "Expanded" : {
       "extractionState" : "stale",
       "localizations" : {
@@ -7975,6 +7991,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "时间线操作"
+          }
+        }
+      }
+    },
+    "Timeline may be incomplete" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Timeline may be incomplete"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "事件时间线可能不完整"
           }
         }
       }

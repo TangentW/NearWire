@@ -5474,6 +5474,145 @@ final class ViewerFoundationTests: XCTestCase {
     XCTAssertEqual(observation.canonicalProjection.canonicalContent, precomputed)
   }
 
+  func testLiveProjectionUsesExpandedSessionCapacityWithoutAnIndependentRowCap() {
+    XCTAssertEqual(ViewerLiveProjectionLimits.ingressCount, 256)
+    XCTAssertEqual(ViewerLiveProjectionLimits.ingressBytes, 64 * 1_024 * 1_024)
+    XCTAssertEqual(ViewerLiveProjectionLimits.retainedBytes, 256 * 1_024 * 1_024)
+    XCTAssertEqual(ViewerLiveProjectionLimits.maximumByteDerivedEventSlots, 8_192)
+    XCTAssertEqual(ViewerLiveProjectionLimits.maximumPendingEventKeys, 8_448)
+    XCTAssertEqual(ViewerLiveEventEvaluator.maximumPredicateChecks, 16_384)
+    XCTAssertEqual(
+      ViewerMemorySessionTransferService.maximumFileBytes,
+      ViewerLiveProjectionLimits.retainedBytes
+    )
+  }
+
+  func testTimelineRowStatusDoesNotAttributeSessionWideGapToAnEvent() {
+    let key = ViewerEventJournalKey(
+      runtimeLogicalID: UUID(),
+      connectionID: UUID(),
+      direction: .appToViewer,
+      wireSequence: 1
+    )
+    let gapOnly = ViewerExplorerTimelineRowStatusPresentation(
+      row: ViewerExplorerTimelinePresentationRow(
+        id: .memory(key),
+        eventType: "test.gap",
+        contentSummary: "{}",
+        viewerWallMilliseconds: 1,
+        disposition: ViewerEventDisposition.consumerAccepted.rawValue,
+        hasGap: true,
+        hasDrop: false,
+        hasPresentationConflict: false,
+        sessionEnded: false
+      )
+    )
+    XCTAssertEqual(gapOnly.count, 0)
+    XCTAssertNil(gapOnly.disposition)
+    XCTAssertFalse(gapOnly.usesCriticalColor)
+
+    let attributable = ViewerExplorerTimelineRowStatusPresentation(
+      row: ViewerExplorerTimelinePresentationRow(
+        id: .memory(key),
+        eventType: "test.conflict",
+        contentSummary: "{}",
+        viewerWallMilliseconds: 1,
+        disposition: ViewerEventDisposition.expired.rawValue,
+        hasGap: true,
+        hasDrop: true,
+        hasPresentationConflict: true,
+        sessionEnded: true
+      )
+    )
+    XCTAssertEqual(attributable.count, 4)
+    XCTAssertEqual(attributable.disposition, ViewerEventDisposition.expired.rawValue)
+    XCTAssertTrue(attributable.usesCriticalColor)
+  }
+
+  @MainActor
+  func testGlobalGapLanePublishesBeforeEvaluationDelivery() async throws {
+    let runtimeLogicalID = UUID()
+    let window = ViewerLiveEventWindow(runtimeLogicalID: runtimeLogicalID)
+    try window.replaceCurrentSession(
+      ViewerMemorySessionReplacement(
+        sessions: [],
+        events: [],
+        gaps: ViewerLiveGapSnapshot(
+          ingressOverflowCount: 2,
+          windowOverflowCount: 3,
+          residentConflictCount: 0,
+          diagnosticLossCount: 4
+        )
+      )
+    )
+    let blockingClock = FirstCallBlockingNanosecondClock()
+    let controller = ViewerEventExplorerController(
+      inputs: ViewerRuntimeExplorerInputs(
+        runtimeLogicalID: runtimeLogicalID,
+        liveObservations: window
+      ),
+      evaluator: ViewerLiveEventEvaluator(nowNanoseconds: { blockingClock.now() })
+    )
+    controller.start()
+    XCTAssertEqual(blockingClock.waitUntilBlocked(), .success)
+    let lane = try XCTUnwrap(controller.liveGapLane)
+    XCTAssertEqual(lane.gaps.ingressOverflowCount, 2)
+    XCTAssertEqual(lane.gaps.windowOverflowCount, 3)
+    XCTAssertEqual(lane.gaps.diagnosticLossCount, 4)
+    XCTAssertTrue(lane.hasDiagnostic)
+    blockingClock.release()
+    await controller.sealAndClear().value
+  }
+
+  @MainActor
+  func testSupersededEvaluationCannotStarveGlobalGapLane() async throws {
+    let runtimeLogicalID = UUID()
+    let window = ViewerLiveEventWindow(runtimeLogicalID: runtimeLogicalID)
+    try window.replaceCurrentSession(
+      ViewerMemorySessionReplacement(
+        sessions: [],
+        events: [],
+        gaps: ViewerLiveGapSnapshot(
+          ingressOverflowCount: 1,
+          windowOverflowCount: 0,
+          residentConflictCount: 0,
+          diagnosticLossCount: 0
+        )
+      )
+    )
+    let blockingClock = FirstCallBlockingNanosecondClock()
+    let controller = ViewerEventExplorerController(
+      inputs: ViewerRuntimeExplorerInputs(
+        runtimeLogicalID: runtimeLogicalID,
+        liveObservations: window
+      ),
+      evaluator: ViewerLiveEventEvaluator(nowNanoseconds: { blockingClock.now() })
+    )
+    controller.start()
+    XCTAssertEqual(blockingClock.waitUntilBlocked(), .success)
+    XCTAssertEqual(controller.liveGapLane?.gaps.ingressOverflowCount, 1)
+
+    try window.replaceCurrentSession(
+      ViewerMemorySessionReplacement(
+        sessions: [],
+        events: [],
+        gaps: ViewerLiveGapSnapshot(
+          ingressOverflowCount: 0,
+          windowOverflowCount: 2,
+          residentConflictCount: 0,
+          diagnosticLossCount: 3
+        )
+      )
+    )
+    controller.jumpToLatest()
+
+    XCTAssertEqual(controller.liveGapLane?.gaps.ingressOverflowCount, 0)
+    XCTAssertEqual(controller.liveGapLane?.gaps.windowOverflowCount, 2)
+    XCTAssertEqual(controller.liveGapLane?.gaps.diagnosticLossCount, 3)
+    blockingClock.release()
+    await controller.sealAndClear().value
+  }
+
   func testLiveProjectionEnforcesIngressAndWindowBoundsAndTracksRuntimeState() async throws {
     let runtimeLogicalID = UUID()
     let connectionID = UUID()
@@ -5522,13 +5661,17 @@ final class ViewerFoundationTests: XCTestCase {
     XCTAssertEqual(snapshot.events.count, ViewerLiveProjectionLimits.ingressCount)
     XCTAssertEqual(snapshot.sessions.count, 1)
     XCTAssertEqual(snapshot.gaps.ingressOverflowCount, 1)
+    XCTAssertTrue(snapshot.events.allSatisfy { !$0.hasGap })
     XCTAssertEqual(
       snapshot.accountedEventBytes,
       ViewerLiveProjectionLimits.ingressCount
         * (ViewerLiveProjectionLimits.fixedEntryOverheadBytes + 1)
     )
     let initialDiagnostics = window.diagnosticsForTesting()
-    XCTAssertEqual(initialDiagnostics.ingressOfferCount, 65)
+    XCTAssertEqual(
+      initialDiagnostics.ingressOfferCount,
+      UInt64(ViewerLiveProjectionLimits.ingressCount + 1)
+    )
     XCTAssertEqual(initialDiagnostics.drainScheduleCount, 1)
     XCTAssertEqual(initialDiagnostics.dirtySuccessorCount, 1)
     XCTAssertEqual(initialDiagnostics.drainRunCount, 1)
@@ -5548,25 +5691,26 @@ final class ViewerFoundationTests: XCTestCase {
     XCTAssertEqual(snapshot.gaps.windowOverflowCount, 0)
     XCTAssertTrue(snapshot.events.contains { $0.observation.key.wireSequence == 0 })
 
-    let halfWindowEventBytes =
-      ViewerLiveProjectionLimits.retainedBytes / 2
+    let quarterWindowEventBytes =
+      ViewerLiveProjectionLimits.retainedBytes / 4
       - ViewerLiveProjectionLimits.fixedEntryOverheadBytes
-    for sequence in UInt64(601)...602 {
+    for sequence in UInt64(601)...604 {
       XCTAssertEqual(
-        try window.offer(observation(sequence: sequence, bytes: halfWindowEventBytes)),
+        try window.offer(observation(sequence: sequence, bytes: quarterWindowEventBytes)),
         .accepted
       )
       window.waitForProjectionForTesting()
     }
 
     snapshot = window.snapshot()
-    XCTAssertEqual(snapshot.events.count, 2)
+    XCTAssertEqual(snapshot.events.count, 4)
     XCTAssertEqual(snapshot.gaps.windowOverflowCount, 600)
+    XCTAssertTrue(snapshot.events.allSatisfy { !$0.hasGap })
     XCTAssertEqual(window.lostHorizonCount, 601)
     XCTAssertEqual(snapshot.accountedEventBytes, ViewerLiveProjectionLimits.retainedBytes)
 
     let latest = try XCTUnwrap(
-      snapshot.events.first { $0.observation.key.wireSequence == 602 }
+      snapshot.events.first { $0.observation.key.wireSequence == 604 }
     ).observation
     window.laterDisposition(key: latest.key, disposition: .consumerAccepted)
     window.dropsChanged(
@@ -5893,7 +6037,8 @@ final class ViewerFoundationTests: XCTestCase {
       )
     )
 
-    for sequence in 0..<UInt64(193) {
+    let offeredCount = ViewerLiveProjectionLimits.ingressCount + 129
+    for sequence in 0..<UInt64(offeredCount) {
       let envelope = try makeObservationEnvelope(
         eventType: PerformanceSnapshotSchema.eventType(),
         content: .object(["sequence": .integer(Int64(sequence))]),
@@ -5927,7 +6072,10 @@ final class ViewerFoundationTests: XCTestCase {
     XCTAssertEqual(first.revision, 1)
     XCTAssertEqual(first.anchorMonotonicNanoseconds, anchor)
     XCTAssertEqual(first.events.count, ViewerLiveProjectionLimits.ingressCount)
-    XCTAssertEqual(first.events.map(\.key.wireSequence), Array(0..<UInt64(64)))
+    XCTAssertEqual(
+      first.events.map(\.key.wireSequence),
+      Array(0..<UInt64(ViewerLiveProjectionLimits.ingressCount))
+    )
     XCTAssertEqual(first.gaps.count, 1)
     XCTAssertEqual(first.gaps.first?.kind, .eventLoss)
     XCTAssertEqual(first.gaps.first?.applicability, .uncertain)
@@ -6227,7 +6375,7 @@ final class ViewerFoundationTests: XCTestCase {
     }
   }
 
-  func testLiveIngressAdmitsOneMaximumEventAndRejectsTheTwentyMiBOverflow() throws {
+  func testLiveIngressAdmitsItsByteBoundAndRejectsTheSixtyFourMiBOverflow() throws {
     let runtimeLogicalID = UUID()
     let connectionID = UUID()
     let context = try makeObservationContext(connectionID: connectionID, displayName: "Maximum")
@@ -6251,7 +6399,9 @@ final class ViewerFoundationTests: XCTestCase {
       ),
       viewerWallMilliseconds: 3_000_000,
       viewerMonotonicNanoseconds: 1,
-      deterministicEventBytes: 16 * 1_024 * 1_024,
+      deterministicEventBytes:
+        ViewerLiveProjectionLimits.ingressBytes
+        - ViewerLiveProjectionLimits.fixedEntryOverheadBytes,
       initialDisposition: .buffered
     )
     let overflow = try ViewerCommittedEventObservation(
@@ -6266,7 +6416,7 @@ final class ViewerFoundationTests: XCTestCase {
       ),
       viewerWallMilliseconds: 3_000_001,
       viewerMonotonicNanoseconds: 2,
-      deterministicEventBytes: 4 * 1_024 * 1_024,
+      deterministicEventBytes: 1,
       initialDisposition: .buffered
     )
 
@@ -6279,37 +6429,32 @@ final class ViewerFoundationTests: XCTestCase {
 
     let retainedWindow = ViewerLiveEventWindow(runtimeLogicalID: runtimeLogicalID)
     let retainedEventBytes =
-      16 * 1_024 * 1_024 - ViewerLiveProjectionLimits.fixedEntryOverheadBytes
-    let retainedFirst = try ViewerCommittedEventObservation(
-      runtimeLogicalID: runtimeLogicalID,
-      context: context,
-      nickname: nil,
-      envelope: makeObservationEnvelope(
-        content: .object(["value": .integer(3)]),
-        createdAt: Date(timeIntervalSince1970: 3_000),
-        sessionEpoch: epoch,
-        sequence: 3
-      ),
-      viewerWallMilliseconds: 3_000_002,
-      viewerMonotonicNanoseconds: 3,
-      deterministicEventBytes: retainedEventBytes,
-      initialDisposition: .buffered
-    )
-    let retainedSecond = try ViewerCommittedEventObservation(
-      runtimeLogicalID: runtimeLogicalID,
-      context: context,
-      nickname: nil,
-      envelope: makeObservationEnvelope(
-        content: .object(["value": .integer(4)]),
-        createdAt: Date(timeIntervalSince1970: 3_000),
-        sessionEpoch: epoch,
-        sequence: 4
-      ),
-      viewerWallMilliseconds: 3_000_003,
-      viewerMonotonicNanoseconds: 4,
-      deterministicEventBytes: retainedEventBytes,
-      initialDisposition: .buffered
-    )
+      ViewerLiveProjectionLimits.retainedBytes / 4
+      - ViewerLiveProjectionLimits.fixedEntryOverheadBytes
+
+    func retainedObservation(sequence: UInt64, bytes: Int) throws
+      -> ViewerCommittedEventObservation
+    {
+      try ViewerCommittedEventObservation(
+        runtimeLogicalID: runtimeLogicalID,
+        context: context,
+        nickname: nil,
+        envelope: makeObservationEnvelope(
+          content: .object(["value": .integer(Int64(sequence))]),
+          createdAt: Date(timeIntervalSince1970: 3_000),
+          sessionEpoch: epoch,
+          sequence: sequence
+        ),
+        viewerWallMilliseconds: 3_000_000 + Int64(sequence),
+        viewerMonotonicNanoseconds: sequence,
+        deterministicEventBytes: bytes,
+        initialDisposition: .buffered
+      )
+    }
+
+    let retainedEvents = try (3...6).map {
+      try retainedObservation(sequence: UInt64($0), bytes: retainedEventBytes)
+    }
     let retainedOverflow = try ViewerCommittedEventObservation(
       runtimeLogicalID: runtimeLogicalID,
       context: context,
@@ -6318,19 +6463,19 @@ final class ViewerFoundationTests: XCTestCase {
         content: .object(["value": .integer(5)]),
         createdAt: Date(timeIntervalSince1970: 3_000),
         sessionEpoch: epoch,
-        sequence: 5
+        sequence: 7
       ),
-      viewerWallMilliseconds: 3_000_004,
-      viewerMonotonicNanoseconds: 5,
+      viewerWallMilliseconds: 3_000_007,
+      viewerMonotonicNanoseconds: 7,
       deterministicEventBytes: 1,
       initialDisposition: .buffered
     )
 
-    XCTAssertEqual(retainedWindow.offer(retainedFirst), .accepted)
-    retainedWindow.waitForProjectionForTesting()
-    XCTAssertEqual(retainedWindow.offer(retainedSecond), .accepted)
-    retainedWindow.waitForProjectionForTesting()
-    XCTAssertEqual(retainedWindow.retainedObservationCount, 2)
+    for retained in retainedEvents {
+      XCTAssertEqual(retainedWindow.offer(retained), .accepted)
+      retainedWindow.waitForProjectionForTesting()
+    }
+    XCTAssertEqual(retainedWindow.retainedObservationCount, 4)
     XCTAssertEqual(
       retainedWindow.retainedObservationBytes,
       ViewerLiveProjectionLimits.retainedBytes
@@ -6339,11 +6484,12 @@ final class ViewerFoundationTests: XCTestCase {
     XCTAssertEqual(retainedWindow.offer(retainedOverflow), .accepted)
     retainedWindow.waitForProjectionForTesting()
     let retainedSnapshot = retainedWindow.snapshot()
-    XCTAssertEqual(retainedWindow.retainedObservationCount, 2)
+    XCTAssertEqual(retainedWindow.retainedObservationCount, 4)
     XCTAssertEqual(retainedSnapshot.gaps.windowOverflowCount, 1)
+    XCTAssertTrue(retainedSnapshot.events.allSatisfy { !$0.hasGap })
     XCTAssertEqual(
       Set(retainedSnapshot.events.map(\.observation.observationID)),
-      Set([retainedSecond.observationID, retainedOverflow.observationID])
+      Set(retainedEvents.dropFirst().map(\.observationID) + [retainedOverflow.observationID])
     )
   }
 
@@ -6684,6 +6830,7 @@ final class ViewerFoundationTests: XCTestCase {
       snapshot.gaps.diagnosticLossCount,
       UInt64(ViewerLiveProjectionLimits.maximumSessions)
     )
+    XCTAssertTrue(snapshot.events.allSatisfy { !$0.hasGap })
   }
 
   func testBlockedSingleSlotChurnPreservesLatestActiveGeneration() throws {
@@ -9623,6 +9770,33 @@ private final class SteppingNanosecondClock: @unchecked Sendable {
     let value = values.removeFirst()
     last = value
     return value
+  }
+}
+
+private final class FirstCallBlockingNanosecondClock: @unchecked Sendable {
+  private let lock = NSLock()
+  private let blocked = DispatchSemaphore(value: 0)
+  private let releaseGate = DispatchSemaphore(value: 0)
+  private var shouldBlock = true
+
+  func now() -> UInt64 {
+    lock.lock()
+    let blocksThisCall = shouldBlock
+    shouldBlock = false
+    lock.unlock()
+    if blocksThisCall {
+      blocked.signal()
+      releaseGate.wait()
+    }
+    return 0
+  }
+
+  func waitUntilBlocked() -> DispatchTimeoutResult {
+    blocked.wait(timeout: .now() + 5)
+  }
+
+  func release() {
+    releaseGate.signal()
   }
 }
 

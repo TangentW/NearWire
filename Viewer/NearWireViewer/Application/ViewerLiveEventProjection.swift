@@ -3,9 +3,9 @@ import Foundation
 @_spi(NearWireInternal) import NearWireTransport
 
 enum ViewerLiveProjectionLimits {
-  static let ingressCount = 64
-  static let ingressBytes = 20 * 1_024 * 1_024
-  static let retainedBytes = 32 * 1_024 * 1_024
+  static let ingressCount = 256
+  static let ingressBytes = 64 * 1_024 * 1_024
+  static let retainedBytes = 256 * 1_024 * 1_024
   static let maximumSessions = 16
   // Deterministic accounting reserve for bounded metadata and fixed entry fields. This is not a
   // claim about Swift heap usage; process heap high-water remains a diagnostic measurement.
@@ -1614,9 +1614,6 @@ final class ViewerLiveEventWindow: ViewerLiveObservationProviding, @unchecked Se
     snapshotPublicationCount = Self.saturatingIncrement(snapshotPublicationCount)
     projectionGeneration = Self.saturatingIncrement(projectionGeneration)
     let nodes = window.orderedNodes()
-    let runtimeHasGap =
-      ingressOverflowCount > 0 || windowOverflowCount > 0
-      || diagnosticLossCount > 0
     var residentPresentationConflicts: UInt64 = 0
     let eventSnapshots = nodes.map { node in
       let session = sessions[node.observation.key.connectionID]
@@ -1627,7 +1624,7 @@ final class ViewerLiveEventWindow: ViewerLiveObservationProviding, @unchecked Se
         observation: node.observation,
         laterDisposition: node.laterDisposition,
         hasPresentationConflict: node.hasPresentationConflict,
-        hasGap: runtimeHasGap || node.hasPresentationConflict
+        hasGap: node.hasPresentationConflict
           || conflictMarkers.contains(node.observation.key),
         hasDrop: (session?.positiveDropCount ?? 0) > 0,
         sessionEnded: session?.endedWallMilliseconds != nil
