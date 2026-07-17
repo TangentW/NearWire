@@ -54,6 +54,7 @@
 		10000000000000000000003D /* ViewerExplorerContracts.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000041 /* ViewerExplorerContracts.swift */; };
 		10000000000000000000003E /* ViewerPerformanceDataContracts.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000042 /* ViewerPerformanceDataContracts.swift */; };
 		10000000000000000000003F /* ViewerSessionTransfer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000043 /* ViewerSessionTransfer.swift */; };
+		100000000000000000000040 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000044 /* Assets.xcassets */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -117,6 +118,7 @@
 		200000000000000000000041 /* ViewerExplorerContracts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewerExplorerContracts.swift; sourceTree = "<group>"; };
 		200000000000000000000042 /* ViewerPerformanceDataContracts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewerPerformanceDataContracts.swift; sourceTree = "<group>"; };
 		200000000000000000000043 /* ViewerSessionTransfer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewerSessionTransfer.swift; sourceTree = "<group>"; };
+		200000000000000000000044 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -233,6 +235,7 @@
 				200000000000000000000008 /* NearWireViewer.entitlements */,
 				200000000000000000000006 /* PrivacyInfo.xcprivacy */,
 				200000000000000000000040 /* Localizable.xcstrings */,
+				200000000000000000000044 /* Assets.xcassets */,
 			);
 			path = Resources;
 			sourceTree = "<group>";
@@ -364,6 +367,7 @@
 			files = (
 				100000000000000000000006 /* PrivacyInfo.xcprivacy in Resources */,
 				10000000000000000000003C /* Localizable.xcstrings in Resources */,
+				100000000000000000000040 /* Assets.xcassets in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -470,6 +474,7 @@
 		A00000000000000000000003 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = NearWireViewer/Resources/NearWireViewer.entitlements;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
@@ -497,6 +502,7 @@
 		A00000000000000000000004 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = NearWireViewer/Resources/NearWireViewer.entitlements;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_INJECT_BASE_ENTITLEMENTS = NO;
