@@ -48,7 +48,7 @@ Pod::Spec.new do |spec|
   end
 
   spec.subspec "UI" do |ui|
-    ui.dependency "NearWire/SDK"
+    ui.dependency "NearWire/Performance"
     ui.source_files = "SDK/Sources/NearWireUI/**/*.swift"
   end
 

@@ -2,6 +2,7 @@ import SwiftUI
 import XCTest
 
 @testable import NearWire
+@testable import NearWirePerformance
 @testable import NearWireUI
 
 #if os(macOS)
@@ -56,11 +57,38 @@ final class NearWireUIViewSmokeTests: XCTestCase {
 
   func testPublicViewsConstructAndRenderAtAccessibilitySize() async {
     let nearWire = NearWire()
+    let performanceMonitor = NearWirePerformanceMonitor(nearWire: nearWire)
     _ = NearWireConnectionView(nearWire: nearWire).body
+    _ = NearWirePerformanceControlView(performanceMonitor: performanceMonitor).body
+    _ = NearWireLatestViewerEventView(nearWire: nearWire).body
+    _ =
+      NearWirePanelView(
+        nearWire: nearWire,
+        performanceMonitor: performanceMonitor
+      ).body
     let replacement = NearWire()
+    let replacementMonitor = NearWirePerformanceMonitor(nearWire: replacement)
     XCTAssertNotEqual(
       NearWireConnectionView(nearWire: nearWire).stateIdentity,
       NearWireConnectionView(nearWire: replacement).stateIdentity
+    )
+    XCTAssertNotEqual(
+      NearWirePerformanceControlView(performanceMonitor: performanceMonitor).stateIdentity,
+      NearWirePerformanceControlView(performanceMonitor: replacementMonitor).stateIdentity
+    )
+    XCTAssertNotEqual(
+      NearWireLatestViewerEventView(nearWire: nearWire).stateIdentity,
+      NearWireLatestViewerEventView(nearWire: replacement).stateIdentity
+    )
+    XCTAssertNotEqual(
+      NearWirePanelView(
+        nearWire: nearWire,
+        performanceMonitor: performanceMonitor
+      ).stateIdentity,
+      NearWirePanelView(
+        nearWire: replacement,
+        performanceMonitor: replacementMonitor
+      ).stateIdentity
     )
 
     let status = NearWireConnectionStatus(state: .connected)
@@ -74,6 +102,14 @@ final class NearWireUIViewSmokeTests: XCTestCase {
       .environment(\.dynamicTypeSize, .accessibility5)
       .frame(width: 320)
     assertRenderedImage(ImageRenderer(content: connectionView))
+
+    let panel = NearWirePanelView(
+      nearWire: nearWire,
+      performanceMonitor: performanceMonitor
+    )
+    .environment(\.dynamicTypeSize, .accessibility5)
+    .frame(width: 320)
+    assertRenderedImage(ImageRenderer(content: panel))
 
     let controller = NearWireUIFakeController()
     let coordinator = NearWireUIOperationCoordinator()

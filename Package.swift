@@ -63,7 +63,10 @@ let package = Package(
     ),
     .target(
       name: "NearWireUI",
-      dependencies: ["NearWire"],
+      dependencies: [
+        "NearWire",
+        "NearWirePerformance",
+      ],
       path: "SDK/Sources/NearWireUI"
     ),
     .target(
@@ -116,7 +119,11 @@ let package = Package(
     ),
     .testTarget(
       name: "NearWireUITests",
-      dependencies: ["NearWireUI", "NearWire"],
+      dependencies: [
+        "NearWireUI",
+        "NearWire",
+        "NearWirePerformance",
+      ],
       path: "SDK/Tests/NearWireUITests"
     ),
     .testTarget(

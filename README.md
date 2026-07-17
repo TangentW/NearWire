@@ -117,21 +117,35 @@ Incoming events use `AsyncThrowingStream`; connection state and status are avail
 
 ## Optional building blocks
 
-### Drop-in connection UI
+### Drop-in SDK panel
 
-Use the same `NearWire` instance with the optional SwiftUI panel:
+The optional SwiftUI panel can provide connection controls, an explicit performance collection
+toggle, and the latest Event sent by the Viewer:
 
 ```swift
+import NearWire
 import NearWireUI
+import NearWirePerformance
 
-NearWireConnectionView(nearWire: nearWire)
+let nearWire = NearWire()
+let performanceMonitor = NearWirePerformanceMonitor(nearWire: nearWire)
+
+NearWirePanelView(
+  nearWire: nearWire,
+  performanceMonitor: performanceMonitor
+)
 ```
 
-The core SDK has no UI dependency, so teams can use the provided panel, wrap it, or build an entirely custom connection experience.
+The panel starts neither a connection nor performance collection by itself. The App owns both
+instances and decides when the panel is visible. `NearWireConnectionView`,
+`NearWirePerformanceControlView`, and `NearWireLatestViewerEventView` are also available separately
+for custom layouts. The latest-Event view uses an independent bounded subscription, so it does not
+consume Events from the App's own observer.
 
 ### Built-in performance snapshots
 
-The optional performance module publishes aggregate device and App signals through the same event channel:
+The optional performance module can also be controlled directly and publishes aggregate device and
+App signals through the same event channel:
 
 ```swift
 import NearWirePerformance

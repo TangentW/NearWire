@@ -118,21 +118,34 @@ for try await event in nearWire.events {
 
 ## 可选能力
 
-### 可直接使用的连接 UI
+### 可直接使用的 SDK 面板
 
-把同一个 `NearWire` 实例注入可选 SwiftUI 面板即可：
+可选的 SwiftUI 面板可以同时提供连接控制、性能采集开关，以及 Viewer 最新发送给 App
+的一条事件：
 
 ```swift
+import NearWire
 import NearWireUI
+import NearWirePerformance
 
-NearWireConnectionView(nearWire: nearWire)
+let nearWire = NearWire()
+let performanceMonitor = NearWirePerformanceMonitor(nearWire: nearWire)
+
+NearWirePanelView(
+  nearWire: nearWire,
+  performanceMonitor: performanceMonitor
+)
 ```
 
-核心 SDK 不依赖 UI。团队既可以直接使用内建面板，也可以包装它，或者完全自行设计连接界面。
+面板本身不会自动连接，也不会自动开始性能采集；这两个实例及其生命周期仍由 App
+管理。如果需要自定义布局，也可以分别使用 `NearWireConnectionView`、
+`NearWirePerformanceControlView` 和 `NearWireLatestViewerEventView`。最新事件视图使用独立且有
+容量边界的订阅，不会抢走 App 业务代码收到的事件。
 
 ### 内建性能快照
 
-可选性能模块会通过同一条事件通道发送聚合后的设备和 App 性能数据：
+可选性能模块也可以完全通过代码控制，并通过同一条事件通道发送聚合后的设备和 App
+性能数据：
 
 ```swift
 import NearWirePerformance

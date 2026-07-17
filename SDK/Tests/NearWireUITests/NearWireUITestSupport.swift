@@ -2,6 +2,7 @@ import Foundation
 import XCTest
 
 @testable import NearWire
+@testable import NearWirePerformance
 @testable import NearWireUI
 
 final class NearWireUIFakeController: NearWireUIConnectionControlling, @unchecked Sendable {
@@ -107,6 +108,155 @@ final class NearWireUIFakeController: NearWireUIConnectionControlling, @unchecke
     defer { lock.unlock() }
     return body(&state)
   }
+}
+
+final class NearWireUIFakePerformanceController:
+  NearWireUIPerformanceControlling, @unchecked Sendable
+{
+  private struct State {
+    var current: NearWirePerformanceMonitorState = .stopped
+    var continuations: [UUID: AsyncStream<NearWirePerformanceMonitorState>.Continuation] = [:]
+    var startCalls = 0
+    var stopCalls = 0
+    var pendingStarts: [CheckedContinuation<Void, Error>] = []
+    var startError: Error?
+  }
+
+  private let lock = NSLock()
+  private var state = State()
+
+  var states: AsyncStream<NearWirePerformanceMonitorState> {
+    let identifier = UUID()
+    return AsyncStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
+      let initial = withState { state -> NearWirePerformanceMonitorState in
+        state.continuations[identifier] = continuation
+        return state.current
+      }
+      continuation.yield(initial)
+      continuation.onTermination = { [weak self] _ in
+        _ = self?.withState { $0.continuations.removeValue(forKey: identifier) }
+      }
+    }
+  }
+
+  func start() async throws {
+    let error = withState { state -> Error? in
+      state.startCalls += 1
+      return state.startError
+    }
+    if let error { throw error }
+    try await withCheckedThrowingContinuation { continuation in
+      withState { $0.pendingStarts.append(continuation) }
+    }
+  }
+
+  func stop() async {
+    withState { $0.stopCalls += 1 }
+    sendState(.stopped)
+  }
+
+  func finishNextStart(
+    with result: Result<Void, Error> = .success(()),
+    file: StaticString = #filePath,
+    line: UInt = #line
+  ) {
+    let continuation = withState {
+      $0.pendingStarts.isEmpty ? nil : $0.pendingStarts.removeFirst()
+    }
+    guard let continuation else {
+      XCTFail("No pending Performance start is available.", file: file, line: line)
+      return
+    }
+    if case .success = result { sendState(.running) }
+    continuation.resume(with: result)
+  }
+
+  func sendState(_ value: NearWirePerformanceMonitorState) {
+    let continuations = withState {
+      state -> [AsyncStream<NearWirePerformanceMonitorState>.Continuation] in
+      state.current = value
+      return Array(state.continuations.values)
+    }
+    for continuation in continuations { continuation.yield(value) }
+  }
+
+  func setStartError(_ error: Error?) {
+    withState { $0.startError = error }
+  }
+
+  var startCallCount: Int { withState { $0.startCalls } }
+  var stopCallCount: Int { withState { $0.stopCalls } }
+  var pendingStartCount: Int { withState { $0.pendingStarts.count } }
+  var subscriberCount: Int { withState { $0.continuations.count } }
+
+  private func withState<T>(_ body: (inout State) -> T) -> T {
+    lock.lock()
+    defer { lock.unlock() }
+    return body(&state)
+  }
+}
+
+final class NearWireUIFakeEventSource: NearWireUIEventProviding, @unchecked Sendable {
+  private struct State {
+    var continuations: [UUID: AsyncThrowingStream<NearWireEvent, Error>.Continuation] = [:]
+  }
+
+  private let lock = NSLock()
+  private var state = State()
+
+  var events: AsyncThrowingStream<NearWireEvent, Error> {
+    let identifier = UUID()
+    return AsyncThrowingStream(bufferingPolicy: .bufferingOldest(8)) { continuation in
+      withState { $0.continuations[identifier] = continuation }
+      continuation.onTermination = { [weak self] _ in
+        _ = self?.withState { $0.continuations.removeValue(forKey: identifier) }
+      }
+    }
+  }
+
+  func send(_ event: NearWireEvent) {
+    let continuations = withState { Array($0.continuations.values) }
+    for continuation in continuations { continuation.yield(event) }
+  }
+
+  func finish(throwing error: Error? = nil) {
+    let continuations = withState {
+      state -> [AsyncThrowingStream<NearWireEvent, Error>.Continuation] in
+      let values = Array(state.continuations.values)
+      state.continuations.removeAll()
+      return values
+    }
+    for continuation in continuations {
+      if let error {
+        continuation.finish(throwing: error)
+      } else {
+        continuation.finish()
+      }
+    }
+  }
+
+  var subscriberCount: Int { withState { $0.continuations.count } }
+
+  private func withState<T>(_ body: (inout State) -> T) -> T {
+    lock.lock()
+    defer { lock.unlock() }
+    return body(&state)
+  }
+}
+
+func makeNearWireUIEvent(
+  type: String = "viewer.message",
+  content: NearWireEventContent = .object(["message": .string("Hello")]),
+  direction: NearWireEventDirection = .viewerToApp
+) -> NearWireEvent {
+  NearWireEvent(
+    id: UUID(),
+    type: type,
+    content: content,
+    createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+    priority: .normal,
+    direction: direction
+  )
 }
 
 enum NearWireUITestWait {
