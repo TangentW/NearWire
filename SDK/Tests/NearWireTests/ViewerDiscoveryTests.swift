@@ -189,7 +189,7 @@ private actor DiscoveryTestGate {
 }
 
 final class ViewerDiscoveryTests: XCTestCase {
-  private let pairingCode = try! PairingCode("7K3M9Q")
+  private let pairingCode = try! PairingCode("7K3M")
 
   func testExactMatchReturnsInterfaceNeutralEndpointAndRetainsBrowserUntilRelease() async throws {
     let driver = TestViewerDiscoveryDriver()
@@ -203,7 +203,7 @@ final class ViewerDiscoveryTests: XCTestCase {
 
     let matchedState = await coordinator.state
     XCTAssertEqual(matchedState, .matched)
-    XCTAssertEqual(driver.expectedInstanceNames, ["NearWire-7K3M9Q"])
+    XCTAssertEqual(driver.expectedInstanceNames, ["NearWire-7K3M"])
     XCTAssertEqual(driver.quiesceCount, 1)
     XCTAssertEqual(driver.cancelCount, 0)
     let retainsExpectedInstanceName = await coordinator.retainsExpectedInstanceName
@@ -211,7 +211,7 @@ final class ViewerDiscoveryTests: XCTestCase {
     let retainedAfterMatch = await coordinator.retainedCandidateCount
     XCTAssertEqual(retainedAfterMatch, 0)
     if case .service(let name, let type, let domain, let interface) = viewer.endpoint {
-      XCTAssertEqual(name, "NearWire-7K3M9Q")
+      XCTAssertEqual(name, "NearWire-7K3M")
       XCTAssertEqual(type, NearWireBonjour.serviceType)
       XCTAssertEqual(domain, NearWireBonjour.localDomain)
       XCTAssertNil(interface)
@@ -242,7 +242,7 @@ final class ViewerDiscoveryTests: XCTestCase {
     driver.emit(.ready(epoch: 4))
     driver.emit(.snapshot(.empty, epoch: 4))
     driver.emit(
-      .snapshot(snapshot([candidate(name: "NearWire-7K3M9R")]), epoch: 4)
+      .snapshot(snapshot([candidate(name: "NearWire-7K3R")]), epoch: 4)
     )
     await waitUntilAsync { await coordinator.retainedCandidateCount == 0 }
     let searchingState = await coordinator.state
@@ -606,7 +606,7 @@ final class ViewerDiscoveryTests: XCTestCase {
   }
 
   private func candidate(
-    name: String = "NearWire-7K3M9Q",
+    name: String = "NearWire-7K3M",
     vid: String = "b3a97f874aad08bf"
   ) -> ViewerDiscoveryCandidate {
     let identity = NearWireBonjourServiceIdentity(
@@ -676,7 +676,7 @@ final class BonjourBrowserAdapterTests: XCTestCase {
     XCTAssertEqual(type, "_nearwire._tcp")
     XCTAssertEqual(domain, "local.")
     XCTAssertEqual(capturedPeerToPeer, true)
-    try driver.start(expectedInstanceName: "NearWire-7K3M9Q") { _ in }
+    try driver.start(expectedInstanceName: "NearWire-7K3M") { _ in }
     XCTAssertEqual(controller.startQueueLabels, ["com.nearwire.discovery.browser"])
     driver.cancel()
   }
@@ -742,7 +742,7 @@ final class BonjourBrowserAdapterTests: XCTestCase {
   }
 
   func testInterfaceOverflowPreservesMatchingAndAmbiguityIdentity() {
-    let expected = "NearWire-7K3M9Q"
+    let expected = "NearWire-7K3M"
     let first = observation(expected, vid: "b3a97f874aad08bf", interfaces: 33)
     let second = observation(expected, vid: "7ac1b8d7010bb6cd", interfaces: 1)
     let conversions = [first, second].map {
@@ -757,9 +757,9 @@ final class BonjourBrowserAdapterTests: XCTestCase {
   }
 
   func testObservationConversionHasThreeExplicitOutcomes() {
-    let expected = "NearWire-7K3M9Q"
+    let expected = "NearWire-7K3M"
     if case .discarded = BonjourServiceObservationConverter.convert(
-      observation("NearWire-OTHER1", vid: "b3a97f874aad08bf", interfaces: 0),
+      observation("NearWire-WXYZ", vid: "b3a97f874aad08bf", interfaces: 0),
       expectedInstanceName: expected
     ) {
     } else {
@@ -780,7 +780,7 @@ final class BonjourBrowserAdapterTests: XCTestCase {
       XCTFail("Exact attributed result must become a candidate.")
     }
     if case .discarded = BonjourServiceObservationConverter.convert(
-      observation("NearWire-7K3M9Q (2)", vid: "b3a97f874aad08bf", interfaces: 0),
+      observation("NearWire-7K3M (2)", vid: "b3a97f874aad08bf", interfaces: 0),
       expectedInstanceName: expected
     ) {
     } else {
@@ -830,7 +830,7 @@ final class BonjourBrowserAdapterTests: XCTestCase {
     var driver: NWBrowserDiscoveryDriver? = NWBrowserDiscoveryDriver { _, _ in controller }
     var token: Token? = Token()
     weak let retainedToken = token
-    try driver?.start(expectedInstanceName: "NearWire-7K3M9Q") { [token] _ in
+    try driver?.start(expectedInstanceName: "NearWire-7K3M") { [token] _ in
       _ = token
     }
     token = nil
@@ -850,7 +850,7 @@ final class BonjourBrowserAdapterTests: XCTestCase {
     let driver = NWBrowserDiscoveryDriver { _, _ in controller }
     var token: Token? = Token()
     weak let retainedToken = token
-    try driver.start(expectedInstanceName: "NearWire-7K3M9Q") { [token] _ in
+    try driver.start(expectedInstanceName: "NearWire-7K3M") { [token] _ in
       _ = token
     }
     token = nil
@@ -892,7 +892,7 @@ final class BonjourBrowserAdapterTests: XCTestCase {
       viewer.description, viewer.debugDescription, String(describing: viewer),
       String(reflecting: viewer),
     ] {
-      XCTAssertFalse(rendered.contains("NearWire-7K3M9Q"))
+      XCTAssertFalse(rendered.contains("NearWire-7K3M"))
       XCTAssertFalse(rendered.contains("b3a97f874aad08bf"))
     }
   }
@@ -913,7 +913,7 @@ final class BonjourBrowserAdapterTests: XCTestCase {
 
   private func candidate() -> ViewerDiscoveryCandidate {
     let identity = NearWireBonjourServiceIdentity(
-      instanceName: "NearWire-7K3M9Q",
+      instanceName: "NearWire-7K3M",
       type: NearWireBonjour.serviceType,
       domain: NearWireBonjour.localDomain,
       viewerDiscriminator: ViewerDiscoveryDiscriminator(rawValue: "b3a97f874aad08bf")!

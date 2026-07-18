@@ -1657,7 +1657,7 @@ final class ViewerFoundationTests: XCTestCase {
       [255, 0, 1, 2, 3, 4, 5]
     }
 
-    XCTAssertEqual(try generator.generate().canonicalValue, "ABCDEF")
+    XCTAssertEqual(try generator.generate().canonicalValue, "ABCD")
   }
 
   func testPairingGeneratorPropagatesRandomSourceFailure() {
@@ -1700,16 +1700,16 @@ final class ViewerFoundationTests: XCTestCase {
         resetAllIdentity: {},
         generatePairingCode: {
           generationCount.increment()
-          return try PairingCode("ABCDEF")
+          return try PairingCode("ABCD")
         }
       )
     )
 
     ViewerWindowRuntimeLifecycle.ensureRuntime(for: model, isRunningUnitTests: false)
     ViewerWindowRuntimeLifecycle.ensureRuntime(for: model, isRunningUnitTests: false)
-    await waitForStatus(.listening(code: "ABCDEF", paused: false), in: model)
+    await waitForStatus(.listening(code: "ABCD", paused: false), in: model)
 
-    XCTAssertEqual(model.status, .listening(code: "ABCDEF", paused: false))
+    XCTAssertEqual(model.status, .listening(code: "ABCD", paused: false))
     XCTAssertEqual(generationCount.value, 1)
 
     model.closeWindow()
@@ -1725,27 +1725,27 @@ final class ViewerFoundationTests: XCTestCase {
     )
     let replacement = FakeViewerSecureListener()
     let factory = LockedListenerFactory([first, replacement])
-    let codes = LockedPairingCodeSequence(["ABCDEF", "MNPQRS"])
+    let codes = LockedPairingCodeSequence(["ABCD", "MNPQ"])
     let model = makeApplicationModel(listenerFactory: factory, pairingCodes: codes)
 
     model.openWindow()
-    await waitForStatus(.listening(code: "ABCDEF", paused: false), in: model)
-    XCTAssertEqual(model.status, .listening(code: "ABCDEF", paused: false))
+    await waitForStatus(.listening(code: "ABCD", paused: false), in: model)
+    XCTAssertEqual(model.status, .listening(code: "ABCD", paused: false))
 
     model.refreshPairingCode()
-    XCTAssertEqual(model.status, .listening(code: "ABCDEF", paused: false))
+    XCTAssertEqual(model.status, .listening(code: "ABCD", paused: false))
     XCTAssertEqual(first.cancelCount, 0)
 
     replacement.emit(.ready(port: 49_153))
-    XCTAssertEqual(model.status, .listening(code: "ABCDEF", paused: false))
+    XCTAssertEqual(model.status, .listening(code: "ABCD", paused: false))
     replacement.emit(.serviceRegistered(exact: true))
-    await waitForStatus(.listening(code: "MNPQRS", paused: false), in: model)
+    await waitForStatus(.listening(code: "MNPQ", paused: false), in: model)
 
-    XCTAssertEqual(model.status, .listening(code: "MNPQRS", paused: false))
+    XCTAssertEqual(model.status, .listening(code: "MNPQ", paused: false))
     XCTAssertEqual(first.cancelCount, 1)
     XCTAssertEqual(replacement.cancelCount, 0)
     XCTAssertEqual(
-      factory.advertisements.map(\.identity.instanceName), ["NearWire-ABCDEF", "NearWire-MNPQRS"])
+      factory.advertisements.map(\.identity.instanceName), ["NearWire-ABCD", "NearWire-MNPQ"])
   }
 
   @MainActor
@@ -1758,10 +1758,10 @@ final class ViewerFoundationTests: XCTestCase {
     let factory = LockedListenerFactory([first, replacement])
     let model = makeApplicationModel(
       listenerFactory: factory,
-      pairingCodes: LockedPairingCodeSequence(["ABCDEF", "MNPQRS"])
+      pairingCodes: LockedPairingCodeSequence(["ABCD", "MNPQ"])
     )
     model.openWindow()
-    await waitForStatus(.listening(code: "ABCDEF", paused: false), in: model)
+    await waitForStatus(.listening(code: "ABCD", paused: false), in: model)
 
     model.refreshPairingCode()
     replacement.emit(
@@ -1775,7 +1775,7 @@ final class ViewerFoundationTests: XCTestCase {
     )
     await fulfillment(of: [replacementCancelled], timeout: 1)
 
-    XCTAssertEqual(model.status, .listening(code: "ABCDEF", paused: false))
+    XCTAssertEqual(model.status, .listening(code: "ABCD", paused: false))
     XCTAssertEqual(first.cancelCount, 0)
     XCTAssertEqual(replacement.cancelCount, 1)
   }
@@ -1788,16 +1788,16 @@ final class ViewerFoundationTests: XCTestCase {
     let exact = FakeViewerSecureListener(
       eventsOnStart: [.serviceRegistered(exact: true), .ready(port: 49_153)]
     )
-    let codes = LockedPairingCodeSequence(["ABCDEF", "MNPQRS"])
+    let codes = LockedPairingCodeSequence(["ABCD", "MNPQ"])
     let model = makeApplicationModel(
       listenerFactory: LockedListenerFactory([collision, exact]),
       pairingCodes: codes
     )
 
     model.openWindow()
-    await waitForStatus(.listening(code: "MNPQRS", paused: false), in: model)
+    await waitForStatus(.listening(code: "MNPQ", paused: false), in: model)
 
-    XCTAssertEqual(model.status, .listening(code: "MNPQRS", paused: false))
+    XCTAssertEqual(model.status, .listening(code: "MNPQ", paused: false))
     XCTAssertEqual(collision.cancelCount, 1)
     XCTAssertEqual(codes.requestCount, 2)
   }
@@ -1812,7 +1812,7 @@ final class ViewerFoundationTests: XCTestCase {
         ]
       )
     }
-    let codes = LockedPairingCodeSequence(["ABCDEF", "MNPQRS", "TUVWXY"])
+    let codes = LockedPairingCodeSequence(["ABCD", "MNPQ", "TUVW"])
     let model = makeApplicationModel(
       listenerFactory: LockedListenerFactory(listeners),
       pairingCodes: codes
@@ -1838,16 +1838,16 @@ final class ViewerFoundationTests: XCTestCase {
     )
     let model = makeApplicationModel(
       listenerFactory: LockedListenerFactory([first, recovered]),
-      pairingCodes: LockedPairingCodeSequence(["ABCDEF", "MNPQRS"])
+      pairingCodes: LockedPairingCodeSequence(["ABCD", "MNPQ"])
     )
     model.openWindow()
-    await waitForStatus(.listening(code: "ABCDEF", paused: false), in: model)
-    XCTAssertEqual(model.status, .listening(code: "ABCDEF", paused: false))
+    await waitForStatus(.listening(code: "ABCD", paused: false), in: model)
+    XCTAssertEqual(model.status, .listening(code: "ABCD", paused: false))
 
     first.emit(.serviceRemoved)
-    await waitForStatus(.listening(code: "MNPQRS", paused: false), in: model)
+    await waitForStatus(.listening(code: "MNPQ", paused: false), in: model)
 
-    XCTAssertEqual(model.status, .listening(code: "MNPQRS", paused: false))
+    XCTAssertEqual(model.status, .listening(code: "MNPQ", paused: false))
     XCTAssertEqual(first.cancelCount, 1)
   }
 
@@ -1857,7 +1857,7 @@ final class ViewerFoundationTests: XCTestCase {
     let listener = FakeViewerSecureListener(onStart: { listenerStarted.fulfill() })
     let model = makeApplicationModel(
       listenerFactory: LockedListenerFactory([listener]),
-      pairingCodes: LockedPairingCodeSequence(["ABCDEF"])
+      pairingCodes: LockedPairingCodeSequence(["ABCD"])
     )
     model.openWindow()
     let failedExplorer = try XCTUnwrap(model.explorerController)
@@ -1966,10 +1966,10 @@ final class ViewerFoundationTests: XCTestCase {
     )
     let model = makeApplicationModel(
       listenerFactory: LockedListenerFactory([listener]),
-      pairingCodes: LockedPairingCodeSequence(["ABCDEF"])
+      pairingCodes: LockedPairingCodeSequence(["ABCD"])
     )
     model.openWindow()
-    await waitForStatus(.listening(code: "ABCDEF", paused: false), in: model)
+    await waitForStatus(.listening(code: "ABCD", paused: false), in: model)
 
     let sizes: [(String, CGSize)] = [
       (
@@ -2041,7 +2041,7 @@ final class ViewerFoundationTests: XCTestCase {
         let composerFrame = composerProbe.convert(composerProbe.bounds, to: hostingView)
         XCTAssertGreaterThanOrEqual(
           pairingCodeFrame.height,
-          30,
+          36,
           "Pairing code is not visually prominent at \(appearanceName) \(sizeName)"
         )
         XCTAssertEqual(
@@ -2145,10 +2145,10 @@ final class ViewerFoundationTests: XCTestCase {
     )
     let listeningModel = makeApplicationModel(
       listenerFactory: LockedListenerFactory([listener]),
-      pairingCodes: LockedPairingCodeSequence(["ABCDEF"])
+      pairingCodes: LockedPairingCodeSequence(["ABCD"])
     )
     listeningModel.openWindow()
-    await waitForStatus(.listening(code: "ABCDEF", paused: false), in: listeningModel)
+    await waitForStatus(.listening(code: "ABCD", paused: false), in: listeningModel)
 
     let failedModel = ViewerApplicationModel(
       preferences: ViewerPreferences(requiresApproval: { false }, setRequiresApproval: { _ in }),
@@ -2156,7 +2156,7 @@ final class ViewerFoundationTests: XCTestCase {
         loadIdentity: { throw ViewerPairingCodeGenerationError() },
         resetTLSIdentity: {},
         resetAllIdentity: {},
-        generatePairingCode: { try PairingCode("ABCDEF") }
+        generatePairingCode: { try PairingCode("ABCD") }
       )
     )
     failedModel.openWindow()
@@ -2433,10 +2433,10 @@ final class ViewerFoundationTests: XCTestCase {
     )
     let model = makeApplicationModel(
       listenerFactory: LockedListenerFactory([listener]),
-      pairingCodes: LockedPairingCodeSequence(["ABCDEF"])
+      pairingCodes: LockedPairingCodeSequence(["ABCD"])
     )
     model.openWindow()
-    await waitForStatus(.listening(code: "ABCDEF", paused: false), in: model)
+    await waitForStatus(.listening(code: "ABCD", paused: false), in: model)
 
     let sizes: [(String, CGSize)] = [
       (
@@ -2916,11 +2916,11 @@ final class ViewerFoundationTests: XCTestCase {
     )
     let model = makeApplicationModel(
       listenerFactory: LockedListenerFactory([listener]),
-      pairingCodes: LockedPairingCodeSequence(["ABCDEF"])
+      pairingCodes: LockedPairingCodeSequence(["ABCD"])
     )
 
     model.openWindow()
-    await waitForStatus(.listening(code: "ABCDEF", paused: false), in: model)
+    await waitForStatus(.listening(code: "ABCD", paused: false), in: model)
     let explorer = try XCTUnwrap(model.explorerController)
     let analysis = try XCTUnwrap(model.analysisCoordinator)
     let composer = try XCTUnwrap(model.composerController)
@@ -4820,7 +4820,7 @@ final class ViewerFoundationTests: XCTestCase {
             fullResetCount.increment()
             if mode == .full { resetCalled.fulfill() }
           },
-          generatePairingCode: { try PairingCode("ABCDEF") },
+          generatePairingCode: { try PairingCode("ABCD") },
           makeRuntimeComponents: { runtimeLogicalID in
             let owner = FakeAdmissionHandoffOwner(
               runtimeLogicalID: runtimeLogicalID,
@@ -4852,7 +4852,7 @@ final class ViewerFoundationTests: XCTestCase {
         )
       )
       model.openWindow()
-      await waitForStatus(.listening(code: "ABCDEF", paused: false), in: model)
+      await waitForStatus(.listening(code: "ABCD", paused: false), in: model)
       let explorer = try XCTUnwrap(model.explorerController)
       let composer = try XCTUnwrap(model.composerController)
 
@@ -8573,7 +8573,7 @@ final class ViewerFoundationTests: XCTestCase {
         loadIdentity: { throw ViewerPairingCodeGenerationError() },
         resetTLSIdentity: {},
         resetAllIdentity: {},
-        generatePairingCode: { try PairingCode("ABCDEF") },
+        generatePairingCode: { try PairingCode("ABCD") },
         makeRuntimeComponents: { runtimeLogicalID in
           let components = ViewerRuntimeComponents.make(
             runtimeLogicalID: runtimeLogicalID,
@@ -8621,7 +8621,7 @@ final class ViewerFoundationTests: XCTestCase {
         },
         resetTLSIdentity: {},
         resetAllIdentity: {},
-        generatePairingCode: { try PairingCode("ABCDEF") }
+        generatePairingCode: { try PairingCode("ABCD") }
       )
     )
 

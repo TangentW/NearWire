@@ -42,7 +42,7 @@ Apps can send events to the Viewer, and the Viewer can send events back. NearWir
 | Optionally publish performance snapshots | Bidirectional | Send controls back to an App |
 | One Viewer per App connection | ⇄ | One Viewer can host multiple Apps |
 
-The six-character pairing code selects the Viewer advertised nearby. It is intentionally short-lived and easy to replace when switching Macs. It is a discovery selector, not a password or certificate credential.
+The four-character pairing code selects the Viewer advertised nearby. It is intentionally short-lived and easy to replace when switching Macs. It is a discovery selector, not a password or certificate credential.
 
 ## Quick start
 
@@ -83,7 +83,7 @@ struct CheckoutSnapshot: Codable, Sendable {
 
 let nearWire = NearWire()
 
-try await nearWire.connect(code: "N7K4PX")
+try await nearWire.connect(code: "N7K4")
 
 _ = try await nearWire.send(
   type: "checkout.snapshot",

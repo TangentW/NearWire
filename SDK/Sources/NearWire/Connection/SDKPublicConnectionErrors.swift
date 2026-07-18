@@ -1,5 +1,9 @@
 import Foundation
 
+#if SWIFT_PACKAGE
+  @_spi(NearWireInternal) import NearWireCore
+#endif
+
 enum SDKInstallationIdentityError: Error, Equatable, Sendable {
   case unavailable
 }
@@ -9,7 +13,8 @@ enum SDKPublicConnectionErrorMapping {
     NearWireError(
       code: .invalidPairingCode,
       field: "code",
-      message: "The pairing code must contain six supported NearWire characters."
+      message:
+        "The pairing code must contain \(PairingCode.canonicalLength) supported NearWire characters."
     )
   }
 

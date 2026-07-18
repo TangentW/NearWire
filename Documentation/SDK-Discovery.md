@@ -27,12 +27,12 @@ The local-network prompt appears only when the host later starts discovery. Crea
 
 ## Pairing Code
 
-A code contains six characters from `ABCDEFGHJKMNPQRSTUVWXYZ23456789`. Parsing accepts ASCII letter case and removes only ASCII hyphens, ASCII spaces, and ASCII tab/newline whitespace. It rejects Unicode lookalikes, non-ASCII whitespace, punctuation, ambiguous characters, and raw input longer than 64 UTF-8 bytes.
+A code contains four characters from `ABCDEFGHJKMNPQRSTUVWXYZ23456789`. Parsing accepts ASCII letter case and removes only ASCII hyphens, ASCII spaces, and ASCII tab/newline whitespace. It rejects Unicode lookalikes, non-ASCII whitespace, punctuation, ambiguous characters, and raw input longer than 64 UTF-8 bytes.
 
 The canonical code maps to exactly one instance name:
 
 ```text
-7K3M9Q -> NearWire-7K3M9Q._nearwire._tcp.local.
+7K3M -> NearWire-7K3M._nearwire._tcp.local.
 ```
 
 Matching is case-sensitive after local code normalization. It does not accept a prefix, suffix, Bonjour conflict-renamed instance, or arbitrary service of the same type. The code remains in memory only and is omitted from supported diagnostics.

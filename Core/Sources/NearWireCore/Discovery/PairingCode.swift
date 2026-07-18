@@ -18,10 +18,11 @@ extension PairingCodeError: CustomStringConvertible, CustomDebugStringConvertibl
 }
 
 @_spi(NearWireInternal) public struct PairingCode: Equatable, Hashable, Sendable {
-  public static let canonicalLength = 6
+  public static let canonicalLength = 4
+  public static let canonicalAlphabet = Array("ABCDEFGHJKMNPQRSTUVWXYZ23456789".utf8)
   public static let maximumRawUTF8Length = 64
 
-  private static let allowedBytes = Set("ABCDEFGHJKMNPQRSTUVWXYZ23456789".utf8)
+  private static let allowedBytes = Set(Self.canonicalAlphabet)
   private let bytes: [UInt8]
 
   public init(_ rawValue: String) throws {

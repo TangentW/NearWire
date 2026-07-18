@@ -6,6 +6,17 @@ import XCTest
 @testable import NearWire
 
 final class SDKPublicConnectionFoundationTests: XCTestCase {
+  func testInvalidPairingCodeErrorDescribesTheFourCharacterContract() {
+    let error = SDKPublicConnectionErrorMapping.invalidPairingCode()
+
+    XCTAssertEqual(error.code, .invalidPairingCode)
+    XCTAssertEqual(error.field, "code")
+    XCTAssertEqual(
+      error.message,
+      "The pairing code must contain 4 supported NearWire characters."
+    )
+  }
+
   func testEveryInternalConnectionErrorMapsToFixedSafePublicError() {
     let secret = "SECRET-PAIRING-ENDPOINT"
     for code in SDKSessionAdmissionError.Code.allCases {

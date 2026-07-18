@@ -518,7 +518,7 @@ struct ViewerRootView: View {
     case .listening(let code, let paused):
       HStack(spacing: 8) {
         Text(code)
-          .font(.system(size: 30, weight: .semibold, design: .monospaced))
+          .font(.system(size: 36, weight: .semibold, design: .monospaced))
           .textSelection(.enabled)
           .accessibilityLabel("Pairing code \(code)")
         Text(LocalizedStringKey(paused ? "Paused" : "Listening"))

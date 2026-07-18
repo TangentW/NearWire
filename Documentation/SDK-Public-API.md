@@ -45,13 +45,13 @@ Initialization allocates small in-memory state only. It does not start discovery
 
 ```swift
 do {
-  try await nearWire.connect(code: "ABC234")
+  try await nearWire.connect(code: "ABC2")
 } catch let error as NearWireError {
   // Branch on error.code. Messages are fixed engineering diagnostics.
 }
 ```
 
-The code uses the same bounded six-character normalization as Viewer discovery. It is a discovery and admission selector, not a password or certificate credential. NearWire never persists it. One actor-owned intent retains the normalized value in memory after validation so an admitted connection can later be suspended or recovered. Route owners, delay tasks, errors, Events, Keychain, and diagnostics do not retain it. Disconnect, permanent recovery failure, enabled recovery exhaustion, and shutdown clear the intent.
+The code uses the same bounded four-character normalization as Viewer discovery. It is a discovery and admission selector, not a password or certificate credential. NearWire never persists it. One actor-owned intent retains the normalized value in memory after validation so an admitted connection can later be suspended or recovered. Route owners, delay tasks, errors, Events, Keychain, and diagnostics do not retain it. Disconnect, permanent recovery failure, enabled recovery exhaustion, and shutdown clear the intent.
 
 One call performs one attempt: it claims process ownership, loads the device-local installation identifier, discovers the matching Viewer through peer-to-peer-enabled Bonjour, establishes mandatory TLS 1.3, completes hello approval, and activates the first conservative flow policy. Success means that active transport is ready. It does not mean that any Event was received, persisted, processed, or acknowledged.
 

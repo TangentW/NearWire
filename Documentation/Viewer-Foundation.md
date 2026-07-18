@@ -41,7 +41,7 @@ The create phase stores an isolated installation identity and TLS identity and p
 
 ## Pairing and Nearby Discovery
 
-Each listener generation creates a six-character code from `ABCDEFGHJKMNPQRSTUVWXYZ23456789` with `SecRandomCopyBytes` and unbiased rejection sampling. The code maps to the Bonjour instance `NearWire-<code>` under `_nearwire._tcp` in `local.`. TXT data contains only `vid`, the stable bounded discriminator derived from the Viewer installation ID.
+Each listener generation creates a four-character code from `ABCDEFGHJKMNPQRSTUVWXYZ23456789` with `SecRandomCopyBytes` and unbiased rejection sampling. The code maps to the Bonjour instance `NearWire-<code>` under `_nearwire._tcp` in `local.`. TXT data contains only `vid`, the stable bounded discriminator derived from the Viewer installation ID.
 
 The code is memory-only. NearWire does not store it in UserDefaults, Keychain, session data, logs, or analytics. It enters the system clipboard only when the user chooses Copy.
 

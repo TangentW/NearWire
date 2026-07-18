@@ -10,7 +10,7 @@ struct ViewerPairingCodeGenerator: Sendable {
     return bytes
   }
 
-  private static let alphabet = Array("ABCDEFGHJKMNPQRSTUVWXYZ23456789".utf8)
+  private static let alphabet = PairingCode.canonicalAlphabet
   private static let unbiasedUpperBound = UInt8((256 / alphabet.count) * alphabet.count)
   private let randomBytes: @Sendable (Int) throws -> [UInt8]
 

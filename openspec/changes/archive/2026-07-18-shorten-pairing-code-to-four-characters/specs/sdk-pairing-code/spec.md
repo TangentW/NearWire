@@ -1,8 +1,5 @@
-# sdk-pairing-code Specification
+## MODIFIED Requirements
 
-## Purpose
-TBD - created by archiving change sdk-pairing-discovery. Update Purpose after archive.
-## Requirements
 ### Requirement: Pairing code has one canonical grammar
 
 Core SHALL represent a pairing code behind repository-only SPI as exactly four bytes from
@@ -49,32 +46,3 @@ type.
 
 - **WHEN** a result is named `NearWire-7K3M (2)`
 - **THEN** it is not a match for `7K3M`
-
-### Requirement: Pairing code is not a secret or identity credential
-
-The SDK SHALL use the pairing code only to select a nearby Bonjour service. It SHALL NOT derive encryption keys, authenticate the Viewer, persist the code, place it in errors or logs, or treat a match as certificate identity proof.
-
-#### Scenario: Discovery diagnostic
-
-- **WHEN** discovery fails for a supplied code
-- **THEN** the diagnostic identifies the failure category without containing the canonical code
-
-### Requirement: Viewer discovery discriminator has one shared derivation
-
-Core SHALL derive `ViewerDiscoveryDiscriminator` with `CryptoKit.SHA256` over the exact validated `EndpointID.rawValue` UTF-8 bytes, without case folding or normalization, then encode the first eight digest bytes as exactly 16 lowercase hexadecimal ASCII characters. It SHALL NOT use a custom cryptographic implementation. Equal installation-ID input SHALL produce the same value. A reset installation identity SHALL recompute the value, but a distinct input is not guaranteed to avoid collision in the truncated 64-bit output. The discriminator SHALL be treated as public locally linkable metadata rather than authentication, secrecy, or certificate binding.
-
-#### Scenario: Golden discriminator vectors
-
-- **WHEN** installation ID `viewer-installation` is derived
-- **THEN** the discriminator is `b3a97f874aad08bf`
-- **AND** installation ID `00000000-0000-0000-0000-000000000001` derives `7ac1b8d7010bb6cd`
-
-#### Scenario: Input bytes differ
-
-- **WHEN** two valid installation IDs differ by case or any ASCII byte
-- **THEN** derivation hashes their exact respective bytes without normalization
-
-#### Scenario: Pairing code refreshes
-
-- **WHEN** one Viewer installation keeps its installation ID and refreshes only its pairing code
-- **THEN** `vid` remains stable and can be locally correlated across the two advertisements

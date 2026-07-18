@@ -26,7 +26,7 @@ func compileSupportedNearWireAPI() async throws {
   )
   let nearWire = NearWire(configuration: configuration)
   do {
-    try await nearWire.connect(code: "ABC234")
+    try await nearWire.connect(code: "ABC2")
   } catch let error as NearWireError {
     switch error.code {
     case .invalidPairingCode, .connectionInProgress, .alreadyConnected,

@@ -2369,7 +2369,7 @@ final class SDKSessionAdmissionTests: XCTestCase {
   }
 
   func testLocalRoleAndOutboundCapacityFailBeforeDiscovery() async throws {
-    let pairingCode = try PairingCode("ABC234")
+    let pairingCode = try PairingCode("ABC2")
     let viewerHello = try makeSessionHello(role: .viewer)
     let discovery = SessionTestDiscovery(result: try makeDiscoveredViewer(viewerHello: viewerHello))
     let counters = SessionDependencyCounters()
@@ -2482,7 +2482,7 @@ final class SDKSessionAdmissionTests: XCTestCase {
   }
 
   func testErrorCodesAndHandlesHaveClosedRedactedDiagnostics() async throws {
-    let hostile = "ABC234 viewer-installation private-endpoint secret-content"
+    let hostile = "ABC2 viewer-installation private-endpoint secret-content"
     for code in SDKSessionAdmissionError.Code.allCases {
       let error = SDKSessionAdmissionError(code)
       XCTAssertFalse(error.description.contains(hostile))
@@ -2524,7 +2524,7 @@ final class SDKSessionAdmissionTests: XCTestCase {
   }
 
   func testDiscoverySecureAndAttachmentDeadlinesMapExactly() async throws {
-    let pairingCode = try PairingCode("ABC234")
+    let pairingCode = try PairingCode("ABC2")
     let appHello = try makeSessionHello(role: .app)
     let viewerHello = try makeSessionHello(role: .viewer)
     let discovered = try makeDiscoveredViewer(viewerHello: viewerHello)
@@ -3028,7 +3028,7 @@ final class SDKSessionAdmissionTests: XCTestCase {
       )
       let transportLimits = try SecureTransportLimits(connectionTimeoutSeconds: 1)
       let admission = SDKSessionAdmission(
-        pairingCode: try PairingCode("ABC234"),
+        pairingCode: try PairingCode("ABC2"),
         localHello: appHello,
         transportLimits: transportLimits,
         dependencies: SDKSessionAdmissionDependencies(
@@ -3215,7 +3215,7 @@ final class SDKSessionAdmissionTests: XCTestCase {
       let discovery = SessionControlledDiscovery()
       let counters = SessionDependencyCounters()
       let admission = SDKSessionAdmission(
-        pairingCode: try PairingCode("ABC234"),
+        pairingCode: try PairingCode("ABC2"),
         localHello: try makeSessionHello(role: .app),
         dependencies: SDKSessionAdmissionDependencies(
           makeDiscovery: { _ in discovery },
@@ -3254,7 +3254,7 @@ final class SDKSessionAdmissionTests: XCTestCase {
         result: try makeDiscoveredViewer(viewerHello: viewerHello)
       )
       let admission = SDKSessionAdmission(
-        pairingCode: try PairingCode("ABC234"),
+        pairingCode: try PairingCode("ABC2"),
         localHello: try makeSessionHello(role: .app),
         phaseObserver: {
           await barrier.wait()
@@ -3307,7 +3307,7 @@ final class SDKSessionAdmissionTests: XCTestCase {
     let discovered = try makeDiscoveredViewer(viewerHello: viewerHello)
     let transportLimits = try SecureTransportLimits(connectionTimeoutSeconds: 1)
     var admission: SDKSessionAdmission? = SDKSessionAdmission(
-      pairingCode: try PairingCode("ABC234"),
+      pairingCode: try PairingCode("ABC2"),
       localHello: appHello,
       transportLimits: transportLimits,
       dependencies: SDKSessionAdmissionDependencies(
@@ -3386,7 +3386,7 @@ final class SDKSessionAdmissionTests: XCTestCase {
     for (source, expected) in mappings {
       let discovery = SessionTestDiscovery(error: ViewerDiscoveryError(source))
       let admission = SDKSessionAdmission(
-        pairingCode: try PairingCode("ABC234"),
+        pairingCode: try PairingCode("ABC2"),
         localHello: try makeSessionHello(role: .app),
         dependencies: SDKSessionAdmissionDependencies(
           makeDiscovery: { _ in discovery },
@@ -3548,7 +3548,7 @@ final class SDKSessionAdmissionTests: XCTestCase {
     )
     let transportLimits = try SecureTransportLimits(connectionTimeoutSeconds: 1)
     let admission = SDKSessionAdmission(
-      pairingCode: try PairingCode("ABC234"),
+      pairingCode: try PairingCode("ABC2"),
       localHello: try makeSessionHello(role: .app),
       transportLimits: transportLimits,
       dependencies: SDKSessionAdmissionDependencies(
@@ -3717,7 +3717,7 @@ final class SDKSessionAdmissionTests: XCTestCase {
         result: try makeDiscoveredViewer(viewerHello: remoteHello)
       )
       let admission = SDKSessionAdmission(
-        pairingCode: try PairingCode("ABC234"),
+        pairingCode: try PairingCode("ABC2"),
         localHello: try makeSessionHello(role: .app),
         transportLimits: transportLimits,
         dependencies: SDKSessionAdmissionDependencies(
@@ -3858,7 +3858,7 @@ final class SDKSessionAdmissionTests: XCTestCase {
       }
       let endpointPort = try XCTUnwrap(NWEndpoint.Port(rawValue: port))
       let identity = NearWireBonjourServiceIdentity(
-        instanceName: "NearWire-ABC234",
+        instanceName: "NearWire-ABC2",
         type: NearWireBonjour.serviceType,
         domain: NearWireBonjour.localDomain,
         viewerDiscriminator: ViewerDiscoveryDiscriminator(
@@ -3871,7 +3871,7 @@ final class SDKSessionAdmissionTests: XCTestCase {
       )
       let transportLimits = try SecureTransportLimits(connectionTimeoutSeconds: 3)
       let admission = SDKSessionAdmission(
-        pairingCode: try PairingCode("ABC234"),
+        pairingCode: try PairingCode("ABC2"),
         localHello: appHello,
         transportLimits: transportLimits,
         dependencies: SDKSessionAdmissionDependencies(
@@ -4043,7 +4043,7 @@ final class SDKSessionAdmissionTests: XCTestCase {
       let endpointPort = try XCTUnwrap(NWEndpoint.Port(rawValue: port))
       let identity = try XCTUnwrap(
         NearWireBonjourServiceIdentity(
-          instanceName: "NearWire-ABC234",
+          instanceName: "NearWire-ABC2",
           type: NearWireBonjour.serviceType,
           domain: NearWireBonjour.localDomain,
           viewerDiscriminator: ViewerDiscoveryDiscriminator(
@@ -4105,7 +4105,7 @@ final class SDKSessionAdmissionTests: XCTestCase {
         connectionDependencies: connectionDependencies
       )
       _ = try await owner.send(type: "integration.uplink", content: ["value": 1])
-      let connectTask = Task { try await owner.connect(code: "ABC234") }
+      let connectTask = Task { try await owner.connect(code: "ABC2") }
 
       await fulfillment(of: [viewerReady, appHelloReceived], timeout: 3)
       let competitorIdentityLoads = SDKLockedCapture<Void>()
@@ -4139,7 +4139,7 @@ final class SDKSessionAdmissionTests: XCTestCase {
         )
       )
       do {
-        try await competitor.connect(code: "ABC234")
+        try await competitor.connect(code: "ABC2")
         XCTFail("A second public connection unexpectedly acquired the process lease.")
       } catch {
         assertNearWireError(error, code: .anotherConnectionIsActive)
@@ -4221,7 +4221,7 @@ final class SDKSessionAdmissionTests: XCTestCase {
     let discovery = SessionControlledDiscovery()
     let cancellationEntries = SDKLockedCapture<Void>()
     let admission = SDKSessionAdmission(
-      pairingCode: try PairingCode("ABC234"),
+      pairingCode: try PairingCode("ABC2"),
       localHello: try makeSessionHello(role: .app),
       transitionGate: gate,
       cancellationObserver: { cancellationEntries.append(()) },
@@ -4304,7 +4304,7 @@ private struct SessionAdmissionFixture {
       sleep: sessionTestSleep
     )
     admission = SDKSessionAdmission(
-      pairingCode: try PairingCode("ABC234"),
+      pairingCode: try PairingCode("ABC2"),
       localHello: appHello,
       transportLimits: transportLimits,
       admissionLimits: admissionLimits,
@@ -5034,7 +5034,7 @@ private func makeSessionHello(
 
 private func makeDiscoveredViewer(viewerHello: WireHello) throws -> DiscoveredViewer {
   let identity = NearWireBonjourServiceIdentity(
-    instanceName: "NearWire-ABC234",
+    instanceName: "NearWire-ABC2",
     type: NearWireBonjour.serviceType,
     domain: NearWireBonjour.localDomain,
     viewerDiscriminator: ViewerDiscoveryDiscriminator(

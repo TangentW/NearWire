@@ -5,14 +5,14 @@ import XCTest
 
 final class PairingDiscoveryIdentityTests: XCTestCase {
   func testPairingCodeNormalizesOnlyDocumentedASCIISeparators() throws {
-    let code = try PairingCode(" \t7k3m-\r\n9q ")
-    XCTAssertEqual(code.canonicalValue, "7K3M9Q")
-    XCTAssertEqual(NearWireBonjour.instanceName(for: code), "NearWire-7K3M9Q")
+    let code = try PairingCode(" \t7k-\r\n3m ")
+    XCTAssertEqual(code.canonicalValue, "7K3M")
+    XCTAssertEqual(NearWireBonjour.instanceName(for: code), "NearWire-7K3M")
 
     for invalid in [
-      "0K3M9Q", "OK3M9Q", "1K3M9Q", "IK3M9Q", "LK3M9Q", "７K3M9Q", "7K3M\u{00A0}9Q",
-      "7K3M_9Q", "7K3M9", "7K3M9QZ", "7K3\0M9Q", "7K3\u{001B}M9Q",
-      "7K3\u{007F}M9Q", "7K3\u{202E}M9Q", "7K3\u{2066}M9Q",
+      "0K3M", "OK3M", "1K3M", "IK3M", "LK3M", "７K3M", "7K3\u{00A0}M",
+      "7K3_M", "7K3", "7K3MZ", "7K\0 3M", "7K\u{001B}3M",
+      "7K\u{007F}3M", "7K\u{202E}3M", "7K\u{2066}3M",
     ] {
       XCTAssertThrowsError(try PairingCode(invalid)) { error in
         XCTAssertEqual(error as? PairingCodeError, PairingCodeError())
@@ -22,33 +22,44 @@ final class PairingDiscoveryIdentityTests: XCTestCase {
 
     for separator in [9, 10, 11, 12, 13, 32, 45] {
       let scalar = UnicodeScalar(separator)!
-      XCTAssertEqual(try PairingCode("7K3\(scalar)M9Q").canonicalValue, "7K3M9Q")
+      XCTAssertEqual(try PairingCode("7K\(scalar)3M").canonicalValue, "7K3M")
     }
   }
 
   func testEveryAlphabetByteAndCaseAreAccepted() throws {
     for byte in "ABCDEFGHJKMNPQRSTUVWXYZ23456789".utf8 {
       let scalar = String(UnicodeScalar(byte))
-      let raw = String(repeating: scalar.lowercased(), count: 6)
-      XCTAssertEqual(try PairingCode(raw).canonicalValue, String(repeating: scalar, count: 6))
+      let raw = String(repeating: scalar.lowercased(), count: PairingCode.canonicalLength)
+      XCTAssertEqual(
+        try PairingCode(raw).canonicalValue,
+        String(repeating: scalar, count: PairingCode.canonicalLength)
+      )
     }
   }
 
   func testRawInputWorkBound() throws {
     XCTAssertEqual(
-      try PairingCode(String(repeating: "-", count: 58) + "7K3M9Q").canonicalValue,
-      "7K3M9Q"
+      try PairingCode(
+        String(
+          repeating: "-",
+          count: PairingCode.maximumRawUTF8Length - PairingCode.canonicalLength
+        ) + "7K3M"
+      ).canonicalValue,
+      "7K3M"
     )
     for input in [
       String(repeating: "-", count: 65),
-      String(repeating: " ", count: 59) + "7K3M9Q",
+      String(
+        repeating: " ",
+        count: PairingCode.maximumRawUTF8Length - PairingCode.canonicalLength + 1
+      ) + "7K3M",
     ] {
       XCTAssertThrowsError(try PairingCode(input))
     }
   }
 
   func testSensitiveDescriptionsAreRedacted() throws {
-    let code = try PairingCode("7K3M9Q")
+    let code = try PairingCode("7K3M")
     let discriminator = ViewerDiscoveryDiscriminator(
       viewerInstallationID: try EndpointID(rawValue: "viewer-installation")
     )
@@ -65,7 +76,7 @@ final class PairingDiscoveryIdentityTests: XCTestCase {
       String(reflecting: discriminator), identity.description, identity.debugDescription,
       String(describing: identity), String(reflecting: identity),
     ] {
-      XCTAssertFalse(rendered.contains("7K3M9Q"))
+      XCTAssertFalse(rendered.contains("7K3M"))
       XCTAssertFalse(rendered.contains("b3a97f874aad08bf"))
     }
   }
@@ -103,19 +114,19 @@ final class PairingDiscoveryIdentityTests: XCTestCase {
   func testServiceIdentityCanonicalizesTypeAndDomainButNotInstance() throws {
     let discriminator = ViewerDiscoveryDiscriminator(rawValue: "b3a97f874aad08bf")!
     let identity = NearWireBonjourServiceIdentity(
-      instanceName: "NearWire-7K3M9Q",
+      instanceName: "NearWire-7K3M",
       type: "_NEARWIRE._TCP",
       domain: "LOCAL",
       viewerDiscriminator: discriminator
     )
     XCTAssertEqual(identity?.type, "_nearwire._tcp")
     XCTAssertEqual(identity?.domain, "local.")
-    XCTAssertEqual(identity?.instanceName, "NearWire-7K3M9Q")
+    XCTAssertEqual(identity?.instanceName, "NearWire-7K3M")
 
     for hostileName in [
-      "NearWire-7K3M9Q\nspoof", "NearWire-7K3M9Q\0spoof",
-      "NearWire-7K3M9Q\u{001B}spoof", "NearWire-7K3M9Q\u{007F}spoof",
-      "NearWire-7K3M9Q\u{202E}spoof", "NearWire-7K3M9Q\u{2066}spoof",
+      "NearWire-7K3M\nspoof", "NearWire-7K3M\0spoof",
+      "NearWire-7K3M\u{001B}spoof", "NearWire-7K3M\u{007F}spoof",
+      "NearWire-7K3M\u{202E}spoof", "NearWire-7K3M\u{2066}spoof",
     ] {
       XCTAssertNil(
         NearWireBonjourServiceIdentity(
@@ -141,13 +152,13 @@ final class PairingDiscoveryIdentityTests: XCTestCase {
   func testIdentityIgnoresInterfaceObservationsByConstruction() throws {
     let discriminator = ViewerDiscoveryDiscriminator(rawValue: "b3a97f874aad08bf")!
     let first = NearWireBonjourServiceIdentity(
-      instanceName: "NearWire-7K3M9Q",
+      instanceName: "NearWire-7K3M",
       type: NearWireBonjour.serviceType,
       domain: NearWireBonjour.localDomain,
       viewerDiscriminator: discriminator
     )!
     let second = NearWireBonjourServiceIdentity(
-      instanceName: "NearWire-7K3M9Q",
+      instanceName: "NearWire-7K3M",
       type: "_NEARWIRE._TCP",
       domain: "local",
       viewerDiscriminator: discriminator

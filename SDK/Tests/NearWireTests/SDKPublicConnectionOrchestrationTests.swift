@@ -99,9 +99,9 @@ final class SDKPublicConnectionOrchestrationTests: XCTestCase {
   }
 
   func testPairingTransferClearsOwnershipAfterOneSynchronousTake() throws {
-    let transfer = try SDKPairingCodeTransfer(rawValue: "ABC234")
+    let transfer = try SDKPairingCodeTransfer(rawValue: "ABC2")
     XCTAssertFalse(transfer.isEmpty)
-    XCTAssertEqual(transfer.take()?.canonicalValue, "ABC234")
+    XCTAssertEqual(transfer.take()?.canonicalValue, "ABC2")
     XCTAssertTrue(transfer.isEmpty)
     XCTAssertNil(transfer.take())
   }
@@ -308,7 +308,7 @@ final class SDKPublicConnectionOrchestrationTests: XCTestCase {
     let probe = SDKPublicConnectionProbe()
     let identity = SDKPublicIdentityBarrier()
     let owner = makeOwner(probe: probe) { try await identity.run() }
-    let first = Task { try await owner.connect(code: "ABC234") }
+    let first = Task { try await owner.connect(code: "ABC2") }
     await identity.waitUntilReached()
     first.cancel()
 
@@ -336,7 +336,7 @@ final class SDKPublicConnectionOrchestrationTests: XCTestCase {
         reach: { _ in }
       )
     )
-    let connect = Task { try await owner.connect(code: "ABC234") }
+    let connect = Task { try await owner.connect(code: "ABC2") }
     await barrier.waitUntilReached()
     connect.cancel()
     barrier.release()
@@ -359,7 +359,7 @@ final class SDKPublicConnectionOrchestrationTests: XCTestCase {
         throw ProcessConnectionLeaseError.anotherConnectionIsActive
       }
     )
-    let connect = Task { try await owner.connect(code: "ABC234") }
+    let connect = Task { try await owner.connect(code: "ABC2") }
     await barrier.waitUntilReached()
     connect.cancel()
     barrier.release()
@@ -374,7 +374,7 @@ final class SDKPublicConnectionOrchestrationTests: XCTestCase {
     let probe = SDKPublicConnectionProbe()
     let identity = SDKPublicIdentityBarrier()
     let owner = makeOwner(probe: probe) { try await identity.run() }
-    let connect = Task { try await owner.connect(code: "ABC234") }
+    let connect = Task { try await owner.connect(code: "ABC2") }
     await identity.waitUntilReached()
 
     await owner.shutdown()
@@ -398,7 +398,7 @@ final class SDKPublicConnectionOrchestrationTests: XCTestCase {
       discovery: { discovery },
       driver: driver
     )
-    let connect = Task { try await owner.connect(code: "ABC234") }
+    let connect = Task { try await owner.connect(code: "ABC2") }
     await discovery.waitUntilRunning()
     connect.cancel()
 
@@ -425,7 +425,7 @@ final class SDKPublicConnectionOrchestrationTests: XCTestCase {
         return await observer()
       }
     )
-    let connect = Task { try await owner.connect(code: "ABC234") }
+    let connect = Task { try await owner.connect(code: "ABC2") }
     await phase.waitUntilReached()
     await owner.shutdown()
     phase.resume()
@@ -443,7 +443,7 @@ final class SDKPublicConnectionOrchestrationTests: XCTestCase {
       discovery: { SDKPublicImmediateDiscovery(result: Self.discoveredViewer()) },
       driver: driver
     )
-    let connect = Task { try await owner.connect(code: "ABC234") }
+    let connect = Task { try await owner.connect(code: "ABC2") }
     await driver.waitUntilStarted()
     connect.cancel()
 
@@ -495,7 +495,7 @@ final class SDKPublicConnectionOrchestrationTests: XCTestCase {
         hooks: .none
       )
     )
-    let connect = Task { try await owner.connect(code: "ABC234") }
+    let connect = Task { try await owner.connect(code: "ABC2") }
 
     await session.driver.waitUntilStarted()
     session.driver.emitState(.ready)
@@ -545,7 +545,7 @@ final class SDKPublicConnectionOrchestrationTests: XCTestCase {
     var owner: NearWire? = makeSessionOwner(probe: probe, session: session)
     let weakOwner = SDKWeakNearWire(owner)
     var connect: Task<Void, Error>? = Task { [owner] in
-      try await owner!.connect(code: "ABC234")
+      try await owner!.connect(code: "ABC2")
     }
     try await driveConnection(session: session, connect: connect!)
     connect = nil
@@ -573,7 +573,7 @@ final class SDKPublicConnectionOrchestrationTests: XCTestCase {
         }
       )
     )
-    let connect = Task { try await owner.connect(code: "ABC234") }
+    let connect = Task { try await owner.connect(code: "ABC2") }
     try await driveAdmission(session: session)
     await barrier.waitUntilReached()
     connect.cancel()
@@ -602,7 +602,7 @@ final class SDKPublicConnectionOrchestrationTests: XCTestCase {
         }
       )
     )
-    let connect = Task { try await owner.connect(code: "ABC234") }
+    let connect = Task { try await owner.connect(code: "ABC2") }
     try await driveAdmission(session: session)
     try await sendInitialPolicy(session: session)
     await barrier.waitUntilReached()
@@ -632,7 +632,7 @@ final class SDKPublicConnectionOrchestrationTests: XCTestCase {
         }
       )
     )
-    let connect = Task { try await owner.connect(code: "ABC234") }
+    let connect = Task { try await owner.connect(code: "ABC2") }
     try await driveConnection(session: session, connect: connect)
     var states = owner.states.makeAsyncIterator()
     let initialState = await states.next()
@@ -672,7 +672,7 @@ final class SDKPublicConnectionOrchestrationTests: XCTestCase {
         )
       }
     )
-    let connect = Task { try await owner.connect(code: "ABC234") }
+    let connect = Task { try await owner.connect(code: "ABC2") }
     try await driveConnection(session: session, connect: connect)
     var states = owner.states.makeAsyncIterator()
     let connected = await states.next()
@@ -682,11 +682,11 @@ final class SDKPublicConnectionOrchestrationTests: XCTestCase {
     XCTAssertEqual(disconnected, .disconnected)
 
     await assertConnectError(.connectionIntentExists) {
-      try await owner.connect(code: "ABC234")
+      try await owner.connect(code: "ABC2")
     }
     await owner.disconnect()
     await assertConnectError(.anotherConnectionIsActive) {
-      try await owner.connect(code: "ABC234")
+      try await owner.connect(code: "ABC2")
     }
     XCTAssertEqual(probe.snapshot.identities, 1)
     XCTAssertEqual(runtime.snapshot.enters, 3)
@@ -711,7 +711,7 @@ final class SDKPublicConnectionOrchestrationTests: XCTestCase {
     )
 
     await assertConnectError(.connectionOwnershipUnavailable) {
-      try await owner.connect(code: "ABC234")
+      try await owner.connect(code: "ABC2")
     }
     XCTAssertEqual(probe.snapshot.identities, 0)
     XCTAssertEqual(runtime.snapshot.exits, 1)
@@ -735,7 +735,7 @@ final class SDKPublicConnectionOrchestrationTests: XCTestCase {
         )
       }
     )
-    let connect = Task { try await owner.connect(code: "ABC234") }
+    let connect = Task { try await owner.connect(code: "ABC2") }
     try await driveConnection(session: session, connect: connect)
     var states = owner.states.makeAsyncIterator()
     let connected = await states.next()
@@ -763,7 +763,7 @@ final class SDKPublicConnectionOrchestrationTests: XCTestCase {
         }
       )
     )
-    let connect = Task { try await owner.connect(code: "ABC234") }
+    let connect = Task { try await owner.connect(code: "ABC2") }
     try await driveConnection(session: session, connect: connect)
 
     let disconnect = Task { await owner.disconnect() }
@@ -790,7 +790,7 @@ final class SDKPublicConnectionOrchestrationTests: XCTestCase {
       probe: probe,
       sessions: [first, second]
     )
-    let connect = Task { try await owner.connect(code: "ABC234") }
+    let connect = Task { try await owner.connect(code: "ABC2") }
     try await driveConnection(session: first, connect: connect)
 
     await owner.suspendConnection()
@@ -841,7 +841,7 @@ final class SDKPublicConnectionOrchestrationTests: XCTestCase {
       configuration: try NearWireConfiguration(reconnectionPolicy: policy),
       sleep: { sleeps.append($0) }
     )
-    let connect = Task { try await owner.connect(code: "ABC234") }
+    let connect = Task { try await owner.connect(code: "ABC2") }
     try await driveConnection(session: first, connect: connect)
     let initialSendCount = first.driver.sentData.count
     _ = try await owner.send(type: "lifecycle.accepted", content: ["value": 1])
@@ -871,7 +871,7 @@ final class SDKPublicConnectionOrchestrationTests: XCTestCase {
       sessions: [first, second],
       sleep: { sleeps.append($0) }
     )
-    let connect = Task { try await owner.connect(code: "ABC234") }
+    let connect = Task { try await owner.connect(code: "ABC2") }
     try await driveConnection(session: first, connect: connect)
 
     first.driver.emitState(.failed)
@@ -902,7 +902,7 @@ final class SDKPublicConnectionOrchestrationTests: XCTestCase {
       configuration: try NearWireConfiguration(reconnectionPolicy: policy),
       sleep: { sleeps.append($0) }
     )
-    let connect = Task { try await owner.connect(code: "ABC234") }
+    let connect = Task { try await owner.connect(code: "ABC2") }
     try await driveConnection(session: sessions[0], connect: connect)
 
     sessions[0].driver.emitState(.failed)
@@ -930,7 +930,7 @@ final class SDKPublicConnectionOrchestrationTests: XCTestCase {
     let probe = SDKPublicConnectionProbe()
     let session = SDKPublicSessionController()
     let owner = makeSessionOwner(probe: probe, session: session)
-    let connect = Task { try await owner.connect(code: "ABC234") }
+    let connect = Task { try await owner.connect(code: "ABC2") }
     try await driveConnection(session: session, connect: connect)
 
     await owner.resumeConnection()
@@ -981,7 +981,7 @@ final class SDKPublicConnectionOrchestrationTests: XCTestCase {
     let probe = SDKPublicConnectionProbe()
     let identity = SDKPublicIdentityBarrier()
     let owner = makeOwner(probe: probe) { try await identity.run() }
-    let connect = Task { try await owner.connect(code: "ABC234") }
+    let connect = Task { try await owner.connect(code: "ABC2") }
     await identity.waitUntilReached()
 
     let suspend = Task { await owner.suspendConnection() }
@@ -1015,7 +1015,7 @@ final class SDKPublicConnectionOrchestrationTests: XCTestCase {
         }
       )
     )
-    let connect = Task { try await owner.connect(code: "ABC234") }
+    let connect = Task { try await owner.connect(code: "ABC2") }
     try await driveConnection(session: session, connect: connect)
 
     let first = Task {
@@ -1052,7 +1052,7 @@ final class SDKPublicConnectionOrchestrationTests: XCTestCase {
       configuration: try NearWireConfiguration(reconnectionPolicy: policy),
       sleep: { duration in try await sleep.run(duration) }
     )
-    let connect = Task { try await owner.connect(code: "ABC234") }
+    let connect = Task { try await owner.connect(code: "ABC2") }
     try await driveConnection(session: session, connect: connect)
 
     session.driver.emitState(.failed)
@@ -1086,7 +1086,7 @@ final class SDKPublicConnectionOrchestrationTests: XCTestCase {
       configuration: try NearWireConfiguration(reconnectionPolicy: policy),
       sleep: { duration in try await sleep.run(duration) }
     )
-    let connect = Task { try await owner.connect(code: "ABC234") }
+    let connect = Task { try await owner.connect(code: "ABC2") }
     try await driveConnection(session: session, connect: connect)
 
     session.driver.emitState(.failed)
@@ -1116,7 +1116,7 @@ final class SDKPublicConnectionOrchestrationTests: XCTestCase {
         }
       )
     )
-    let connect = Task { try await owner.connect(code: "ABC234") }
+    let connect = Task { try await owner.connect(code: "ABC2") }
     try await driveConnection(session: session, connect: connect)
 
     let disconnect = Task { await owner.disconnect() }
@@ -1154,7 +1154,7 @@ final class SDKPublicConnectionOrchestrationTests: XCTestCase {
       ),
       sleep: { duration in try await sleep.run(duration) }
     )
-    let connect = Task { try await owner.connect(code: "ABC234") }
+    let connect = Task { try await owner.connect(code: "ABC2") }
     try await driveConnection(session: first, connect: connect)
 
     let suspend = Task { await owner.suspendConnection() }
@@ -1197,7 +1197,7 @@ final class SDKPublicConnectionOrchestrationTests: XCTestCase {
       configuration: try NearWireConfiguration(reconnectionPolicy: policy),
       sleep: { duration in try await sleeps.run(duration) }
     )
-    let connect = Task { try await owner.connect(code: "ABC234") }
+    let connect = Task { try await owner.connect(code: "ABC2") }
     try await driveConnection(session: first, connect: connect)
 
     first.driver.emitState(.failed)
@@ -1246,7 +1246,7 @@ final class SDKPublicConnectionOrchestrationTests: XCTestCase {
         }
       )
     )
-    let connect = Task { try await owner.connect(code: "ABC234") }
+    let connect = Task { try await owner.connect(code: "ABC2") }
     try await driveConnection(session: sessions[0], connect: connect)
 
     sessions[0].driver.emitState(.failed)
@@ -1292,7 +1292,7 @@ final class SDKPublicConnectionOrchestrationTests: XCTestCase {
         }
       )
     )
-    let firstConnect = Task { try await owner.connect(code: "ABC234") }
+    let firstConnect = Task { try await owner.connect(code: "ABC2") }
     try await driveConnection(session: sessions[0], connect: firstConnect)
     sessions[0].driver.emitState(.failed)
     await sessions[1].driver.waitUntilStarted()
@@ -1301,7 +1301,7 @@ final class SDKPublicConnectionOrchestrationTests: XCTestCase {
     let terminalStatus = await owner.connectionStatus
     XCTAssertNotNil(terminalStatus.lastError)
 
-    let nextConnect = Task { try await owner.connect(code: "ABC234") }
+    let nextConnect = Task { try await owner.connect(code: "ABC2") }
     await thirdAdmission.waitUntilReached()
     let discovering = await owner.connectionStatus
     XCTAssertEqual(discovering.state, .discovering)
@@ -1346,7 +1346,7 @@ final class SDKPublicConnectionOrchestrationTests: XCTestCase {
       sessions: sessions,
       configuration: try NearWireConfiguration(reconnectionPolicy: policy)
     )
-    let connect = Task { try await owner.connect(code: "ABC234") }
+    let connect = Task { try await owner.connect(code: "ABC2") }
     try await driveConnection(session: sessions[0], connect: connect)
 
     sessions[0].driver.emitState(.failed)
@@ -1377,7 +1377,7 @@ final class SDKPublicConnectionOrchestrationTests: XCTestCase {
         }
       )
     )
-    let connect = Task { try await owner.connect(code: "ABC234") }
+    let connect = Task { try await owner.connect(code: "ABC2") }
     try await driveConnection(session: session, connect: connect)
     let observed = Task {
       var iterator = owner.connectionStatuses.makeAsyncIterator()
@@ -1418,7 +1418,7 @@ final class SDKPublicConnectionOrchestrationTests: XCTestCase {
         }
       )
     )
-    let connect = Task { try await owner.connect(code: "ABC234") }
+    let connect = Task { try await owner.connect(code: "ABC2") }
     try await driveConnection(session: session, connect: connect)
     let observed = Task {
       var iterator = owner.connectionStatuses.makeAsyncIterator()
@@ -1653,7 +1653,7 @@ final class SDKPublicConnectionOrchestrationTests: XCTestCase {
 
   private static func discoveredViewer() -> DiscoveredViewer {
     let identity = NearWireBonjourServiceIdentity(
-      instanceName: "NearWire-ABC234",
+      instanceName: "NearWire-ABC2",
       type: NearWireBonjour.serviceType,
       domain: NearWireBonjour.localDomain,
       viewerDiscriminator: ViewerDiscoveryDiscriminator(
@@ -2170,7 +2170,7 @@ private final class SDKPublicSessionController: @unchecked Sendable {
       limits: plan.wireLimits
     )
     let identity = NearWireBonjourServiceIdentity(
-      instanceName: "NearWire-ABC234",
+      instanceName: "NearWire-ABC2",
       type: NearWireBonjour.serviceType,
       domain: NearWireBonjour.localDomain,
       viewerDiscriminator: ViewerDiscoveryDiscriminator(

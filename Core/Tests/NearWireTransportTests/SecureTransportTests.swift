@@ -134,7 +134,7 @@ final class SecureTransportTests: XCTestCase {
     let discriminator = ViewerDiscoveryDiscriminator(viewerInstallationID: viewerID)
     let serviceIdentity = try XCTUnwrap(
       NearWireBonjourServiceIdentity(
-        instanceName: "NearWire-ABCDEF",
+        instanceName: "NearWire-ABCD",
         type: NearWireBonjour.serviceType,
         domain: NearWireBonjour.localDomain,
         viewerDiscriminator: discriminator
@@ -143,7 +143,7 @@ final class SecureTransportTests: XCTestCase {
     let advertisement = SecureViewerServiceAdvertisement(identity: serviceIdentity)
     let service = advertisement.listenerService
 
-    XCTAssertEqual(service.name, "NearWire-ABCDEF")
+    XCTAssertEqual(service.name, "NearWire-ABCD")
     XCTAssertEqual(service.type, "_nearwire._tcp")
     XCTAssertEqual(service.domain, "local.")
     XCTAssertEqual(
@@ -153,7 +153,7 @@ final class SecureTransportTests: XCTestCase {
     XCTAssertTrue(
       advertisement.exactlyMatches(
         .service(
-          name: "NearWire-ABCDEF",
+          name: "NearWire-ABCD",
           type: "_nearwire._tcp",
           domain: "local.",
           interface: nil
@@ -163,7 +163,7 @@ final class SecureTransportTests: XCTestCase {
     XCTAssertFalse(
       advertisement.exactlyMatches(
         .service(
-          name: "NearWire-ABCDEF (2)",
+          name: "NearWire-ABCD (2)",
           type: "_nearwire._tcp",
           domain: "local.",
           interface: nil
