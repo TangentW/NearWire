@@ -55,6 +55,7 @@
 		10000000000000000000003E /* ViewerPerformanceDataContracts.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000042 /* ViewerPerformanceDataContracts.swift */; };
 		10000000000000000000003F /* ViewerSessionTransfer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000043 /* ViewerSessionTransfer.swift */; };
 		100000000000000000000040 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000044 /* Assets.xcassets */; };
+		100000000000000000000041 /* Credits.rtf in Resources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000045 /* Credits.rtf */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -119,6 +120,7 @@
 		200000000000000000000042 /* ViewerPerformanceDataContracts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewerPerformanceDataContracts.swift; sourceTree = "<group>"; };
 		200000000000000000000043 /* ViewerSessionTransfer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewerSessionTransfer.swift; sourceTree = "<group>"; };
 		200000000000000000000044 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		200000000000000000000045 /* Credits.rtf */ = {isa = PBXFileReference; lastKnownFileType = text.rtf; path = Credits.rtf; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -236,6 +238,7 @@
 				200000000000000000000006 /* PrivacyInfo.xcprivacy */,
 				200000000000000000000040 /* Localizable.xcstrings */,
 				200000000000000000000044 /* Assets.xcassets */,
+				200000000000000000000045 /* Credits.rtf */,
 			);
 			path = Resources;
 			sourceTree = "<group>";
@@ -368,6 +371,7 @@
 				100000000000000000000006 /* PrivacyInfo.xcprivacy in Resources */,
 				10000000000000000000003C /* Localizable.xcstrings in Resources */,
 				100000000000000000000040 /* Assets.xcassets in Resources */,
+				100000000000000000000041 /* Credits.rtf in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
