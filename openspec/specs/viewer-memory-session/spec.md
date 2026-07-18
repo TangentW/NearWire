@@ -8,12 +8,13 @@ Define the Viewer's single bounded process-lifetime Session, explicit Clear boun
 The production Viewer SHALL use one process-lifetime in-memory current Session as the only authority
 for received Event presentation, detail, filtering, diagnostics, and Performance input. It SHALL
 retain Events within 256 MiB of accounted Event data and 16 Device-session metadata lanes. Its
-bounded callback ingress SHALL admit at most 256 Events and 64 MiB of accounted Event data. It SHALL
-NOT apply an independent fixed Event-count retention policy. Internal slot capacity MAY be derived
-from the byte budget and the minimum fixed per-Event accounting overhead solely to represent every
-byte-valid Session with finite storage. It SHALL NOT create, open, query, recover, clean, or close a
-SQLite database or another local persistence engine for Sources or Sessions. A later process SHALL
-start empty unless the operator explicitly imports a supported JSON file.
+bounded callback ingress SHALL admit at most 2,048 Events and 64 MiB of accounted Event data. Both
+ingress bounds SHALL remain authoritative. It SHALL NOT apply an independent fixed Event-count
+retention policy. Internal slot capacity MAY be derived from the byte budget and the minimum fixed
+per-Event accounting overhead solely to represent every byte-valid Session with finite storage. It
+SHALL NOT create, open, query, recover, clean, or close a SQLite database or another local
+persistence engine for Sources or Sessions. A later process SHALL start empty unless the operator
+explicitly imports a supported JSON file.
 
 The maintained Viewer production and test targets SHALL contain no SQLite linkage or import,
 Objective-C SQLite bridge, SQL statement, schema/table definition, database connection or
@@ -29,32 +30,17 @@ They SHALL NOT mark every retained or successor Event as individually gapped. Sh
 reset, listener failure cleanup, or runtime replacement SHALL clear all received Event content and
 derived Performance values.
 
-#### Scenario: Maintained Viewer sources are scanned
+#### Scenario: Viewer receives a bounded high-rate burst
 
-- **WHEN** production, test, and Xcode project paths are scanned after cleanup
-- **THEN** they contain no SQLite import/link, SQL schema or table statement, database source group,
-  or database-only test suite
-- **AND** archived OpenSpec history is excluded from the maintained-code scan
+- **WHEN** at most 2,048 small observations remain within the 64-MiB callback-ingress budget
+- **THEN** callback admission can retain them for the serial projection drain
+- **AND** the retained Session's existing 256-MiB byte budget remains unchanged
 
-#### Scenario: Viewer receives Events during one launch
+#### Scenario: Callback ingress reaches either bound
 
-- **WHEN** Apps send Events within the memory bounds
-- **THEN** Timeline, Inspector, filters, Renderer, and Performance consume the same in-memory Session
-  snapshot
-- **AND** no database compatibility gateway, catalog request, or lifecycle work is constructed
-
-#### Scenario: More than 512 small Events fit the memory window
-
-- **WHEN** more than 512 retained Events remain within the 256-MiB accounted-byte budget
-- **THEN** Viewer retains them without count-triggered eviction
-- **AND** Timeline can present every matching retained Event
-
-#### Scenario: The memory window reaches its byte bound
-
-- **WHEN** another accepted Event would exceed 256 MiB of accounted Event data
-- **THEN** the oldest retained Events are evicted until the new Event fits and one Session-wide gap
-  warning is shown above Timeline content
-- **AND** the connection and newer Event admission continue without adding a Gap badge to every row
+- **WHEN** another observation would exceed 2,048 entries or 64 MiB
+- **THEN** ingress rejects it through the existing bounded loss path
+- **AND** no retained-Session, connection, sequence, queue, or rate bound is expanded implicitly
 
 #### Scenario: Viewer launches again
 

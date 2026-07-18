@@ -19,7 +19,7 @@ effective App uplink   = min(Viewer request, App maximum uplink)
 effective App downlink = min(Viewer request, App maximum downlink)
 ```
 
-The App sends an exact policy acceptance before the session becomes active. Zero pauses only business Events in that direction; Control traffic, TTL expiration, terminal input, and later policy offers remain live. Positive rates use a two-second bounded token bucket.
+The App sends an exact policy acceptance before the session becomes active. Zero pauses only business Events in that direction; Control traffic, TTL expiration, terminal input, and later policy offers remain live. Positive business-Event rates use a 0.25-second bounded token bucket.
 
 Later policy offers are ordered transactions. Event selection already in flight completes against its captured old-policy bucket. The acceptance is then encoded, both replacement bucket copies are prepared at one fresh bound-session-clock instant, the acceptance enters the secure mailbox, and both directions change together. A failure before mailbox admission preserves the old buckets.
 

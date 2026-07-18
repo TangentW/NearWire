@@ -206,8 +206,11 @@ final class ViewerDeviceSession: ViewerAdmissionSessionReceiving, @unchecked Sen
   CustomReflectable, CustomStringConvertible, CustomDebugStringConvertible
 {
   static let policyDeadlineNanoseconds: UInt64 = 10_000_000_000
-  static let queueMaximumCount = 5_000
-  static let queueMaximumBytes = 16 * 1_024 * 1_024
+  static let uplinkQueueMaximumCount = 10_000
+  static let uplinkQueueMaximumBytes = 64 * 1_024 * 1_024
+  static let downlinkQueueMaximumCount = 5_000
+  static let downlinkQueueMaximumBytes = 16 * 1_024 * 1_024
+  static let businessEventBurstDurationSeconds = 0.25
   static let controlReservedCount = 1
   static let controlReservedBytes = 64 * 1_024
   static let serviceSlice = 32
@@ -340,21 +343,26 @@ final class ViewerDeviceSession: ViewerAdmissionSessionReceiving, @unchecked Sen
       sessionEpoch: sessionEpoch,
       direction: .viewerToApp
     )
-    let limits = try EventQueueLimits(
-      maximumEventCount: Self.queueMaximumCount,
-      maximumTotalBytes: Self.queueMaximumBytes,
+    let uplinkLimits = try EventQueueLimits(
+      maximumEventCount: Self.uplinkQueueMaximumCount,
+      maximumTotalBytes: Self.uplinkQueueMaximumBytes,
       maximumSingleEventBytes: context.negotiation.maximumEventBytes
     )
-    uplinkQueue = BoundedEventQueue(limits: limits)
-    downlinkQueue = BoundedEventQueue(limits: limits)
+    let downlinkLimits = try EventQueueLimits(
+      maximumEventCount: Self.downlinkQueueMaximumCount,
+      maximumTotalBytes: Self.downlinkQueueMaximumBytes,
+      maximumSingleEventBytes: context.negotiation.maximumEventBytes
+    )
+    uplinkQueue = BoundedEventQueue(limits: uplinkLimits)
+    downlinkQueue = BoundedEventQueue(limits: downlinkLimits)
     batchScheduler = try EventBatchScheduler(
       limits: EventBatchLimits(
         maximumEventCount: min(Self.serviceSlice, codec.limits.maximumBatchEventCount),
         maximumAccountedBytes: max(context.negotiation.maximumEventBytes, 512 * 1_024),
         flushIntervalNanoseconds: 500_000_000,
-        queueLimits: limits
+        queueLimits: downlinkLimits
       ),
-      queueLimits: limits,
+      queueLimits: downlinkLimits,
       startNanoseconds: scheduler.now()
     )
     systemBucket = try EventTokenBucket(
@@ -680,9 +688,21 @@ final class ViewerDeviceSession: ViewerAdmissionSessionReceiving, @unchecked Sen
     )
     let uplinkRate = try EventRateLimit(eventsPerSecond: effective.appUplink)
     let downlinkRate = try EventRateLimit(eventsPerSecond: effective.appDownlink)
-    ingressContractBucket = try EventTokenBucket(rate: uplinkRate, startNanoseconds: receipt)
-    uplinkDeliveryBucket = try EventTokenBucket(rate: uplinkRate, startNanoseconds: receipt)
-    downlinkSendBucket = try EventTokenBucket(rate: downlinkRate, startNanoseconds: receipt)
+    ingressContractBucket = try EventTokenBucket(
+      rate: uplinkRate,
+      burstDurationSeconds: Self.businessEventBurstDurationSeconds,
+      startNanoseconds: receipt
+    )
+    uplinkDeliveryBucket = try EventTokenBucket(
+      rate: uplinkRate,
+      burstDurationSeconds: Self.businessEventBurstDurationSeconds,
+      startNanoseconds: receipt
+    )
+    downlinkSendBucket = try EventTokenBucket(
+      rate: downlinkRate,
+      burstDurationSeconds: Self.businessEventBurstDurationSeconds,
+      startNanoseconds: receipt
+    )
     let policyChanged = effectivePolicy != effective
     effectivePolicy = effective
     pendingOffer = nil
@@ -794,7 +814,7 @@ final class ViewerDeviceSession: ViewerAdmissionSessionReceiving, @unchecked Sen
       var plannedQueue = uplinkQueue
       let drained = try plannedQueue.dequeue(
         maximumCount: available,
-        maximumBytes: Self.queueMaximumBytes,
+        maximumBytes: Self.uplinkQueueMaximumBytes,
         nowOnQueueClockNanoseconds: now
       )
       guard !drained.events.isEmpty else {

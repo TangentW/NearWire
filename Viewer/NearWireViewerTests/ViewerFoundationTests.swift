@@ -5475,11 +5475,11 @@ final class ViewerFoundationTests: XCTestCase {
   }
 
   func testLiveProjectionUsesExpandedSessionCapacityWithoutAnIndependentRowCap() {
-    XCTAssertEqual(ViewerLiveProjectionLimits.ingressCount, 256)
+    XCTAssertEqual(ViewerLiveProjectionLimits.ingressCount, 2_048)
     XCTAssertEqual(ViewerLiveProjectionLimits.ingressBytes, 64 * 1_024 * 1_024)
     XCTAssertEqual(ViewerLiveProjectionLimits.retainedBytes, 256 * 1_024 * 1_024)
     XCTAssertEqual(ViewerLiveProjectionLimits.maximumByteDerivedEventSlots, 8_192)
-    XCTAssertEqual(ViewerLiveProjectionLimits.maximumPendingEventKeys, 8_448)
+    XCTAssertEqual(ViewerLiveProjectionLimits.maximumPendingEventKeys, 10_240)
     XCTAssertEqual(ViewerLiveEventEvaluator.maximumPredicateChecks, 16_384)
     XCTAssertEqual(
       ViewerMemorySessionTransferService.maximumFileBytes,
@@ -5647,30 +5647,35 @@ final class ViewerFoundationTests: XCTestCase {
       )
     }
 
-    for sequence in 0..<UInt64(ViewerLiveProjectionLimits.ingressCount) {
+    let ingressCapacity = min(
+      ViewerLiveProjectionLimits.ingressCount,
+      ViewerLiveProjectionLimits.ingressBytes
+        / (ViewerLiveProjectionLimits.fixedEntryOverheadBytes + 1)
+    )
+    for sequence in 0..<UInt64(ingressCapacity) {
       XCTAssertEqual(try window.offer(observation(sequence: sequence)), .accepted)
     }
     XCTAssertEqual(
-      try window.offer(observation(sequence: UInt64(ViewerLiveProjectionLimits.ingressCount))),
+      try window.offer(observation(sequence: UInt64(ingressCapacity))),
       .untracked
     )
     projectionGate.signal()
     window.waitForProjectionForTesting()
 
     var snapshot = window.snapshot()
-    XCTAssertEqual(snapshot.events.count, ViewerLiveProjectionLimits.ingressCount)
+    XCTAssertEqual(snapshot.events.count, ingressCapacity)
     XCTAssertEqual(snapshot.sessions.count, 1)
     XCTAssertEqual(snapshot.gaps.ingressOverflowCount, 1)
     XCTAssertTrue(snapshot.events.allSatisfy { !$0.hasGap })
     XCTAssertEqual(
       snapshot.accountedEventBytes,
-      ViewerLiveProjectionLimits.ingressCount
+      ingressCapacity
         * (ViewerLiveProjectionLimits.fixedEntryOverheadBytes + 1)
     )
     let initialDiagnostics = window.diagnosticsForTesting()
     XCTAssertEqual(
       initialDiagnostics.ingressOfferCount,
-      UInt64(ViewerLiveProjectionLimits.ingressCount + 1)
+      UInt64(ingressCapacity + 1)
     )
     XCTAssertEqual(initialDiagnostics.drainScheduleCount, 1)
     XCTAssertEqual(initialDiagnostics.dirtySuccessorCount, 1)
@@ -5678,23 +5683,11 @@ final class ViewerFoundationTests: XCTestCase {
     XCTAssertEqual(initialDiagnostics.maximumConcurrentDrainCount, 1)
     XCTAssertEqual(initialDiagnostics.snapshotPublicationCount, 1)
 
-    for sequence in UInt64(ViewerLiveProjectionLimits.ingressCount + 1)..<600 {
-      XCTAssertEqual(try window.offer(observation(sequence: sequence)), .accepted)
-      if sequence % 32 == 0 { window.waitForProjectionForTesting() }
-    }
-    window.waitForProjectionForTesting()
-    XCTAssertEqual(try window.offer(observation(sequence: 600)), .accepted)
-    window.waitForProjectionForTesting()
-
-    snapshot = window.snapshot()
-    XCTAssertEqual(snapshot.events.count, 600)
-    XCTAssertEqual(snapshot.gaps.windowOverflowCount, 0)
-    XCTAssertTrue(snapshot.events.contains { $0.observation.key.wireSequence == 0 })
-
     let quarterWindowEventBytes =
       ViewerLiveProjectionLimits.retainedBytes / 4
       - ViewerLiveProjectionLimits.fixedEntryOverheadBytes
-    for sequence in UInt64(601)...604 {
+    let firstLargeSequence = UInt64(ingressCapacity + 1)
+    for sequence in firstLargeSequence..<(firstLargeSequence + 4) {
       XCTAssertEqual(
         try window.offer(observation(sequence: sequence, bytes: quarterWindowEventBytes)),
         .accepted
@@ -5704,13 +5697,13 @@ final class ViewerFoundationTests: XCTestCase {
 
     snapshot = window.snapshot()
     XCTAssertEqual(snapshot.events.count, 4)
-    XCTAssertEqual(snapshot.gaps.windowOverflowCount, 600)
+    XCTAssertEqual(snapshot.gaps.windowOverflowCount, UInt64(ingressCapacity))
     XCTAssertTrue(snapshot.events.allSatisfy { !$0.hasGap })
-    XCTAssertEqual(window.lostHorizonCount, 601)
+    XCTAssertEqual(window.lostHorizonCount, UInt64(ingressCapacity + 1))
     XCTAssertEqual(snapshot.accountedEventBytes, ViewerLiveProjectionLimits.retainedBytes)
 
     let latest = try XCTUnwrap(
-      snapshot.events.first { $0.observation.key.wireSequence == 604 }
+      snapshot.events.first { $0.observation.key.wireSequence == firstLargeSequence + 3 }
     ).observation
     window.laterDisposition(key: latest.key, disposition: .consumerAccepted)
     window.dropsChanged(
@@ -5737,6 +5730,59 @@ final class ViewerFoundationTests: XCTestCase {
     XCTAssertTrue(window.isCleared)
     XCTAssertTrue(window.snapshot().events.isEmpty)
     XCTAssertTrue(window.snapshot().sessions.isEmpty)
+  }
+
+  func testLiveProjectionAdmitsFullMinimumAccountedIngressCapacity() async throws {
+    let runtimeLogicalID = UUID()
+    let context = try makeObservationContext(
+      connectionID: UUID(),
+      displayName: "Count-bounded projection"
+    )
+    let epoch = SessionEpoch()
+    let projectionQueue = DispatchQueue(label: "ViewerFoundationTests.live-projection-count")
+    let projectionGate = DispatchSemaphore(value: 0)
+    projectionQueue.async { projectionGate.wait() }
+    let window = ViewerLiveEventWindow(
+      runtimeLogicalID: runtimeLogicalID,
+      projectionQueue: projectionQueue
+    )
+
+    func observation(sequence: UInt64) throws -> ViewerCommittedEventObservation {
+      try ViewerCommittedEventObservation(
+        runtimeLogicalID: runtimeLogicalID,
+        context: context,
+        nickname: "Device",
+        envelope: makeObservationEnvelope(
+          content: .object(["sequence": .integer(Int64(sequence))]),
+          createdAt: Date(timeIntervalSince1970: 2_000),
+          sessionEpoch: epoch,
+          sequence: sequence
+        ),
+        viewerWallMilliseconds: 2_000_000,
+        viewerMonotonicNanoseconds: sequence,
+        deterministicEventBytes: 0,
+        initialDisposition: .buffered
+      )
+    }
+
+    for sequence in 0..<UInt64(ViewerLiveProjectionLimits.ingressCount) {
+      XCTAssertEqual(try window.offer(observation(sequence: sequence)), .accepted)
+    }
+    XCTAssertEqual(
+      try window.offer(observation(sequence: UInt64(ViewerLiveProjectionLimits.ingressCount))),
+      .untracked
+    )
+    projectionGate.signal()
+    window.waitForProjectionForTesting()
+
+    let snapshot = window.snapshot()
+    XCTAssertEqual(snapshot.events.count, ViewerLiveProjectionLimits.ingressCount)
+    XCTAssertEqual(
+      snapshot.accountedEventBytes,
+      ViewerLiveProjectionLimits.ingressBytes
+    )
+    XCTAssertEqual(snapshot.gaps.ingressOverflowCount, 1)
+    await window.runtimeEnded()
   }
 
   func testMemorySessionTransferRoundTripsCurrentEventsAndMetadata() async throws {
@@ -6037,7 +6083,12 @@ final class ViewerFoundationTests: XCTestCase {
       )
     )
 
-    let offeredCount = ViewerLiveProjectionLimits.ingressCount + 129
+    let ingressCapacity = min(
+      ViewerLiveProjectionLimits.ingressCount,
+      ViewerLiveProjectionLimits.ingressBytes
+        / (ViewerLiveProjectionLimits.fixedEntryOverheadBytes + 64)
+    )
+    let offeredCount = ingressCapacity + 129
     for sequence in 0..<UInt64(offeredCount) {
       let envelope = try makeObservationEnvelope(
         eventType: PerformanceSnapshotSchema.eventType(),
@@ -6060,7 +6111,7 @@ final class ViewerFoundationTests: XCTestCase {
       let outcome = window.offer(observation)
       XCTAssertEqual(
         outcome,
-        sequence < UInt64(ViewerLiveProjectionLimits.ingressCount) ? .accepted : .untracked
+        sequence < UInt64(ingressCapacity) ? .accepted : .untracked
       )
     }
     projectionGate.signal()
@@ -6071,16 +6122,18 @@ final class ViewerFoundationTests: XCTestCase {
     XCTAssertEqual(first.liveGeneration, 23)
     XCTAssertEqual(first.revision, 1)
     XCTAssertEqual(first.anchorMonotonicNanoseconds, anchor)
-    XCTAssertEqual(first.events.count, ViewerLiveProjectionLimits.ingressCount)
+    let emittedCount = min(ingressCapacity, ViewerPerformanceLimits.maximumEmittedEvents)
+    XCTAssertEqual(first.events.count, emittedCount)
     XCTAssertEqual(
       first.events.map(\.key.wireSequence),
-      Array(0..<UInt64(ViewerLiveProjectionLimits.ingressCount))
+      Array(0..<UInt64(emittedCount))
     )
     XCTAssertEqual(first.gaps.count, 1)
     XCTAssertEqual(first.gaps.first?.kind, .eventLoss)
     XCTAssertEqual(first.gaps.first?.applicability, .uncertain)
-    XCTAssertEqual(first.gaps.first?.count, 129)
-    XCTAssertEqual(first.applicableOrUncertainCount, 129)
+    let expectedLossCount = UInt64(offeredCount - emittedCount)
+    XCTAssertEqual(first.gaps.first?.count, expectedLossCount)
+    XCTAssertEqual(first.applicableOrUncertainCount, expectedLossCount)
     XCTAssertTrue(first.hasMoreApplicableGaps)
     XCTAssertLessThanOrEqual(first.accountedBytes, ViewerPerformanceLimits.maximumLiveSliceBytes)
     let firstCarrier = try XCTUnwrap(first.events.first)
@@ -6212,6 +6265,11 @@ final class ViewerFoundationTests: XCTestCase {
     XCTAssertEqual(gate.waitUntilEntered(), .success)
 
     let repeated = try observation(sequence: UInt64(maximumMinimumSizedEvents))
+    let callbackIngressCapacity = min(
+      ViewerLiveProjectionLimits.ingressCount,
+      ViewerLiveProjectionLimits.ingressBytes
+        / (ViewerLiveProjectionLimits.fixedEntryOverheadBytes + 1)
+    )
     let baselineFootprint = currentFoundationProcessPhysicalFootprintBytes()
     let callbackStart = DispatchTime.now().uptimeNanoseconds
     var acceptedCount = 0
@@ -6230,10 +6288,10 @@ final class ViewerFoundationTests: XCTestCase {
     let endingFootprint = currentFoundationProcessPhysicalFootprintBytes()
 
     XCTAssertEqual(acceptedCount, 1)
-    XCTAssertEqual(deferredCount, ViewerLiveProjectionLimits.ingressCount - 1)
+    XCTAssertEqual(deferredCount, callbackIngressCapacity - 1)
     XCTAssertEqual(
       untrackedCount,
-      100_000 - ViewerLiveProjectionLimits.ingressCount
+      100_000 - callbackIngressCapacity
     )
     XCTAssertEqual(unexpectedCount, 0)
 
@@ -6257,7 +6315,7 @@ final class ViewerFoundationTests: XCTestCase {
     XCTAssertEqual(snapshot.events.count, maximumMinimumSizedEvents)
     XCTAssertEqual(
       snapshot.gaps.ingressOverflowCount,
-      UInt64(100_000 - ViewerLiveProjectionLimits.ingressCount)
+      UInt64(100_000 - callbackIngressCapacity)
     )
     XCTAssertEqual(snapshot.gaps.windowOverflowCount, 1)
     XCTAssertEqual(

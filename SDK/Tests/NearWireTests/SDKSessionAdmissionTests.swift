@@ -33,7 +33,7 @@ final class SDKSessionAdmissionTests: XCTestCase {
     let handle = try await run.value
     let snapshot = await attachment.transportCore.snapshot()
     XCTAssertEqual(snapshot.state, .active)
-    XCTAssertEqual(snapshot.effectiveUplinkRate, 100)
+    XCTAssertEqual(snapshot.effectiveUplinkRate, 1_000)
     XCTAssertEqual(snapshot.effectiveDownlinkRate, 50)
     XCTAssertEqual(handle.description, "<redacted-active-event-pump-handle>")
 
@@ -43,7 +43,7 @@ final class SDKSessionAdmissionTests: XCTestCase {
       codec: fixture.sessionCodec,
       phase: .negotiatingPolicy
     )
-    XCTAssertEqual(accepted.policy.appUplinkEventsPerSecond, 100)
+    XCTAssertEqual(accepted.policy.appUplinkEventsPerSecond, 1_000)
     XCTAssertEqual(accepted.policy.appDownlinkEventsPerSecond, 50)
 
     let observer = handle.termination
@@ -104,14 +104,14 @@ final class SDKSessionAdmissionTests: XCTestCase {
     )
     await sessionWaitUntil { fixture.driver.sentData.count == 3 }
     let snapshot = await attachment.transportCore.snapshot()
-    XCTAssertEqual(snapshot.effectiveUplinkRate, 100)
+    XCTAssertEqual(snapshot.effectiveUplinkRate, 1_000)
     XCTAssertEqual(snapshot.effectiveDownlinkRate, 0)
     let accepted = try decodeAcceptedPolicy(
       fixture.driver.sentData[2],
       codec: fixture.sessionCodec,
       phase: .active
     )
-    XCTAssertEqual(accepted.policy.appUplinkEventsPerSecond, 100)
+    XCTAssertEqual(accepted.policy.appUplinkEventsPerSecond, 1_000)
     XCTAssertEqual(accepted.policy.appDownlinkEventsPerSecond, 0)
     handle.cancel()
   }
@@ -384,7 +384,7 @@ final class SDKSessionAdmissionTests: XCTestCase {
       try fixture.sessionCodec.encode(
         WireFlowPolicyOffer(
           policy: try WireFlowPolicy(
-            appUplinkEventsPerSecond: 1,
+            appUplinkEventsPerSecond: 8,
             appDownlinkEventsPerSecond: 1
           )
         ),
@@ -779,7 +779,7 @@ final class SDKSessionAdmissionTests: XCTestCase {
     XCTAssertEqual(committedDiagnostics.eventCount, 0)
     XCTAssertEqual(committedDiagnostics.statistics.transportAccepted, 1)
     XCTAssertEqual(awaitingResult.outboundNextSequence, 0)
-    XCTAssertEqual(awaitingResult.uplinkAvailableTokens, 2)
+    XCTAssertEqual(awaitingResult.uplinkAvailableTokens, 1)
     XCTAssertTrue(awaitingResult.hasOutboundDrain)
     XCTAssertGreaterThanOrEqual(fixture.driver.sentData.count, sentBeforePump + 2)
     XCTAssertTrue(committedDiagnostics.statistics.transportAccepted > 0)
@@ -1019,7 +1019,7 @@ final class SDKSessionAdmissionTests: XCTestCase {
     handle.cancel()
   }
 
-  func testPermanentCoreCapturesZeroFractionalOneAndBurstTokenAllowances() async throws {
+  func testPermanentCoreCapturesQuarterSecondBusinessTokenAllowances() async throws {
     struct Case {
       let name: String
       let rate: Double
@@ -1038,8 +1038,11 @@ final class SDKSessionAdmissionTests: XCTestCase {
         name: "one", rate: 0.5, expectedAccepted: 1, expectedRemainingTokens: 0,
         exercisesFractionalRefill: false),
       Case(
-        name: "burst", rate: 2, expectedAccepted: 4, expectedRemainingTokens: 0,
+        name: "quarter-second-burst", rate: 2, expectedAccepted: 1, expectedRemainingTokens: 0,
         exercisesFractionalRefill: false),
+      Case(
+        name: "default-high-rate", rate: 4_096, expectedAccepted: 5,
+        expectedRemainingTokens: 1_019, exercisesFractionalRefill: false),
     ]
 
     for value in cases {

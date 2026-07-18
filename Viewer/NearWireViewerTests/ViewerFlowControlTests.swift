@@ -190,6 +190,95 @@ final class ViewerFlowControlTests: XCTestCase {
     XCTAssertEqual(recovered.globalPolicy(), .default)
   }
 
+  func testLegacyDefaultPreferencesMigrateWhilePreservingStoredRecords() throws {
+    let suite = "ViewerFlowControlTests.legacy-default.\(UUID().uuidString)"
+    let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+    defaults.removePersistentDomain(forName: suite)
+    let route = ViewerLogicalRoute(
+      installationID: try EndpointID(rawValue: "legacy-installation"),
+      applicationIdentifier: "com.example.legacy"
+    )
+    let legacy: [String: Any] = [
+      "schemaVersion": 1,
+      "globalPolicy": ["appUplink": 20.0, "appDownlink": 10.0],
+      "bundlePolicies": [
+        "com.example.legacy": [
+          "value": ["appUplink": 12.0, "appDownlink": 8.0],
+          "touchedAt": 5.0,
+        ]
+      ],
+      "routeNicknames": [
+        route.storageKey: [
+          "value": "Legacy Phone",
+          "touchedAt": 6.0,
+        ]
+      ],
+    ]
+    defaults.set(
+      try JSONSerialization.data(withJSONObject: legacy),
+      forKey: ViewerDevicePreferences.storageKey
+    )
+
+    let preferences = ViewerDevicePreferences(defaults: defaults)
+
+    XCTAssertEqual(preferences.globalPolicy(), .default)
+    XCTAssertEqual(
+      preferences.requestedPolicy(for: route),
+      try ViewerRatePolicy(appUplink: 12, appDownlink: 8)
+    )
+    XCTAssertEqual(preferences.nickname(for: route), "Legacy Phone")
+    let persisted = try XCTUnwrap(defaults.data(forKey: ViewerDevicePreferences.storageKey))
+    let document = try XCTUnwrap(
+      try JSONSerialization.jsonObject(with: persisted) as? [String: Any]
+    )
+    XCTAssertEqual(document["schemaVersion"] as? Int, 2)
+    let reloaded = ViewerDevicePreferences(defaults: defaults)
+    XCTAssertEqual(reloaded.globalPolicy(), .default)
+    XCTAssertEqual(reloaded.nickname(for: route), "Legacy Phone")
+  }
+
+  func testLegacyCustomizedGlobalPolicyIsNotOverwrittenByMigration() throws {
+    let suite = "ViewerFlowControlTests.legacy-custom.\(UUID().uuidString)"
+    let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+    defaults.removePersistentDomain(forName: suite)
+    let legacy: [String: Any] = [
+      "schemaVersion": 1,
+      "globalPolicy": ["appUplink": 321.0, "appDownlink": 9.0],
+      "bundlePolicies": [:],
+      "routeNicknames": [:],
+    ]
+    defaults.set(
+      try JSONSerialization.data(withJSONObject: legacy),
+      forKey: ViewerDevicePreferences.storageKey
+    )
+
+    let preferences = ViewerDevicePreferences(defaults: defaults)
+
+    XCTAssertEqual(
+      preferences.globalPolicy(),
+      try ViewerRatePolicy(appUplink: 321, appDownlink: 9)
+    )
+  }
+
+  func testDirectionalQueueAndBusinessBurstDefaultsMatchHighRateUplink() throws {
+    XCTAssertEqual(ViewerDeviceSession.uplinkQueueMaximumCount, 10_000)
+    XCTAssertEqual(ViewerDeviceSession.uplinkQueueMaximumBytes, 64 * 1_024 * 1_024)
+    XCTAssertEqual(ViewerDeviceSession.downlinkQueueMaximumCount, 5_000)
+    XCTAssertEqual(ViewerDeviceSession.downlinkQueueMaximumBytes, 16 * 1_024 * 1_024)
+    XCTAssertEqual(ViewerDeviceSession.businessEventBurstDurationSeconds, 0.25)
+    var businessBucket = try EventTokenBucket(
+      rate: EventRateLimit(eventsPerSecond: ViewerRatePolicy.default.appUplink),
+      burstDurationSeconds: ViewerDeviceSession.businessEventBurstDurationSeconds,
+      startNanoseconds: 0
+    )
+    var systemBucket = try EventTokenBucket(
+      rate: EventRateLimit(eventsPerSecond: 64),
+      startNanoseconds: 0
+    )
+    XCTAssertEqual(try businessBucket.availableWholeTokens(atNanoseconds: 0), 1_024)
+    XCTAssertEqual(try systemBucket.availableWholeTokens(atNanoseconds: 0), 128)
+  }
+
   func testNicknameValidationIsBoundedAndRouteSpecific() throws {
     let suite = "ViewerFlowControlTests.\(UUID().uuidString)"
     let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
@@ -293,6 +382,11 @@ final class ViewerFlowControlTests: XCTestCase {
     )
     let negotiation = try WireNegotiator.negotiate(local: appHello, remote: viewerHello)
     let codec = try WireSessionCodec(negotiation: negotiation)
+    let offeredFrame = try decodeFrame(try XCTUnwrap(connection.channel.sentPayloads.last))
+    let offeredMessage = try codec.decode(frame: offeredFrame, phase: .negotiatingPolicy)
+    let offered = try codec.decode(WireFlowPolicyOffer.self, from: offeredMessage)
+    XCTAssertEqual(offered.policy.appUplinkEventsPerSecond, 4_096)
+    XCTAssertEqual(offered.policy.appDownlinkEventsPerSecond, 10)
     let accepted = try WireFlowPolicy(
       appUplinkEventsPerSecond: 7,
       appDownlinkEventsPerSecond: 4
@@ -533,7 +627,8 @@ final class ViewerFlowControlTests: XCTestCase {
     )
     waitUntil { delivered.value.count == 1 }
     liveWindow.waitForProjectionForTesting()
-    for _ in 0..<1_000 where !explorer.timelineRows.contains(where: {
+    for _ in 0..<1_000
+    where !explorer.timelineRows.contains(where: {
       $0.eventType == "replacement.fresh-event"
     }) {
       await Task.yield()

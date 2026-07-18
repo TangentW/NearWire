@@ -52,8 +52,8 @@ public struct NearWireEventOptions: Equatable, Sendable {
 
 public struct NearWireBufferConfiguration: Equatable, Sendable {
   public static let `default` = NearWireBufferConfiguration(
-    validatedMaximumEventCount: 1_000,
-    maximumBytes: 16 * 1_024 * 1_024,
+    validatedMaximumEventCount: 10_000,
+    maximumBytes: 64 * 1_024 * 1_024,
     maximumEventBytes: 4_259_840,
     defaultTTL: .default
   )
@@ -71,8 +71,8 @@ public struct NearWireBufferConfiguration: Equatable, Sendable {
   public let defaultTTL: NearWireEventTTL
 
   public init(
-    maximumEventCount: Int = 1_000,
-    maximumBytes: Int = 16 * 1_024 * 1_024,
+    maximumEventCount: Int = 10_000,
+    maximumBytes: Int = 64 * 1_024 * 1_024,
     maximumEventBytes: Int,
     defaultTTL: NearWireEventTTL = .default
   ) throws {
@@ -92,8 +92,8 @@ public struct NearWireBufferConfiguration: Equatable, Sendable {
 
   /// Creates a buffer whose implicit single-Event limit fits within the requested total.
   public init(
-    maximumEventCount: Int = 1_000,
-    maximumBytes: Int = 16 * 1_024 * 1_024,
+    maximumEventCount: Int = 10_000,
+    maximumBytes: Int = 64 * 1_024 * 1_024,
     defaultTTL: NearWireEventTTL = .default
   ) throws {
     try self.init(
@@ -119,6 +119,13 @@ public struct NearWireBufferConfiguration: Equatable, Sendable {
 
 /// App-local policy for bounded recovery after a previously active connection ends.
 public struct NearWireReconnectionPolicy: Equatable, Sendable {
+  /// The default bounded recovery policy for transient loss after an active connection.
+  public static let automatic = try! NearWireReconnectionPolicy(
+    maximumAttempts: 20,
+    initialDelay: .seconds(1),
+    maximumDelay: .seconds(30)
+  )
+
   public static let disabled = NearWireReconnectionPolicy(
     isEnabled: false,
     maximumAttempts: 0,
@@ -164,11 +171,11 @@ public struct NearWireReconnectionPolicy: Equatable, Sendable {
 
 public struct NearWireConfiguration: Equatable, Sendable {
   public static let `default` = NearWireConfiguration(
-    validatedMaximumUplinkEventsPerSecond: 100,
+    validatedMaximumUplinkEventsPerSecond: 4_096,
     maximumDownlinkEventsPerSecond: 50,
     buffer: .default,
     eventStreamBufferCapacity: 256,
-    reconnectionPolicy: .disabled
+    reconnectionPolicy: .automatic
   )
 
   /// The App-local cap. A session later uses the minimum of this and the Viewer request.
@@ -182,11 +189,11 @@ public struct NearWireConfiguration: Equatable, Sendable {
   public let reconnectionPolicy: NearWireReconnectionPolicy
 
   public init(
-    maximumUplinkEventsPerSecond: Double = 100,
+    maximumUplinkEventsPerSecond: Double = 4_096,
     maximumDownlinkEventsPerSecond: Double = 50,
     buffer: NearWireBufferConfiguration = .default,
     eventStreamBufferCapacity: Int = 256,
-    reconnectionPolicy: NearWireReconnectionPolicy = .disabled
+    reconnectionPolicy: NearWireReconnectionPolicy = .automatic
   ) throws {
     try SDKValidation.validateRate(
       maximumUplinkEventsPerSecond,

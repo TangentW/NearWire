@@ -3,7 +3,7 @@ import Foundation
 @_spi(NearWireInternal) import NearWireTransport
 
 enum ViewerLiveProjectionLimits {
-  static let ingressCount = 256
+  static let ingressCount = 2_048
   static let ingressBytes = 64 * 1_024 * 1_024
   static let retainedBytes = 256 * 1_024 * 1_024
   static let maximumSessions = 16

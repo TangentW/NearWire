@@ -18,12 +18,12 @@ retention worker, or database-only test target.
 
 The current Session retains at most:
 
-- 32 MiB of deterministically accounted Event data;
+- 256 MiB of deterministically accounted Event data;
 - 16 Device-session metadata lanes;
-- the existing bounded ingress queue and diagnostic counters.
+- a 2,048-Event, 64 MiB callback ingress and bounded diagnostic counters.
 
 There is no independent fixed Event-count limit. Small Events can therefore remain visible beyond
-512 rows while they fit the 32 MiB budget. Internal storage capacity is derived from that byte
+512 rows while they fit the 256 MiB budget. Internal storage capacity is derived from that byte
 budget and the fixed minimum per-Event accounting overhead. When the byte bound is reached, the
 oldest content is evicted so newer Events can continue to arrive. The Timeline reports the
 resulting memory-window gap. These limits are process memory limits, not retention settings, and
@@ -50,7 +50,7 @@ provider may synchronize or back up the file. Viewer presents this disclosure be
 ## JSON import
 
 Import is allowed only when no App is active, disconnecting, or awaiting approval. The importer
-requires the supported complete-Session schema and validates the file-size, 16-Device, 32-MiB
+requires the supported complete-Session schema and validates the file-size, 16-Device, 256-MiB
 accounted-data, and byte-derived carrier limits before replacement. A Session is not rejected
 merely because it contains more than 512 Events. Invalid, unsupported, cancelled, or oversized
 input leaves the existing memory Session unchanged.

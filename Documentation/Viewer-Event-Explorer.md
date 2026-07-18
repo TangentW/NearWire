@@ -60,7 +60,7 @@ this lifetime once at the Session level rather than repeating an `In memory` bad
 The normal `consumerAccepted` pipeline state is likewise omitted from Timeline rows; Event detail
 can still expose it as technical metadata. Closing the process clears received Session content.
 
-The memory window retains at most 32 MiB of accounted Event data and 16 Device-session metadata
+The memory window retains at most 256 MiB of accounted Event data and 16 Device-session metadata
 lanes. It has no independent fixed Event-count or Timeline row limit, so small Events can remain
 visible beyond the former 512-row ceiling. Older content is evicted only when the byte budget is
 needed by newer Events. Export contains only the snapshot still retained at the moment the

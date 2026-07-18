@@ -3,7 +3,7 @@ import Foundation
 @_spi(NearWireInternal) import NearWireFlowControl
 
 struct ViewerRatePolicy: Codable, Equatable, Sendable {
-  static let `default` = try! ViewerRatePolicy(appUplink: 20, appDownlink: 10)
+  static let `default` = try! ViewerRatePolicy(appUplink: 4_096, appDownlink: 10)
 
   let appUplink: Double
   let appDownlink: Double
@@ -74,6 +74,8 @@ final class ViewerDevicePreferences: @unchecked Sendable {
   static let maximumRouteNicknames = 256
   static let maximumStoredBytes = 2 * 1_024 * 1_024
   static let storageKey = "viewer.devicePreferences.v1"
+  private static let currentSchemaVersion = 2
+  private static let legacyDefaultPolicy = try! ViewerRatePolicy(appUplink: 20, appDownlink: 10)
 
   private let lock = NSLock()
   private let defaults: UserDefaults
@@ -150,7 +152,7 @@ final class ViewerDevicePreferences: @unchecked Sendable {
 
   private func repairAndPersistIfNeeded() {
     withLock {
-      guard state.schemaVersion == 1 else {
+      guard state.schemaVersion == Self.currentSchemaVersion else {
         state = Self.emptyState()
         persistLocked()
         return
@@ -189,19 +191,25 @@ final class ViewerDevicePreferences: @unchecked Sendable {
   private static func load(from defaults: UserDefaults) -> StoredState? {
     guard let data = defaults.data(forKey: storageKey),
       data.count <= maximumStoredBytes,
-      let decoded = try? JSONDecoder().decode(StoredState.self, from: data),
-      decoded.schemaVersion == 1,
+      var decoded = try? JSONDecoder().decode(StoredState.self, from: data),
+      decoded.schemaVersion == 1 || decoded.schemaVersion == currentSchemaVersion,
       (try? ViewerRatePolicy(
         appUplink: decoded.globalPolicy.appUplink,
         appDownlink: decoded.globalPolicy.appDownlink
       )) != nil
     else { return nil }
+    if decoded.schemaVersion == 1 {
+      decoded.schemaVersion = currentSchemaVersion
+      if decoded.globalPolicy == legacyDefaultPolicy {
+        decoded.globalPolicy = .default
+      }
+    }
     return decoded
   }
 
   private static func emptyState() -> StoredState {
     StoredState(
-      schemaVersion: 1,
+      schemaVersion: currentSchemaVersion,
       globalPolicy: .default,
       bundlePolicies: [:],
       routeNicknames: [:]

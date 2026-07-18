@@ -1,0 +1,7 @@
+Command: openspec validate raise-default-uplink-and-reconnect --strict
+Exit code: 0
+Result: Change 'raise-default-uplink-and-reconnect' is valid
+
+Note: The CLI subsequently reported that optional PostHog telemetry could not resolve
+edge.openspec.dev in the restricted environment. That post-command telemetry failure did
+not affect validation and the process exited successfully.

@@ -1215,8 +1215,16 @@ actor SDKSessionTransportCore {
     guard let now = liveOperations.clockNanoseconds() else {
       throw SDKSessionAdmissionError(.ownerUnavailable)
     }
-    let plannedUplink = try EventTokenBucket(rate: effective.appUplink, startNanoseconds: now)
-    let plannedDownlink = try EventTokenBucket(rate: effective.appDownlink, startNanoseconds: now)
+    let plannedUplink = try EventTokenBucket(
+      rate: effective.appUplink,
+      burstDurationSeconds: 0.25,
+      startNanoseconds: now
+    )
+    let plannedDownlink = try EventTokenBucket(
+      rate: effective.appDownlink,
+      burstDurationSeconds: 0.25,
+      startNanoseconds: now
+    )
     dependencies.beforeActivationCommit()
     guard pendingActivation.gate.closeRegisteredClaim() else {
       finish(with: SDKSessionAdmissionError(.cancelled))

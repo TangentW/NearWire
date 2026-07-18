@@ -459,6 +459,7 @@ final class SDKPublicConnectionOrchestrationTests: XCTestCase {
     let probe = SDKPublicConnectionProbe()
     let session = SDKPublicSessionController()
     let owner = NearWire(
+      configuration: try NearWireConfiguration(reconnectionPolicy: .disabled),
       dependencies: SDKTestClock().dependencies,
       connectionDependencies: SDKPublicConnectionDependencies(
         makeTransitionGate: { SDKSessionTransitionGate() },
@@ -858,6 +859,32 @@ final class SDKPublicConnectionOrchestrationTests: XCTestCase {
     let recoveredLifecycle = await owner.lifecycleSnapshot
     XCTAssertEqual(recoveredLifecycle.attemptsUsed, 1)
     XCTAssertEqual(second.driver.sentData.count, 2)
+  }
+
+  func testDefaultConfigurationSchedulesAutomaticRecoveryAfterOneSecond() async throws {
+    let probe = SDKPublicConnectionProbe()
+    let first = SDKPublicSessionController()
+    let second = SDKPublicSessionController()
+    let sleeps = SDKLockedCapture<Duration>()
+    let owner = makeSequenceOwner(
+      probe: probe,
+      sessions: [first, second],
+      sleep: { sleeps.append($0) }
+    )
+    let connect = Task { try await owner.connect(code: "ABC234") }
+    try await driveConnection(session: first, connect: connect)
+
+    first.driver.emitState(.failed)
+    await second.driver.waitUntilStarted()
+    try await driveAdmission(session: second)
+    try await sendInitialPolicy(session: second)
+    await waitUntilState(.connected, owner: owner)
+
+    XCTAssertEqual(sleeps.snapshot, [.seconds(1)])
+    XCTAssertEqual(probe.snapshot.claims, 2)
+    XCTAssertEqual(probe.snapshot.releases, 1)
+    let recoveredLifecycle = await owner.lifecycleSnapshot
+    XCTAssertEqual(recoveredLifecycle.attemptsUsed, 1)
   }
 
   func testIntentWideBudgetDoesNotResetAfterBriefRecoverySuccess() async throws {
@@ -1424,10 +1451,14 @@ final class SDKPublicConnectionOrchestrationTests: XCTestCase {
   private func makeSessionOwner(
     probe: SDKPublicConnectionProbe,
     session: SDKPublicSessionController,
+    configuration: NearWireConfiguration = try! NearWireConfiguration(
+      reconnectionPolicy: .disabled
+    ),
     hooks: SDKPublicConnectionHooks = .none,
     claimLease: (@Sendable () throws -> SDKPublicConnectionLease)? = nil
   ) -> NearWire {
     NearWire(
+      configuration: configuration,
       dependencies: SDKTestClock().dependencies,
       connectionDependencies: SDKPublicConnectionDependencies(
         makeTransitionGate: { SDKSessionTransitionGate() },

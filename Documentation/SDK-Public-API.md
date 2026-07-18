@@ -10,7 +10,7 @@ The optional `NearWireUI` product adds only an injected connection panel and a v
 
 The optional `NearWirePerformance` product adds an explicit-lifecycle monitor that sends internal aggregate snapshots through the same queue. It does not expose snapshot models, create a connection, or start during construction. See [SDK-Performance.md](SDK-Performance.md).
 
-The supported facade includes explicit connect and disconnect, host-controlled suspension and resumption, default-disabled bounded recovery, and latest-value lifecycle status. Construction does not start connection work early, and NearWire never subscribes to application lifecycle or reachability notifications.
+The supported facade includes explicit connect and disconnect, host-controlled suspension and resumption, default-enabled bounded recovery with an explicit opt-out, and latest-value lifecycle status. Construction does not start connection work early, and NearWire never subscribes to application lifecycle or reachability notifications.
 
 ## Create an Instance
 
@@ -20,28 +20,24 @@ Each application chooses when to create and retain its own instance:
 import NearWire
 
 let buffer = try NearWireBufferConfiguration(
-  maximumEventCount: 1_000,
-  maximumBytes: 16 * 1_024 * 1_024,
+  maximumEventCount: 10_000,
+  maximumBytes: 64 * 1_024 * 1_024,
   maximumEventBytes: 4_259_840,
   defaultTTL: .seconds(60)
 )
 
 let configuration = try NearWireConfiguration(
-  maximumUplinkEventsPerSecond: 100,
+  maximumUplinkEventsPerSecond: 4_096,
   maximumDownlinkEventsPerSecond: 50,
   buffer: buffer,
   eventStreamBufferCapacity: 256,
-  reconnectionPolicy: try NearWireReconnectionPolicy(
-    maximumAttempts: 5,
-    initialDelay: .seconds(1),
-    maximumDelay: .seconds(8)
-  )
+  reconnectionPolicy: .automatic
 )
 
 let nearWire = NearWire(configuration: configuration)
 ```
 
-The two directional rates are App-local maximums. An active session computes each effective rate as the minimum of this value and the Viewer request. Zero pauses that business-event direction. The default App-local caps are 100 uplink and 50 downlink events per second.
+The two directional rates are App-local maximums. An active session computes each effective rate as the minimum of this value and the Viewer request. Zero pauses that business-event direction. The default App-local caps are 4,096 uplink and 50 downlink Events per second. Business-Event token buckets use a 0.25-second burst window, so this rate is a bounded throughput target rather than a promise that every rolling one-second interval contains exactly 4,096 Events.
 
 Initialization allocates small in-memory state only. It does not start discovery, request local-network permission, open a connection, claim process connection ownership, launch a task or timer, access disk or Keychain, or create UI. Multiple idle instances are independent. An explicit connection attempt claims one process-wide connection lease; a second instance receives a typed contention error rather than replacing the owner.
 
@@ -102,7 +98,7 @@ Repository-owned optional modules use a separate narrow `NearWireBuiltins` SPI t
 
 App-to-Viewer events can be sent while the instance is idle and later while discovery, connection, or reconnection is in progress. They remain only in memory.
 
-Defaults are 1,000 pending events, 16 MiB total accounted bytes, 4,259,840 bytes for one internally
+Defaults are 10,000 pending Events, 64 MiB total accounted bytes, 4,259,840 bytes for one internally
 encoded Event, and a 60-second TTL. Canonical deterministic JSON content is fixed at a maximum of
 1 MiB. The larger single-Event accounting value covers the worst-case internal tagged draft plus
 fixed fields; it is not reserved for smaller Events. Encrypted frame size is validated independently
@@ -127,6 +123,13 @@ print(cleared.removedEventIDs)
 Statistics distinguish application `submitted` calls, events synchronously `transportAccepted`, and actual `transportAdmissionRejected` attempts. Offering a candidate does not manufacture another submission, and stopping before admission counts only the one candidate actually rejected. Expiration, coalescing, overflow, explicit clearing, and route-affinity drops have separate counters.
 
 The buffer is not a database. It does not survive process exit or `shutdown()`, and it provides no acknowledgement, retry, at-least-once, or exactly-once guarantee.
+
+## Automatic Recovery
+
+The default `.automatic` policy makes at most 20 recovery attempts after transient loss of a
+previously active connection. Delay starts at one second, doubles between attempts, and is capped at
+30 seconds. Recovery remains bounded and does not make offline Event delivery lossless. Apps that
+want host-only retry control can construct `NearWireConfiguration(reconnectionPolicy: .disabled)`.
 
 ## Receive and Decode Events
 
@@ -205,9 +208,9 @@ await nearWire.resumeConnection()
 
 `disconnect()` is idempotent, clears intent and status error, and returns only after the exact current route has invoked its process-lease release boundary. Cancelling the caller Task does not make this nonthrowing operation return early. If terminal evidence cannot be obtained, cleanup remains fail-closed and the call deliberately cannot claim completion.
 
-Suspension preserves an already-active intent, cancels current work, and waits for the same cleanup boundary. Resumption is nonblocking and creates a fresh route only after suspended cleanup, or after a transient disconnected result under the disabled automatic policy. Resume is inert while connected, during initial connect, or during any recovery campaign. NearWire does not import UIKit for observation, request background execution, or infer multi-scene policy.
+Suspension preserves an already-active intent, cancels current work, and waits for the same cleanup boundary. Resumption is nonblocking and creates a fresh route only after suspended cleanup, or after a transient disconnected result when automatic recovery is explicitly disabled. Resume is inert while connected, during initial connect, or during any recovery campaign. NearWire does not import UIKit for observation, request background execution, or infer multi-scene policy.
 
-Automatic recovery is disabled by default. An enabled policy accepts 1 through 20 total recovery attempts for one connection intent. Delays double from the configured initial value to its cap. A brief successful replacement does not reset the total budget, preventing an indefinitely flapping Viewer from creating unbounded discovery and TLS work. Explicit resume resets the campaign. Each replacement performs fresh Bonjour discovery, TLS, admission, session epoch, sequence state, and Event pump setup.
+Automatic recovery is enabled by default through `.automatic`, which permits 20 total recovery attempts for one connection intent with a one-second initial delay and a 30-second cap. Delays double from the configured initial value to its cap. A brief successful replacement does not reset the total budget, preventing an indefinitely flapping Viewer from creating unbounded discovery and TLS work. Explicit resume resets the campaign. Each replacement performs fresh Bonjour discovery, TLS, admission, session epoch, sequence state, and Event pump setup. Apps that want host-only retry control can explicitly use `.disabled`.
 
 Only Events still in the offline queue may cross a replacement. Bytes already accepted by an old secure transport are never reconstructed or requeued, and replies bound to an old route are dropped by route-affinity validation.
 

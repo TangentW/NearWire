@@ -58,7 +58,7 @@ Implemented: the supported `connect(code:)` path composes device-local installat
 
 Implement explicit disconnect, transient-failure classification, bounded reconnection, background transitions, exact-handle release, route replacement, and final public connection-state behavior.
 
-Implemented: async disconnect waits for exact cleanup; host-controlled suspend/resume adds no automatic platform observer; default-disabled recovery uses a total intent-wide budget, fresh routes, safe phase-aware failure classification, and latest-value connection status.
+Implemented: async disconnect waits for exact cleanup; host-controlled suspend/resume adds no automatic platform observer; default-enabled recovery uses a total intent-wide budget, fresh routes, safe phase-aware failure classification, explicit opt-out, and latest-value connection status.
 
 ### 14. `sdk-ui`
 

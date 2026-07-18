@@ -20,7 +20,7 @@ After cleanup, safe presentation state may remain in memory for 30 seconds. Rece
 
 ## Policy Negotiation
 
-Viewer defaults request 20 App-to-Viewer Events per second and 10 Viewer-to-App Events per second. The requested policy resolves from a connection-local override, then a bounded Bundle-ID preference, then the global default. The App may accept lower values; those conservative values become effective. Requested and effective values are deliberately shown separately.
+Viewer defaults request 4,096 App-to-Viewer Events per second and 10 Viewer-to-App Events per second. The requested policy resolves from a connection-local override, then a bounded Bundle-ID preference, then the global default. The App may accept lower values; those conservative values become effective. Requested and effective values are deliberately shown separately. A schema-version-1 store with the exact former `20/10` global default migrates to `4,096/10`; customized global and Bundle-ID policies remain unchanged.
 
 Each initial or dynamic offer has one non-resetting 10-second monotonic deadline that starts before encoding and mailbox admission. Only one offer is in flight. Edits during an offer keep the latest desired pair. An acceptance without a pending offer, an escalation, a phase violation, a deadline sample at or after the deadline, or a mailbox failure closes only that session.
 
@@ -28,13 +28,13 @@ Zero pauses the corresponding business Event direction. Control traffic, cleanup
 
 ## Queues, Rates, and Atomicity
 
-Each session has an App-to-Viewer delivery queue and a Viewer-to-App send queue. Each queue is limited to 5,000 Events and 16 MiB, with the negotiated maximum Event size as its single-entry limit. Downlink submission supports normal delivery and caller-keyed keep-latest replacement.
+Each session has an App-to-Viewer delivery queue limited to 10,000 Events and 64 MiB, plus a Viewer-to-App send queue limited to 5,000 Events and 16 MiB. Both use the negotiated maximum Event size as their single-entry limit. Downlink submission supports normal delivery and caller-keyed keep-latest replacement.
 
 Inbound frames validate lane, codec, source, target, epoch, direction, contiguous sequence, Event limits, and receiver-local TTL before committing. A structurally valid record consumes its sequence even when local expiry or overflow discards it. An invalid frame advances no sequence.
 
 Downlink preparation uses value copies of the queue, token bucket, batch scheduler, and sequence counter. The Viewer commits those planned values only after one complete Event or Event-batch frame enters the secure mailbox. A rejected mailbox admission therefore removes no queue entry and advances no sequence. Event traffic reserves one Control mailbox slot and 64 KiB of Control capacity.
 
-Viewer-to-App sends use a 500 ms batch interval. Independent token buckets enforce effective uplink delivery, downlink send, and the cooperative App uplink contract. Business work is bounded per service turn, while Control and the protocol-defined drop summary bypass business Event tokens. Idle sessions have no repeating timer.
+Viewer-to-App sends use a 500 ms batch interval. Independent token buckets with a 0.25-second business-Event burst window enforce effective uplink delivery, downlink send, and the cooperative App uplink contract. Business work is bounded per service turn, while Control and the protocol-defined drop summary bypass business Event tokens. The separate system-message bucket retains its 64-per-second, 128-message burst behavior. Idle sessions have no repeating timer.
 
 Each service turn is partitioned into four 32-record slices for the two expiry queues, local delivery, and downlink batching, so aggregate scheduled business work is at most 128 records before yielding. Active receive handles at most 64 frames, 512 Event records, and 32 system messages per continuation turn. System traffic is limited to 64 messages per second with a burst of 128. The configured input budget defaults to 2 MiB, expands only when a negotiated maximum Event frame plus two receive chunks requires it, and never exceeds the 19 MiB hard maximum.
 

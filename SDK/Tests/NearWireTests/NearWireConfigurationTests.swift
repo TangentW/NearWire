@@ -5,15 +5,26 @@ import XCTest
 final class NearWireConfigurationTests: XCTestCase {
   func testDefaultConfigurationIsBoundedAndDirectional() {
     let configuration = NearWireConfiguration.default
-    XCTAssertEqual(configuration.maximumUplinkEventsPerSecond, 100)
+    XCTAssertEqual(configuration.maximumUplinkEventsPerSecond, 4_096)
     XCTAssertEqual(configuration.maximumDownlinkEventsPerSecond, 50)
-    XCTAssertEqual(configuration.buffer.maximumEventCount, 1_000)
-    XCTAssertEqual(configuration.buffer.maximumBytes, 16 * 1_024 * 1_024)
+    XCTAssertEqual(configuration.buffer.maximumEventCount, 10_000)
+    XCTAssertEqual(configuration.buffer.maximumBytes, 64 * 1_024 * 1_024)
     XCTAssertEqual(configuration.buffer.maximumEventBytes, 4_259_840)
     XCTAssertEqual(configuration.buffer.defaultTTL, .seconds(60))
     XCTAssertEqual(configuration.eventStreamBufferCapacity, 256)
-    XCTAssertEqual(configuration.reconnectionPolicy, .disabled)
-    XCTAssertFalse(configuration.reconnectionPolicy.isEnabled)
+    XCTAssertEqual(configuration.reconnectionPolicy, .automatic)
+    XCTAssertTrue(configuration.reconnectionPolicy.isEnabled)
+    XCTAssertEqual(configuration.reconnectionPolicy.maximumAttempts, 20)
+    XCTAssertEqual(configuration.reconnectionPolicy.initialDelay, .seconds(1))
+    XCTAssertEqual(configuration.reconnectionPolicy.maximumDelay, .seconds(30))
+  }
+
+  func testDefaultInitializerMatchesStaticDefaultAndRecoveryCanBeDisabled() throws {
+    XCTAssertEqual(try NearWireConfiguration(), .default)
+    XCTAssertEqual(
+      try NearWireConfiguration(reconnectionPolicy: .disabled).reconnectionPolicy,
+      .disabled
+    )
   }
 
   func testReconnectionPolicyValidatesExactBoundsAndDelayCapping() throws {
