@@ -1,0 +1,10 @@
+Command:
+
+openspec validate fix-viewer-session-transfer-dialogs --strict
+
+Result:
+
+Exit 0. Change 'fix-viewer-session-transfer-dialogs' is valid.
+
+The optional PostHog telemetry flush could not resolve edge.openspec.dev after validation completed;
+it did not change the successful exit status.

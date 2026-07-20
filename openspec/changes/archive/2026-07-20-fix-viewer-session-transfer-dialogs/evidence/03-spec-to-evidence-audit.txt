@@ -1,0 +1,24 @@
+Spec-to-evidence audit
+Date: 2026-07-21 (Asia/Shanghai)
+
+Result: PASS
+
+- Disclosure dismissal precedes native panel presentation:
+  implemented in ViewerDevicesStrip and covered by source review plus running Viewer validation.
+- Export cancellation preserves its immutable prepared snapshot:
+  covered by testExportDestinationCancellationKeepsPreparedSnapshotAndRetryCommits and running
+  Viewer validation.
+- Import cancellation returns selection state to idle:
+  implemented through the coordinator nil-completion path and covered by the exactly-once
+  coordinator test plus maintained workspace-operation tests.
+- Window loss and panel replacement resolve exactly once:
+  covered by testFilePanelCoordinatorClosesReplacedAndWindowDetachedRequestsExactlyOnce.
+- Sandboxed user-selected read/write access:
+  covered by the running-process entitlement test and signed Release App inspection.
+- Bounded, memory-backed JSON transfer behavior:
+  covered by the maintained round-trip, invalid-file, over-capacity, cancellation, and
+  greater-than-legacy-count tests.
+- Architecture/API, correctness/testing, and security/performance/documentation:
+  Round 1 findings were resolved; all three fresh Round 2 reviews reported no actionable findings.
+
+No requirement or scenario in the active delta lacks implementation and evidence.

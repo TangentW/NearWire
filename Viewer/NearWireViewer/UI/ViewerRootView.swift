@@ -1,3 +1,4 @@
+import AppKit
 import Combine
 import SwiftUI
 import UniformTypeIdentifiers
@@ -21,6 +22,174 @@ enum ViewerWorkspaceLayout {
   static let inspectorIdealWidth: CGFloat = minimumWindowWidth * inspectorDefaultWidthFraction
   static let analysisMinimumHeight: CGFloat = 260
   static let composerExpandedHeight: CGFloat = 240
+}
+
+@MainActor
+final class ViewerSessionFilePanelCoordinator: ObservableObject {
+  typealias PanelCancellation = @MainActor () -> Void
+  typealias PanelCompletion = @MainActor @Sendable (URL?) -> Void
+  typealias PanelPresenter = @MainActor (
+    NSSavePanel,
+    NSWindow,
+    @escaping @MainActor (NSApplication.ModalResponse) -> Void
+  ) -> Void
+
+  private weak var window: NSWindow?
+  private let panelPresenter: PanelPresenter
+  private var activeRequest: ViewerSessionFilePanelRequest?
+
+  init(
+    panelPresenter: @escaping PanelPresenter = { panel, window, completion in
+      panel.beginSheetModal(for: window, completionHandler: completion)
+    }
+  ) {
+    self.panelPresenter = panelPresenter
+  }
+
+  var hasActivePanel: Bool { activeRequest != nil }
+
+  func attach(window newWindow: NSWindow?) {
+    guard window !== newWindow else { return }
+    cancelActivePanel()
+    window = newWindow
+  }
+
+  func presentImportPanel(
+    title: String,
+    message: String,
+    completion: @escaping PanelCompletion
+  ) -> PanelCancellation {
+    guard let window else {
+      completion(nil)
+      return {}
+    }
+    cancelActivePanel()
+    let panel = NSOpenPanel()
+    panel.allowedContentTypes = [.json]
+    panel.allowsMultipleSelection = false
+    panel.canChooseDirectories = false
+    panel.canChooseFiles = true
+    panel.resolvesAliases = true
+    panel.title = title
+    panel.message = message
+    return present(panel, in: window, completion: completion)
+  }
+
+  func presentExportPanel(
+    title: String,
+    message: String,
+    completion: @escaping PanelCompletion
+  ) -> PanelCancellation {
+    guard let window else {
+      completion(nil)
+      return {}
+    }
+    cancelActivePanel()
+    let panel = NSSavePanel()
+    panel.allowedContentTypes = [.json]
+    panel.canCreateDirectories = true
+    panel.isExtensionHidden = false
+    panel.nameFieldStringValue = "NearWire-Export.json"
+    panel.title = title
+    panel.message = message
+    return present(panel, in: window, completion: completion)
+  }
+
+  func cancelActivePanel() {
+    guard let request = activeRequest else { return }
+    cancel(request)
+  }
+
+  private func present(
+    _ panel: NSSavePanel,
+    in window: NSWindow,
+    completion: @escaping PanelCompletion
+  ) -> PanelCancellation {
+    cancelActivePanel()
+    let request = ViewerSessionFilePanelRequest(panel: panel, completion: completion)
+    activeRequest = request
+    panelPresenter(panel, window) { [weak self, request] response in
+      self?.clearActiveRequest(ifIdenticalTo: request)
+      request.resolve(response == .OK ? request.panel.url : nil)
+    }
+    return { [weak self, request] in
+      if let self {
+        self.cancel(request)
+      } else {
+        request.panel.cancel(nil)
+        request.resolve(nil)
+      }
+    }
+  }
+
+  private func cancel(_ request: ViewerSessionFilePanelRequest) {
+    clearActiveRequest(ifIdenticalTo: request)
+    request.panel.cancel(nil)
+    request.resolve(nil)
+  }
+
+  private func clearActiveRequest(ifIdenticalTo request: ViewerSessionFilePanelRequest) {
+    guard activeRequest === request else { return }
+    activeRequest = nil
+  }
+}
+
+@MainActor
+private final class ViewerSessionFilePanelRequest {
+  let panel: NSSavePanel
+  private var completion: ViewerSessionFilePanelCoordinator.PanelCompletion?
+
+  init(
+    panel: NSSavePanel,
+    completion: @escaping ViewerSessionFilePanelCoordinator.PanelCompletion
+  ) {
+    self.panel = panel
+    self.completion = completion
+  }
+
+  func resolve(_ destination: URL?) {
+    guard let completion else { return }
+    self.completion = nil
+    completion(destination)
+  }
+}
+
+final class ViewerWindowAnchorView: NSView {
+  var windowDidChange: @MainActor (NSWindow?) -> Void
+
+  init(windowDidChange: @escaping @MainActor (NSWindow?) -> Void) {
+    self.windowDidChange = windowDidChange
+    super.init(frame: .zero)
+  }
+
+  @available(*, unavailable)
+  required init?(coder: NSCoder) { nil }
+
+  override func viewDidMoveToWindow() {
+    super.viewDidMoveToWindow()
+    windowDidChange(window)
+  }
+
+  override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
+struct ViewerWindowAnchor: NSViewRepresentable {
+  let windowDidChange: @MainActor (NSWindow?) -> Void
+
+  func makeNSView(context: Context) -> ViewerWindowAnchorView {
+    ViewerWindowAnchorView(windowDidChange: windowDidChange)
+  }
+
+  func updateNSView(_ nsView: ViewerWindowAnchorView, context: Context) {
+    nsView.windowDidChange = windowDidChange
+    if nsView.window != nil {
+      windowDidChange(nsView.window)
+    }
+  }
+
+  static func dismantleNSView(_ nsView: ViewerWindowAnchorView, coordinator: ()) {
+    nsView.windowDidChange(nil)
+  }
 }
 
 enum ViewerWorkspaceLayoutProbeKind: Equatable, Sendable {
@@ -837,16 +1006,46 @@ private final class ViewerDevicesPresentationObserver: ObservableObject {
   }
 }
 
+private struct ViewerImportDisclosureSheet: View {
+  let cancel: () -> Void
+  let chooseSource: () -> Void
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 18) {
+      Label("Replace Current Session?", systemImage: "exclamationmark.triangle")
+        .font(.title2.weight(.semibold))
+      Divider()
+      Text(
+        "Import replaces all Events and offline Device rows in the current Session. Only a complete NearWire JSON export is accepted. Imported Devices remain offline and receive new local identities."
+      )
+      .fixedSize(horizontal: false, vertical: true)
+      Spacer(minLength: 0)
+      Divider()
+      HStack {
+        Spacer()
+        Button("Cancel", role: .cancel, action: cancel)
+        Button("Choose JSON", role: .destructive, action: chooseSource)
+          .buttonStyle(.borderedProminent)
+      }
+    }
+    .padding(22)
+    .interactiveDismissDisabled()
+  }
+}
+
 private struct ViewerDevicesStrip: View {
   @Environment(\.locale) private var locale
   let application: ViewerApplicationModel
   let explorer: ViewerEventExplorerController
   @StateObject private var presentation: ViewerDevicesPresentationObserver
+  @StateObject private var filePanels = ViewerSessionFilePanelCoordinator()
   @Binding var focusedDeviceID: UUID?
   @Binding var showsDeviceDetails: Bool
   @State private var showsExport = false
   @State private var showsImportDisclosure = false
-  @State private var showsImportPicker = false
+  @State private var presentsExportPanelAfterDisclosure = false
+  @State private var presentsImportPanelAfterDisclosure = false
+  @State private var isActive = true
 
   init(
     application: ViewerApplicationModel,
@@ -958,30 +1157,53 @@ private struct ViewerDevicesStrip: View {
     .padding(.horizontal, 14)
     .padding(.vertical, 10)
     .accessibilityIdentifier("nearwire.workspace.devices")
-    .sheet(isPresented: $showsExport) {
-      ViewerExportSheet(explorer: explorer, isPresented: $showsExport)
+    .background(
+      ViewerWindowAnchor { window in
+        filePanels.attach(window: window)
+      }
+    )
+    .sheet(
+      isPresented: $showsExport,
+      onDismiss: presentExportPanelIfRequested
+    ) {
+      ViewerExportSheet(
+        explorer: explorer,
+        isPresented: $showsExport,
+        requestDestination: {
+          presentsExportPanelAfterDisclosure = true
+          showsExport = false
+        }
+      )
         .frame(minWidth: 540, minHeight: 480)
     }
-    .alert("Replace Current Session?", isPresented: $showsImportDisclosure) {
-      Button("Cancel", role: .cancel) {
-        explorer.cancelCurrentSessionImportSelection()
-      }
-      Button("Choose JSON", role: .destructive) { showsImportPicker = true }
-    } message: {
-      Text(
-        "Import replaces all Events and offline Device rows in the current Session. Only a complete NearWire JSON export is accepted. Imported Devices remain offline and receive new local identities."
+    .sheet(
+      isPresented: $showsImportDisclosure,
+      onDismiss: presentImportPanelIfRequested
+    ) {
+      ViewerImportDisclosureSheet(
+        cancel: {
+          explorer.cancelCurrentSessionImportSelection()
+          showsImportDisclosure = false
+        },
+        chooseSource: {
+          presentsImportPanelAfterDisclosure = true
+          showsImportDisclosure = false
+        }
       )
+      .frame(minWidth: 520, minHeight: 300)
     }
-    .fileImporter(
-      isPresented: $showsImportPicker,
-      allowedContentTypes: [.json],
-      allowsMultipleSelection: false
-    ) { result in
-      guard case .success(let urls) = result, let url = urls.first else {
+    .onAppear { isActive = true }
+    .onDisappear {
+      isActive = false
+      filePanels.cancelActivePanel()
+      if presentsImportPanelAfterDisclosure {
+        presentsImportPanelAfterDisclosure = false
         explorer.cancelCurrentSessionImportSelection()
-        return
       }
-      explorer.importCurrentSession(from: url)
+      if presentsExportPanelAfterDisclosure {
+        presentsExportPanelAfterDisclosure = false
+        explorer.cancelExport()
+      }
     }
     .onChange(of: presentation.value.deviceRows) { rows in
       if let focusedDeviceID, !rows.contains(where: { $0.id == focusedDeviceID }) {
@@ -993,6 +1215,43 @@ private struct ViewerDevicesStrip: View {
 
   private var importIsDisabled: Bool {
     !presentation.value.canImport
+  }
+
+  private func presentImportPanelIfRequested() {
+    guard presentsImportPanelAfterDisclosure else { return }
+    presentsImportPanelAfterDisclosure = false
+    _ = filePanels.presentImportPanel(
+      title: ViewerLocalization.string("Import Session", locale: locale),
+      message: ViewerLocalization.string(
+        "Choose a complete Session export to import",
+        locale: locale
+      )
+    ) { source in
+      guard let source else {
+        explorer.cancelCurrentSessionImportSelection()
+        return
+      }
+      explorer.importCurrentSession(from: source)
+    }
+  }
+
+  private func presentExportPanelIfRequested() {
+    guard presentsExportPanelAfterDisclosure else { return }
+    presentsExportPanelAfterDisclosure = false
+    explorer.beginExportDestinationSelection { completion in
+      filePanels.presentExportPanel(
+        title: ViewerLocalization.string("Export NearWire JSON", locale: locale),
+        message: ViewerLocalization.string(
+          "Choose a destination for the unencrypted JSON export.",
+          locale: locale
+        )
+      ) { destination in
+        completion(destination)
+        if isActive {
+          showsExport = true
+        }
+      }
+    }
   }
 
   private func deviceButton(_ row: ViewerDevicesPresentation.DeviceChip) -> some View {

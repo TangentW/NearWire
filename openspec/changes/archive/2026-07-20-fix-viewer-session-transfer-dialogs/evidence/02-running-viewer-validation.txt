@@ -1,0 +1,19 @@
+Running Viewer validation
+Date: 2026-07-21 (Asia/Shanghai)
+
+Build exercised:
+
+/tmp/NearWire-entitlement-tests/Build/Products/Debug/NearWire.app
+
+Observed results:
+
+- Viewer presented the export disclosure from the active workspace window.
+- Choosing a destination dismissed the disclosure and presented the native save panel without the
+  prior missing-entitlement error.
+- Cancelling the save panel restored the prepared export disclosure.
+- A subsequent export to `/tmp/NearWire-Session-Validation-0.1.1.json` completed successfully.
+- The operator then reported that their own check passed and requested no further UI inspection.
+
+The focused automated coverage separately proves JSON export retry/commit and panel replacement or
+window-detachment cancellation, while the maintained memory transfer tests cover the complete
+Session JSON round trip and bounded import path.

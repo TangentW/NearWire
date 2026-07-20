@@ -1119,7 +1119,7 @@ private struct ViewerTimelineViewportSizePreferenceKey: PreferenceKey {
 struct ViewerExportSheet: View {
   @ObservedObject var explorer: ViewerEventExplorerController
   @Binding var isPresented: Bool
-  @Environment(\.locale) private var locale
+  let requestDestination: () -> Void
 
   var body: some View {
     VStack(alignment: .leading, spacing: 18) {
@@ -1145,7 +1145,7 @@ struct ViewerExportSheet: View {
       }
     }
     .padding(22)
-    .interactiveDismissDisabled(isExporting)
+    .interactiveDismissDisabled()
   }
 
   @ViewBuilder
@@ -1236,7 +1236,7 @@ struct ViewerExportSheet: View {
         .foregroundStyle(.secondary)
       HStack {
         Spacer()
-        Button("I Understand — Choose Destination") { chooseDestination() }
+        Button("I Understand — Choose Destination", action: requestDestination)
           .buttonStyle(.borderedProminent)
       }
     }
@@ -1262,28 +1262,6 @@ struct ViewerExportSheet: View {
   private var closeTitle: String {
     if case .completed = explorer.exportState { return "Done" }
     return "Close"
-  }
-
-  private func chooseDestination() {
-    explorer.beginExportDestinationSelection { completion in
-      let panel = NSSavePanel()
-      panel.allowedContentTypes = [.json]
-      panel.canCreateDirectories = true
-      panel.isExtensionHidden = false
-      panel.nameFieldStringValue = "NearWire-Export.json"
-      panel.title = ViewerLocalization.string("Export NearWire JSON", locale: locale)
-      panel.message = ViewerLocalization.string(
-        "Choose a destination for the unencrypted JSON export.",
-        locale: locale
-      )
-      panel.begin { response in
-        completion(response == .OK ? panel.url : nil)
-      }
-      return {
-        panel.cancel(nil)
-        panel.orderOut(nil)
-      }
-    }
   }
 
   private func close() {

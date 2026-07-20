@@ -1,0 +1,102 @@
+Sandbox entitlement validation
+Date: 2026-07-21 (Asia/Shanghai)
+
+1. Strict OpenSpec validation
+
+Command:
+
+DO_NOT_TRACK=1 openspec validate fix-viewer-session-transfer-dialogs --strict --no-interactive
+
+Exit status: 0
+
+Output:
+
+Change 'fix-viewer-session-transfer-dialogs' is valid
+
+2. Focused Viewer tests with consistent local ad-hoc signing
+
+Command:
+
+xcodebuild -project Viewer/NearWireViewer.xcodeproj -scheme NearWireViewer \
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath /tmp/NearWire-entitlement-tests \
+  CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM= test \
+  -only-testing:NearWireViewerTests/ViewerFoundationTests/testRunningApplicationHasRequiredFoundationNetworkEntitlements \
+  -only-testing:NearWireViewerTests/ViewerWorkspacePresentationTests/testExportDestinationCancellationKeepsPreparedSnapshotAndRetryCommits \
+  -only-testing:NearWireViewerTests/ViewerWorkspacePresentationTests/testFilePanelCoordinatorClosesReplacedAndWindowDetachedRequestsExactlyOnce
+
+Exit status: 0
+
+Result:
+
+Executed 3 tests, with 0 failures (0 unexpected):
+
+- the running App carries the required sandbox entitlement;
+- export destination cancellation preserves the prepared snapshot and retry commits;
+- replaced and window-detached panel requests resolve exactly once.
+
+** TEST SUCCEEDED **
+
+3. Universal Release build with consistent local ad-hoc signing
+
+Command:
+
+xcodebuild -project Viewer/NearWireViewer.xcodeproj -scheme NearWireViewer \
+  -configuration Release -destination 'generic/platform=macOS' \
+  -derivedDataPath /tmp/NearWire-release-entitlement-verify \
+  CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM= build
+
+Exit status: 0
+
+Result:
+
+** BUILD SUCCEEDED **
+
+4. Signed Release App entitlement and architecture inspection
+
+Commands:
+
+codesign -d --entitlements :- \
+  /tmp/NearWire-release-entitlement-verify/Build/Products/Release/NearWire.app
+
+codesign --verify --deep --strict --verbose=2 \
+  /tmp/NearWire-release-entitlement-verify/Build/Products/Release/NearWire.app
+
+lipo -archs \
+  /tmp/NearWire-release-entitlement-verify/Build/Products/Release/NearWire.app/Contents/MacOS/NearWire
+
+Exit status: 0
+
+Entitlements:
+
+com.apple.security.app-sandbox = true
+com.apple.security.files.user-selected.read-write = true
+com.apple.security.network.client = true
+com.apple.security.network.server = true
+
+Signature verification:
+
+NearWire.app: valid on disk
+NearWire.app: satisfies its Designated Requirement
+
+Architectures:
+
+x86_64 arm64
+
+5. Maintained Viewer test run
+
+Command:
+
+xcodebuild -project Viewer/NearWireViewer.xcodeproj -scheme NearWireViewer \
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath /tmp/NearWire-entitlement-tests \
+  CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM= test
+
+Result:
+
+The run emitted 0 failures through all 43 ViewerFlowControlTests and all 109
+ViewerFoundationTests (one stable-signer packaging probe skipped by design). The following
+ViewerLocalizationTests also passed before Xcode stopped producing test output. The run was
+manually interrupted after 161 seconds while Xcode reported that it was waiting for its test
+worker to finish. This environment limitation does not replace the successful focused tests or
+Release build above.

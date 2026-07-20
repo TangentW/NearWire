@@ -525,6 +525,114 @@ final class ViewerWorkspacePresentationTests: XCTestCase {
 
     _ = controller.sealAndClear()
   }
+
+  @MainActor
+  func testExportDestinationCancellationKeepsPreparedSnapshotAndRetryCommits() async throws {
+    let runtimeLogicalID = UUID()
+    let liveWindow = ViewerLiveEventWindow(runtimeLogicalID: runtimeLogicalID)
+    let transfer = ViewerMemorySessionTransferService(liveWindow: liveWindow)
+    let controller = ViewerEventExplorerController(
+      inputs: ViewerRuntimeExplorerInputs(
+        runtimeLogicalID: runtimeLogicalID,
+        liveObservations: liveWindow,
+        workspaceControl: transfer,
+        memorySessionTransfer: transfer
+      )
+    )
+    controller.prepareExport(.completeSession)
+    for _ in 0..<200 {
+      if case .disclosure = controller.exportState { break }
+      try await Task.sleep(nanoseconds: 1_000_000)
+    }
+    guard case .disclosure(.completeSession, eventCount: 0, _) = controller.exportState else {
+      return XCTFail("Expected one prepared complete-Session export")
+    }
+
+    let destination = LockedExportDestinationCompletionBox()
+    controller.beginExportDestinationSelection { completion in
+      destination.store(completion)
+      return {}
+    }
+    destination.resolve(nil)
+    for _ in 0..<4 { await Task.yield() }
+    guard case .disclosure(.completeSession, eventCount: 0, _) = controller.exportState else {
+      return XCTFail("Cancelling destination selection must preserve the prepared export")
+    }
+
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "NearWire-Export-Destination-\(UUID().uuidString)",
+      isDirectory: true
+    )
+    try FileManager.default.createDirectory(
+      at: directory,
+      withIntermediateDirectories: false
+    )
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let exportURL = directory.appendingPathComponent("session.json")
+    controller.beginExportDestinationSelection { completion in
+      destination.store(completion)
+      return {}
+    }
+    destination.resolve(exportURL)
+    for _ in 0..<200 {
+      if case .completed = controller.exportState { break }
+      try await Task.sleep(nanoseconds: 1_000_000)
+    }
+    XCTAssertEqual(controller.exportState, .completed(eventCount: 0))
+    let document = try XCTUnwrap(
+      JSONSerialization.jsonObject(with: Data(contentsOf: exportURL)) as? [String: Any]
+    )
+    XCTAssertEqual(document["scope"] as? String, "completeSession")
+    XCTAssertEqual((document["events"] as? [Any])?.count, 0)
+
+    await controller.sealAndClear().value
+  }
+
+  @MainActor
+  func testFilePanelCoordinatorClosesReplacedAndWindowDetachedRequestsExactlyOnce() {
+    let presenter = ViewerSessionFilePanelPresenterProbe()
+    let coordinator = ViewerSessionFilePanelCoordinator { panel, window, completion in
+      presenter.record(panel: panel, window: window, completion: completion)
+    }
+    let window = NSWindow(
+      contentRect: NSRect(x: 0, y: 0, width: 640, height: 480),
+      styleMask: [.titled],
+      backing: .buffered,
+      defer: false
+    )
+    coordinator.attach(window: window)
+
+    let firstCompletion = ViewerSessionFilePanelCompletionProbe()
+    let cancelFirst = coordinator.presentExportPanel(title: "Export", message: "Choose") {
+      firstCompletion.record($0)
+    }
+    XCTAssertTrue(coordinator.hasActivePanel)
+    XCTAssertEqual(presenter.count, 1)
+
+    let secondCompletion = ViewerSessionFilePanelCompletionProbe()
+    let cancelSecond = coordinator.presentImportPanel(title: "Import", message: "Choose") {
+      secondCompletion.record($0)
+    }
+    XCTAssertEqual(firstCompletion.count, 1)
+    XCTAssertEqual(firstCompletion.nilCount, 1)
+    XCTAssertTrue(coordinator.hasActivePanel)
+    XCTAssertEqual(presenter.count, 2)
+
+    presenter.complete(at: 0, response: .OK)
+    XCTAssertEqual(firstCompletion.count, 1)
+    XCTAssertTrue(coordinator.hasActivePanel)
+
+    coordinator.attach(window: nil)
+    XCTAssertEqual(secondCompletion.count, 1)
+    XCTAssertEqual(secondCompletion.nilCount, 1)
+    XCTAssertFalse(coordinator.hasActivePanel)
+
+    presenter.complete(at: 1, response: .OK)
+    cancelFirst()
+    cancelSecond()
+    XCTAssertEqual(firstCompletion.count, 1)
+    XCTAssertEqual(secondCompletion.count, 1)
+  }
 }
 
 final class ViewerPerformanceInventoryTests: XCTestCase {
@@ -3013,6 +3121,14 @@ final class ViewerFoundationTests: XCTestCase {
       SecTaskCopyValueForEntitlement(
         task,
         "com.apple.security.app-sandbox" as CFString,
+        nil
+      ) as? Bool,
+      true
+    )
+    XCTAssertEqual(
+      SecTaskCopyValueForEntitlement(
+        task,
+        "com.apple.security.files.user-selected.read-write" as CFString,
         nil
       ) as? Bool,
       true
@@ -9277,6 +9393,61 @@ private final class LockedTestCounter: @unchecked Sendable {
     lock.lock()
     defer { lock.unlock() }
     return storage
+  }
+}
+
+private final class LockedExportDestinationCompletionBox: @unchecked Sendable {
+  private let lock = NSLock()
+  private var completion: (@Sendable (URL?) -> Void)?
+
+  func store(_ completion: @escaping @Sendable (URL?) -> Void) {
+    lock.lock()
+    self.completion = completion
+    lock.unlock()
+  }
+
+  func resolve(_ destination: URL?) {
+    lock.lock()
+    let completion = completion
+    self.completion = nil
+    lock.unlock()
+    completion?(destination)
+  }
+}
+
+@MainActor
+private final class ViewerSessionFilePanelPresenterProbe {
+  private struct Presentation {
+    let panel: NSSavePanel
+    let window: NSWindow
+    let completion: @MainActor (NSApplication.ModalResponse) -> Void
+  }
+
+  private var presentations: [Presentation] = []
+
+  var count: Int { presentations.count }
+
+  func record(
+    panel: NSSavePanel,
+    window: NSWindow,
+    completion: @escaping @MainActor (NSApplication.ModalResponse) -> Void
+  ) {
+    presentations.append(Presentation(panel: panel, window: window, completion: completion))
+  }
+
+  func complete(at index: Int, response: NSApplication.ModalResponse) {
+    presentations[index].completion(response)
+  }
+}
+
+@MainActor
+private final class ViewerSessionFilePanelCompletionProbe {
+  private(set) var count = 0
+  private(set) var nilCount = 0
+
+  func record(_ destination: URL?) {
+    count += 1
+    if destination == nil { nilCount += 1 }
   }
 }
 
